@@ -28,11 +28,7 @@ app.post("/chat", async (req, res) => {
       if (!finished) {
         finished = true;
         console.log("TIMEOUT");
-        try {
-          ws.close();
-        } catch (e) {
-          console.error("WS CLOSE ERROR:", e);
-        }
+        try { ws.close(); } catch {}
         return res.json({ reply: finalReply.trim() || "Geen antwoord van Emma" });
       }
     }, 20000);
@@ -40,23 +36,17 @@ app.post("/chat", async (req, res) => {
     ws.on("open", () => {
       console.log("WS OPEN");
 
-      ws.send(
-        JSON.stringify({
-          type: "conversation_initiation_client_data",
-          conversation_config_override: {
-            conversation: {
-              text_only: true
-            }
-          }
-        })
-      );
+      ws.send(JSON.stringify({
+        type: "conversation_initiation_client_data",
+        conversation_config_override: {
+          conversation: { text_only: true }
+        }
+      }));
 
-      ws.send(
-        JSON.stringify({
-          type: "user_message",
-          text: message
-        })
-      );
+      ws.send(JSON.stringify({
+        type: "user_message",
+        text: message
+      }));
     });
 
     ws.on("message", (raw) => {
@@ -66,36 +56,28 @@ app.post("/chat", async (req, res) => {
       let data;
       try {
         data = JSON.parse(text);
-      } catch (e) {
-        console.log("JSON PARSE ERROR");
+      } catch {
         return;
       }
 
-      if (
-        data.type === "agent_response" &&
-        data.agent_response_event?.agent_response
-      ) {
-        finalReply += data.agent_response_event.agent_response;
+      // BELANGRIJK: hier zit de fix
+      if (data.type === "agent_response" && data.agent_response_event?.agent_response && !finished) {
+        finished = true;
+        clearTimeout(timeout);
+        try { ws.close(); } catch {}
+        console.log("FINAL REPLY:", data.agent_response_event.agent_response);
+        return res.json({
+          reply: data.agent_response_event.agent_response
+        });
       }
 
+      // fallback (mocht agent_response ooit ontbreken)
       if (data.type === "agent_chat_response_part") {
         const partType = data.text_response_part?.type;
         const partText = data.text_response_part?.text || "";
 
         if (partType === "start" || partType === "delta") {
           finalReply += partText;
-        }
-
-        if (partType === "end" && !finished) {
-          finished = true;
-          clearTimeout(timeout);
-          try {
-            ws.close();
-          } catch (e) {
-            console.error("WS CLOSE ERROR:", e);
-          }
-          console.log("FINAL REPLY:", finalReply.trim());
-          return res.json({ reply: finalReply.trim() || "Geen antwoord van Emma" });
         }
       }
     });
