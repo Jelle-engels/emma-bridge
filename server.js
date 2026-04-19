@@ -28,10 +28,14 @@ app.post("/chat", async (req, res) => {
       if (!finished) {
         finished = true;
         console.log("TIMEOUT");
-        ws.close();
-        res.json({ reply: "Geen antwoord van Emma" });
+        try {
+          ws.close();
+        } catch (e) {
+          console.error("WS CLOSE ERROR:", e);
+        }
+        return res.json({ reply: finalReply.trim() || "Geen antwoord van Emma" });
       }
-    }, 15000);
+    }, 20000);
 
     ws.on("open", () => {
       console.log("WS OPEN");
@@ -67,19 +71,32 @@ app.post("/chat", async (req, res) => {
         return;
       }
 
-      if (data.type === "agent_response" && data.agent_response_event?.agent_response) {
-        finalReply = data.agent_response_event.agent_response;
+      if (
+        data.type === "agent_response" &&
+        data.agent_response_event?.agent_response
+      ) {
+        finalReply += data.agent_response_event.agent_response;
       }
 
-      if (data.type === "agent_chat_response_part" && data.text_response_part?.text) {
-        finalReply += data.text_response_part.text;
-      }
+      if (data.type === "agent_chat_response_part") {
+        const partType = data.text_response_part?.type;
+        const partText = data.text_response_part?.text || "";
 
-      if (!finished && finalReply.trim()) {
-        finished = true;
-        clearTimeout(timeout);
-        ws.close();
-        res.json({ reply: finalReply.trim() });
+        if (partType === "start" || partType === "delta") {
+          finalReply += partText;
+        }
+
+        if (partType === "end" && !finished) {
+          finished = true;
+          clearTimeout(timeout);
+          try {
+            ws.close();
+          } catch (e) {
+            console.error("WS CLOSE ERROR:", e);
+          }
+          console.log("FINAL REPLY:", finalReply.trim());
+          return res.json({ reply: finalReply.trim() || "Geen antwoord van Emma" });
+        }
       }
     });
 
@@ -87,7 +104,8 @@ app.post("/chat", async (req, res) => {
       console.error("WS ERROR:", err);
       if (!finished) {
         finished = true;
-        res.json({ reply: "Fout bij verbinden met Emma" });
+        clearTimeout(timeout);
+        return res.json({ reply: finalReply.trim() || "Fout bij verbinden met Emma" });
       }
     });
 
@@ -98,7 +116,7 @@ app.post("/chat", async (req, res) => {
     console.error("SERVER ERROR:", error);
     if (!finished) {
       finished = true;
-      res.json({ reply: "Serverfout" });
+      return res.json({ reply: finalReply.trim() || "Serverfout" });
     }
   }
 });
