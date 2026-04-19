@@ -7,6 +7,11 @@ app.use(express.json());
 app.post("/chat", async (req, res) => {
   const { user_id, message } = req.body;
 
+  console.log("CHAT HIT");
+  console.log("BODY:", req.body);
+  console.log("USER ID:", user_id);
+  console.log("MESSAGE:", message);
+
   try {
     const response = await fetch("https://api.elevenlabs.io/v1/chat/completions", {
       method: "POST",
@@ -25,16 +30,27 @@ app.post("/chat", async (req, res) => {
       })
     });
 
-    const data = await response.json();
+    console.log("ELEVENLABS STATUS:", response.status);
+
+    const rawText = await response.text();
+    console.log("ELEVENLABS RAW RESPONSE:", rawText);
+
+    let data = {};
+    try {
+      data = JSON.parse(rawText);
+    } catch (parseError) {
+      console.error("JSON PARSE ERROR:", parseError);
+    }
 
     const reply =
       data?.choices?.[0]?.message?.content ||
       "Geen antwoord van Emma";
 
-    res.json({ reply });
+    console.log("FINAL REPLY:", reply);
 
+    res.json({ reply });
   } catch (error) {
-    console.error(error);
+    console.error("SERVER ERROR:", error);
     res.json({ reply: "Fout bij ophalen antwoord" });
   }
 });
