@@ -40,7 +40,8 @@ app.post("/chat", async (req, res) => {
         type: "conversation_initiation_client_data",
         conversation_config_override: {
           conversation: { text_only: true }
-        }
+        },
+        user_id: String(user_id)
       }));
 
       ws.send(JSON.stringify({
@@ -60,8 +61,11 @@ app.post("/chat", async (req, res) => {
         return;
       }
 
-      // BELANGRIJK: hier zit de fix
-      if (data.type === "agent_response" && data.agent_response_event?.agent_response && !finished) {
+      if (
+        data.type === "agent_response" &&
+        data.agent_response_event?.agent_response &&
+        !finished
+      ) {
         finished = true;
         clearTimeout(timeout);
         try { ws.close(); } catch {}
@@ -71,7 +75,6 @@ app.post("/chat", async (req, res) => {
         });
       }
 
-      // fallback (mocht agent_response ooit ontbreken)
       if (data.type === "agent_chat_response_part") {
         const partType = data.text_response_part?.type;
         const partText = data.text_response_part?.text || "";
@@ -87,7 +90,9 @@ app.post("/chat", async (req, res) => {
       if (!finished) {
         finished = true;
         clearTimeout(timeout);
-        return res.json({ reply: finalReply.trim() || "Fout bij verbinden met Emma" });
+        return res.json({
+          reply: finalReply.trim() || "Fout bij verbinden met Emma"
+        });
       }
     });
 
