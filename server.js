@@ -63,6 +63,121 @@ function buildResponse({
   };
 }
 
+function normalizeCompare(text) {
+  return cleanText(text)
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function hasDigits(text) {
+  return /\d/.test(cleanText(text));
+}
+
+function preferMoreSpecific(oldValue, newValue) {
+  const oldClean = cleanText(oldValue);
+  const newClean = cleanText(newValue);
+
+  if (!newClean) return "";
+  if (!oldClean) return newClean;
+
+  const oldNorm = normalizeCompare(oldClean);
+  const newNorm = normalizeCompare(newClean);
+
+  if (!newNorm || newNorm === oldNorm) return "";
+
+  if (newNorm.includes(oldNorm) && newNorm.length > oldNorm.length) {
+    return newClean;
+  }
+
+  if (oldNorm.includes(newNorm)) {
+    return "";
+  }
+
+  const oldHasDigits = hasDigits(oldClean);
+  const newHasDigits = hasDigits(newClean);
+
+  if (newHasDigits && !oldHasDigits) {
+    return newClean;
+  }
+
+  if (newClean.length > oldClean.length + 10) {
+    return newClean;
+  }
+
+  return newClean;
+}
+
+function extractGoal(message) {
+  const text = cleanText(message);
+  const lower = text.toLowerCase();
+
+  const patterns = [
+    /ik wil\s+([\s\S]{0,80})/i,
+    /mijn doel is\s+([\s\S]{0,80})/i,
+    /doel is\s+([\s\S]{0,80})/i,
+  ];
+
+  for (const p of patterns) {
+    const match = text.match(p);
+    if (match?.[1]) {
+      const val = cleanText(match[1]);
+      return val.length > 120 ? val.slice(0, 120) : val;
+    }
+  }
+
+  const signals = [
+    "afvallen",
+    "gewicht verliezen",
+    "kilo kwijt",
+    "gezonder leven",
+    "meer energie",
+  ];
+
+  for (const s of signals) {
+    if (lower.includes(s)) return text.slice(0, 120);
+  }
+
+  return "";
+}
+
+function extractObjections(message) {
+  const lower = cleanText(message).toLowerCase();
+
+  const list = [];
+
+  if (lower.includes("prijs") || lower.includes("duur")) {
+    list.push("prijs");
+  }
+  if (lower.includes("geen tijd") || lower.includes("druk")) {
+    list.push("tijdgebrek");
+  }
+  if (lower.includes("twijfel")) {
+    list.push("twijfel");
+  }
+  if (lower.includes("eerder geprobeerd")) {
+    list.push("eerder geprobeerd zonder resultaat");
+  }
+
+  return list.join("; ");
+}
+
+function extractSummary(message, goalUpdate, objectionsUpdate) {
+  const parts = [];
+
+  if (goalUpdate) parts.push(`doel: ${goalUpdate}`);
+  if (objectionsUpdate) parts.push(`bezwaar: ${objectionsUpdate}`);
+
+  const text = cleanText(message);
+
+  if (/\d/.test(text)) {
+    parts.push(text.slice(0, 80));
+  }
+
+  return parts.join("; ");
+}
+
 app.post("/chat", async (req, res) => {
   const {
     user_id,
@@ -75,43 +190,35 @@ app.post("/chat", async (req, res) => {
     recent_messages = [],
   } = req.body ?? {};
 
-  console.log("CHAT HIT");
-  console.log("BODY:", req.body);
-
   const agentId = process.env.ELEVENLABS_AGENT_ID;
-
-  if (!agentId) {
-    return res.json(
-      buildResponse({
-        reply: "Agent ID ontbreekt",
-      })
-    );
-  }
 
   const normalizedUserId = cleanText(user_id);
   const normalizedMessage = cleanText(message);
-  const normalizedCustomerStatus = cleanText(customer_status);
-  const normalizedCurrentPhase = cleanText(current_phase);
+
   const normalizedGoal = cleanText(goal);
   const normalizedObjections = cleanText(objections);
   const normalizedLastSummary = cleanText(last_summary);
+
   const normalizedRecentMessages = normalizeRecentMessages(recent_messages);
 
+  if (!agentId) {
+    return res.json(buildResponse({ reply: "Agent ID ontbreekt" }));
+  }
+
   if (!normalizedUserId) {
-    return res.json(
-      buildResponse({
-        reply: "user_id ontbreekt",
-      })
-    );
+    return res.json(buildResponse({ reply: "user_id ontbreekt" }));
   }
 
   if (!normalizedMessage) {
-    return res.json(
-      buildResponse({
-        reply: "message ontbreekt",
-      })
-    );
+    return res.json(buildResponse({ reply: "message ontbreekt" }));
   }
+
+  const proposedGoal = extractGoal(normalizedMessage);
+  const proposedObjections = extractObjections(normalizedMessage);
+
+  const goalUpdate = preferMoreSpecific(normalizedGoal, proposedGoal);
+  const objectionsUpdate = preferMoreSpecific(normalizedObjections, proposedObjections);
+  const summaryUpdate = extractSummary(normalizedMessage, goalUpdate, objectionsUpdate);
 
   const wsUrl = `wss://api.elevenlabs.io/v1/convai/conversation?agent_id=${agentId}`;
 
@@ -129,121 +236,92 @@ app.post("/chat", async (req, res) => {
 
     const timeout = setTimeout(() => {
       if (!finished) {
-        console.log("TIMEOUT");
-        try {
-          ws.close();
-        } catch {}
+        ws.close();
         return safeRespond(
           buildResponse({
-            reply: finalReply.trim() || "Geen antwoord van Emma",
+            reply: finalReply || "Geen antwoord",
+            goal_update: goalUpdate,
+            objections_update: objectionsUpdate,
+            last_summary_update: summaryUpdate,
           })
         );
       }
     }, 20000);
 
     ws.on("open", () => {
-      console.log("WS OPEN");
+      ws.send(JSON.stringify({
+        type: "conversation_initiation_client_data",
+        user_id: normalizedUserId,
+      }));
 
-      ws.send(
-        JSON.stringify({
-          type: "conversation_initiation_client_data",
-          conversation_config_override: {
-            conversation: { text_only: true },
-          },
-          user_id: normalizedUserId,
-        })
-      );
-
-      const contextBlock = buildContextBlock({
-        customer_status: normalizedCustomerStatus,
-        current_phase: normalizedCurrentPhase,
-        goal: normalizedGoal,
-        objections: normalizedObjections,
-        last_summary: normalizedLastSummary,
+      const context = buildContextBlock({
+        customer_status,
+        current_phase,
+        goal,
+        objections,
+        last_summary,
         recent_messages: normalizedRecentMessages,
       });
 
-      if (contextBlock) {
-        ws.send(
-          JSON.stringify({
-            type: "contextual_update",
-            text: contextBlock,
-          })
-        );
+      if (context) {
+        ws.send(JSON.stringify({
+          type: "contextual_update",
+          text: context,
+        }));
       }
 
-      ws.send(
-        JSON.stringify({
-          type: "user_message",
-          text: normalizedMessage,
-        })
-      );
+      ws.send(JSON.stringify({
+        type: "user_message",
+        text: normalizedMessage,
+      }));
     });
 
     ws.on("message", (raw) => {
-      const text = raw.toString();
-      console.log("WS RAW:", text);
-
       let data;
       try {
-        data = JSON.parse(text);
+        data = JSON.parse(raw.toString());
       } catch {
         return;
       }
 
-      if (
-        data.type === "agent_response" &&
-        data.agent_response_event?.agent_response &&
-        !finished
-      ) {
+      if (data.type === "agent_chat_response_part") {
+        const part = data.text_response_part?.text || "";
+        finalReply += part;
+      }
+
+      if (data.type === "agent_response" && !finished) {
         clearTimeout(timeout);
-        try {
-          ws.close();
-        } catch {}
-
-        const reply =
-          cleanText(data.agent_response_event.agent_response) ||
-          "Geen antwoord van Emma";
-
-        console.log("FINAL REPLY:", reply);
+        ws.close();
 
         return safeRespond(
           buildResponse({
-            reply,
-            goal_update: "",
-            objections_update: "",
-            last_summary_update: "",
+            reply: finalReply || "Geen antwoord",
+            goal_update: goalUpdate,
+            objections_update: objectionsUpdate,
+            last_summary_update: summaryUpdate,
           })
         );
       }
-
-      if (data.type === "agent_chat_response_part") {
-        const partType = data.text_response_part?.type;
-        const partText = data.text_response_part?.text || "";
-
-        if (partType === "start" || partType === "delta") {
-          finalReply += partText;
-        }
-      }
     });
 
-    ws.on("error", (err) => {
-      console.error("WS ERROR:", err);
+    ws.on("error", () => {
       return safeRespond(
         buildResponse({
-          reply: finalReply.trim() || "Fout bij verbinden met Emma",
+          reply: "Fout",
+          goal_update: goalUpdate,
+          objections_update: objectionsUpdate,
+          last_summary_update: summaryUpdate,
         })
       );
     });
 
-    ws.on("close", () => {
-      console.log("WS CLOSED");
-    });
-  } catch (error) {
-    console.error("SERVER ERROR:", error);
+  } catch {
     return safeRespond(
       buildResponse({
-        reply: finalReply.trim() || "Serverfout",
+        reply: "Serverfout",
+        goal_update: goalUpdate,
+        objections_update: objectionsUpdate,
+        last_summary_update: summaryUpdate,
       })
     );
   }
