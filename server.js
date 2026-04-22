@@ -49,6 +49,20 @@ function buildContextBlock({
   return lines.join("\n");
 }
 
+function buildResponse({
+  reply,
+  goal_update = "",
+  objections_update = "",
+  last_summary_update = "",
+}) {
+  return {
+    reply: cleanText(reply),
+    goal_update: cleanText(goal_update),
+    objections_update: cleanText(objections_update),
+    last_summary_update: cleanText(last_summary_update),
+  };
+}
+
 app.post("/chat", async (req, res) => {
   const {
     user_id,
@@ -67,12 +81,11 @@ app.post("/chat", async (req, res) => {
   const agentId = process.env.ELEVENLABS_AGENT_ID;
 
   if (!agentId) {
-    return res.json({
-      reply: "Agent ID ontbreekt",
-      goal: cleanText(goal),
-      objections: cleanText(objections),
-      last_summary: cleanText(last_summary),
-    });
+    return res.json(
+      buildResponse({
+        reply: "Agent ID ontbreekt",
+      })
+    );
   }
 
   const normalizedUserId = cleanText(user_id);
@@ -85,21 +98,19 @@ app.post("/chat", async (req, res) => {
   const normalizedRecentMessages = normalizeRecentMessages(recent_messages);
 
   if (!normalizedUserId) {
-    return res.json({
-      reply: "user_id ontbreekt",
-      goal: normalizedGoal,
-      objections: normalizedObjections,
-      last_summary: normalizedLastSummary,
-    });
+    return res.json(
+      buildResponse({
+        reply: "user_id ontbreekt",
+      })
+    );
   }
 
   if (!normalizedMessage) {
-    return res.json({
-      reply: "message ontbreekt",
-      goal: normalizedGoal,
-      objections: normalizedObjections,
-      last_summary: normalizedLastSummary,
-    });
+    return res.json(
+      buildResponse({
+        reply: "message ontbreekt",
+      })
+    );
   }
 
   const wsUrl = `wss://api.elevenlabs.io/v1/convai/conversation?agent_id=${agentId}`;
@@ -122,12 +133,11 @@ app.post("/chat", async (req, res) => {
         try {
           ws.close();
         } catch {}
-        return safeRespond({
-          reply: finalReply.trim() || "Geen antwoord van Emma",
-          goal: normalizedGoal,
-          objections: normalizedObjections,
-          last_summary: normalizedLastSummary,
-        });
+        return safeRespond(
+          buildResponse({
+            reply: finalReply.trim() || "Geen antwoord van Emma",
+          })
+        );
       }
     }, 20000);
 
@@ -197,12 +207,14 @@ app.post("/chat", async (req, res) => {
 
         console.log("FINAL REPLY:", reply);
 
-        return safeRespond({
-          reply,
-          goal: normalizedGoal,
-          objections: normalizedObjections,
-          last_summary: normalizedLastSummary,
-        });
+        return safeRespond(
+          buildResponse({
+            reply,
+            goal_update: "",
+            objections_update: "",
+            last_summary_update: "",
+          })
+        );
       }
 
       if (data.type === "agent_chat_response_part") {
@@ -217,12 +229,11 @@ app.post("/chat", async (req, res) => {
 
     ws.on("error", (err) => {
       console.error("WS ERROR:", err);
-      return safeRespond({
-        reply: finalReply.trim() || "Fout bij verbinden met Emma",
-        goal: normalizedGoal,
-        objections: normalizedObjections,
-        last_summary: normalizedLastSummary,
-      });
+      return safeRespond(
+        buildResponse({
+          reply: finalReply.trim() || "Fout bij verbinden met Emma",
+        })
+      );
     });
 
     ws.on("close", () => {
@@ -230,12 +241,11 @@ app.post("/chat", async (req, res) => {
     });
   } catch (error) {
     console.error("SERVER ERROR:", error);
-    return safeRespond({
-      reply: finalReply.trim() || "Serverfout",
-      goal: normalizedGoal,
-      objections: normalizedObjections,
-      last_summary: normalizedLastSummary,
-    });
+    return safeRespond(
+      buildResponse({
+        reply: finalReply.trim() || "Serverfout",
+      })
+    );
   }
 });
 
