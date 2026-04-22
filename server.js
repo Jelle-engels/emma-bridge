@@ -2,10 +2,64 @@ import express from "express";
 import WebSocket from "ws";
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: "1mb" }));
+
+function cleanText(value) {
+  if (value === null || value === undefined) return "";
+  return String(value).trim();
+}
+
+function normalizeRecentMessages(value) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => ({
+      role: cleanText(item?.role),
+      message_text: cleanText(item?.message_text),
+      timestamp: cleanText(item?.timestamp),
+    }))
+    .filter((item) => item.role || item.message_text || item.timestamp);
+}
+
+function buildContextBlock({
+  customer_status,
+  current_phase,
+  goal,
+  objections,
+  last_summary,
+  recent_messages,
+}) {
+  const lines = [];
+
+  if (customer_status) lines.push(`Customer status: ${customer_status}`);
+  if (current_phase) lines.push(`Current phase: ${current_phase}`);
+  if (goal) lines.push(`Goal: ${goal}`);
+  if (objections) lines.push(`Objections: ${objections}`);
+  if (last_summary) lines.push(`Previous summary: ${last_summary}`);
+
+  if (recent_messages.length > 0) {
+    lines.push("Recent conversation history:");
+    for (const msg of recent_messages) {
+      const role = msg.role || "unknown";
+      const text = msg.message_text || "";
+      const timestamp = msg.timestamp ? ` (${msg.timestamp})` : "";
+      lines.push(`- ${role}${timestamp}: ${text}`);
+    }
+  }
+
+  return lines.join("\n");
+}
 
 app.post("/chat", async (req, res) => {
-  const { user_id, message } = req.body;
+  const {
+    user_id,
+    message,
+    customer_status = "",
+    current_phase = "",
+    goal = "",
+    objections = "",
+    last_summary = "",
+    recent_messages = [],
+  } = req.body ?? {};
 
   console.log("CHAT HIT");
   console.log("BODY:", req.body);
@@ -13,7 +67,39 @@ app.post("/chat", async (req, res) => {
   const agentId = process.env.ELEVENLABS_AGENT_ID;
 
   if (!agentId) {
-    return res.json({ reply: "Agent ID ontbreekt" });
+    return res.json({
+      reply: "Agent ID ontbreekt",
+      goal: cleanText(goal),
+      objections: cleanText(objections),
+      last_summary: cleanText(last_summary),
+    });
+  }
+
+  const normalizedUserId = cleanText(user_id);
+  const normalizedMessage = cleanText(message);
+  const normalizedCustomerStatus = cleanText(customer_status);
+  const normalizedCurrentPhase = cleanText(current_phase);
+  const normalizedGoal = cleanText(goal);
+  const normalizedObjections = cleanText(objections);
+  const normalizedLastSummary = cleanText(last_summary);
+  const normalizedRecentMessages = normalizeRecentMessages(recent_messages);
+
+  if (!normalizedUserId) {
+    return res.json({
+      reply: "user_id ontbreekt",
+      goal: normalizedGoal,
+      objections: normalizedObjections,
+      last_summary: normalizedLastSummary,
+    });
+  }
+
+  if (!normalizedMessage) {
+    return res.json({
+      reply: "message ontbreekt",
+      goal: normalizedGoal,
+      objections: normalizedObjections,
+      last_summary: normalizedLastSummary,
+    });
   }
 
   const wsUrl = `wss://api.elevenlabs.io/v1/convai/conversation?agent_id=${agentId}`;
@@ -21,33 +107,67 @@ app.post("/chat", async (req, res) => {
   let finalReply = "";
   let finished = false;
 
+  const safeRespond = (payload) => {
+    if (finished) return;
+    finished = true;
+    return res.json(payload);
+  };
+
   try {
     const ws = new WebSocket(wsUrl);
 
     const timeout = setTimeout(() => {
       if (!finished) {
-        finished = true;
         console.log("TIMEOUT");
-        try { ws.close(); } catch {}
-        return res.json({ reply: finalReply.trim() || "Geen antwoord van Emma" });
+        try {
+          ws.close();
+        } catch {}
+        return safeRespond({
+          reply: finalReply.trim() || "Geen antwoord van Emma",
+          goal: normalizedGoal,
+          objections: normalizedObjections,
+          last_summary: normalizedLastSummary,
+        });
       }
     }, 20000);
 
     ws.on("open", () => {
       console.log("WS OPEN");
 
-      ws.send(JSON.stringify({
-        type: "conversation_initiation_client_data",
-        conversation_config_override: {
-          conversation: { text_only: true }
-        },
-        user_id: String(user_id)
-      }));
+      ws.send(
+        JSON.stringify({
+          type: "conversation_initiation_client_data",
+          conversation_config_override: {
+            conversation: { text_only: true },
+          },
+          user_id: normalizedUserId,
+        })
+      );
 
-      ws.send(JSON.stringify({
-        type: "user_message",
-        text: message
-      }));
+      const contextBlock = buildContextBlock({
+        customer_status: normalizedCustomerStatus,
+        current_phase: normalizedCurrentPhase,
+        goal: normalizedGoal,
+        objections: normalizedObjections,
+        last_summary: normalizedLastSummary,
+        recent_messages: normalizedRecentMessages,
+      });
+
+      if (contextBlock) {
+        ws.send(
+          JSON.stringify({
+            type: "contextual_update",
+            text: contextBlock,
+          })
+        );
+      }
+
+      ws.send(
+        JSON.stringify({
+          type: "user_message",
+          text: normalizedMessage,
+        })
+      );
     });
 
     ws.on("message", (raw) => {
@@ -66,12 +186,22 @@ app.post("/chat", async (req, res) => {
         data.agent_response_event?.agent_response &&
         !finished
       ) {
-        finished = true;
         clearTimeout(timeout);
-        try { ws.close(); } catch {}
-        console.log("FINAL REPLY:", data.agent_response_event.agent_response);
-        return res.json({
-          reply: data.agent_response_event.agent_response
+        try {
+          ws.close();
+        } catch {}
+
+        const reply =
+          cleanText(data.agent_response_event.agent_response) ||
+          "Geen antwoord van Emma";
+
+        console.log("FINAL REPLY:", reply);
+
+        return safeRespond({
+          reply,
+          goal: normalizedGoal,
+          objections: normalizedObjections,
+          last_summary: normalizedLastSummary,
         });
       }
 
@@ -87,13 +217,12 @@ app.post("/chat", async (req, res) => {
 
     ws.on("error", (err) => {
       console.error("WS ERROR:", err);
-      if (!finished) {
-        finished = true;
-        clearTimeout(timeout);
-        return res.json({
-          reply: finalReply.trim() || "Fout bij verbinden met Emma"
-        });
-      }
+      return safeRespond({
+        reply: finalReply.trim() || "Fout bij verbinden met Emma",
+        goal: normalizedGoal,
+        objections: normalizedObjections,
+        last_summary: normalizedLastSummary,
+      });
     });
 
     ws.on("close", () => {
@@ -101,10 +230,12 @@ app.post("/chat", async (req, res) => {
     });
   } catch (error) {
     console.error("SERVER ERROR:", error);
-    if (!finished) {
-      finished = true;
-      return res.json({ reply: finalReply.trim() || "Serverfout" });
-    }
+    return safeRespond({
+      reply: finalReply.trim() || "Serverfout",
+      goal: normalizedGoal,
+      objections: normalizedObjections,
+      last_summary: normalizedLastSummary,
+    });
   }
 });
 
