@@ -221,23 +221,33 @@ async function getStructuredUpdates({
   const timer = setTimeout(() => controller.abort(), OPENAI_TIMEOUT_MS);
 
   try {
-    const response = await openai.responses.create({
-      model: process.env.OPENAI_EXTRACTION_MODEL || "gpt-5.4-mini",
-      store: false,
-      input: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: JSON.stringify(userPayload) },
-      ],
-      text: {
-        format: {
-          type: "json_schema",
-          name: "memory_updates",
-          strict: true,
-          schema,
+    const response = await openai.responses.create(
+      {
+        model: process.env.OPENAI_EXTRACTION_MODEL || "gpt-5.4-mini",
+        store: false,
+        input: [
+          {
+            role: "system",
+            content: [{ type: "input_text", text: systemPrompt }],
+          },
+          {
+            role: "user",
+            content: [{ type: "input_text", text: JSON.stringify(userPayload) }],
+          },
+        ],
+        text: {
+          format: {
+            type: "json_schema",
+            name: "memory_updates",
+            strict: true,
+            schema,
+          },
         },
       },
-      signal: controller.signal,
-    });
+      {
+        signal: controller.signal,
+      }
+    );
 
     const rawText = extractOutputText(response);
     const parsed = safeJsonParse(rawText);
@@ -280,7 +290,9 @@ async function getElevenReply({
   agentId,
 }) {
   return await new Promise((resolve) => {
-    const wsUrl = `wss://api.elevenlabs.io/v1/convai/conversation?agent_id=${encodeURIComponent(agentId)}`;
+    const wsUrl = `wss://api.elevenlabs.io/v1/convai/conversation?agent_id=${encodeURIComponent(
+      agentId
+    )}`;
 
     let finalReply = "";
     let settled = false;
