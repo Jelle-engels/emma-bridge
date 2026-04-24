@@ -24,6 +24,18 @@ function cleanText(value) {
   return String(value).replace(/\s+/g, " ").trim();
 }
 
+function cleanReplyText(value) {
+  if (value === null || value === undefined) return "";
+
+  return String(value)
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n[ \t]+/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 function clamp(value, max = 500) {
   const text = cleanText(value);
   if (text.length <= max) return text;
@@ -37,7 +49,7 @@ function buildResponse({
   last_summary_update = "",
 }) {
   return {
-    reply: cleanText(reply),
+    reply: cleanReplyText(reply),
     goal_update: cleanText(goal_update),
     objections_update: cleanText(objections_update),
     last_summary_update: cleanText(last_summary_update),
@@ -302,7 +314,7 @@ async function getElevenReply({
     const settle = (reply) => {
       if (settled) return;
       settled = true;
-      resolve(cleanText(reply) || FALLBACK_REPLY);
+      resolve(cleanReplyText(reply) || FALLBACK_REPLY);
     };
 
     try {
@@ -381,8 +393,8 @@ async function getElevenReply({
           } catch {}
 
           const reply =
-            cleanText(data.agent_response_event?.agent_response) ||
-            cleanText(finalReply) ||
+            cleanReplyText(data.agent_response_event?.agent_response) ||
+            cleanReplyText(finalReply) ||
             FALLBACK_REPLY;
 
           settle(reply);
@@ -507,7 +519,7 @@ app.post("/chat", async (req, res) => {
 
     const reply =
       replyResult.status === "fulfilled"
-        ? cleanText(replyResult.value) || FALLBACK_REPLY
+        ? cleanReplyText(replyResult.value) || FALLBACK_REPLY
         : FALLBACK_REPLY;
 
     if (replyResult.status === "rejected") {
