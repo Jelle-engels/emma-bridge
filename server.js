@@ -10,14 +10,23 @@ app.use(express.json({ limit: "1mb" }));
 
 const PORT = process.env.PORT || 3000;
 
-const ELEVEN_TIMEOUT_MS = 20000;
-const OPENAI_TIMEOUT_MS = 12000;
+const ELEVEN_TIMEOUT_MS = Number(process.env.ELEVEN_TIMEOUT_MS || 20000);
+const OPENAI_TIMEOUT_MS = Number(process.env.OPENAI_TIMEOUT_MS || 12000);
+
+const MAX_CONTEXT_MESSAGES = Number(process.env.MAX_CONTEXT_MESSAGES || 12);
+const MAX_MESSAGE_CHARS = Number(process.env.MAX_MESSAGE_CHARS || 500);
+const MAX_SUMMARY_CHARS = Number(process.env.MAX_SUMMARY_CHARS || 900);
+const MAX_GOAL_CHARS = Number(process.env.MAX_GOAL_CHARS || 300);
+const MAX_OBJECTIONS_CHARS = Number(process.env.MAX_OBJECTIONS_CHARS || 400);
+
 const FALLBACK_REPLY =
   "Er ging iets mis met mijn antwoord, kun je je bericht nog een keer sturen";
 
 const openai = process.env.OPENAI_API_KEY
   ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
   : null;
+
+/* ----------------------------- BASIC HELPERS ----------------------------- */
 
 function cleanText(value) {
   if (value === null || value === undefined) return "";
@@ -42,6 +51,28 @@ function clamp(value, max = 500) {
   return `${text.slice(0, max).trim()}...`;
 }
 
+function normalizeComparableText(value) {
+  return cleanText(value)
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function uniqueBy(items, keyFn) {
+  const seen = new Set();
+  const out = [];
+
+  for (const item of items) {
+    const key = keyFn(item);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(item);
+  }
+
+  return out;
+}
+
 function buildResponse({
   reply,
   goal_update = "",
@@ -56,25 +87,217 @@ function buildResponse({
   };
 }
 
+/* -------------------------- MESSAGE NORMALIZATION ------------------------- */
+
+function normalizeRole(role) {
+  const r = cleanText(role).toLowerCase();
+
+  if (["emma", "assistant", "ai", "agent", "bot", "mila"].includes(r)) {
+    return "emma";
+  }
+
+  if (["user", "customer", "klant", "client", "lead", "persoon"].includes(r)) {
+    return "user";
+  }
+
+  return r || "unknown";
+}
+
+function parseTimestamp(value) {
+  const raw = cleanText(value);
+  if (!raw) return null;
+
+  const t = Date.parse(raw);
+  return Number.isFinite(t) ? t : null;
+}
+
 function normalizeRecentMessages(value) {
   if (!Array.isArray(value)) return [];
 
   return value
-    .map((item) => ({
-      role: cleanText(item?.role),
-      message_text: cleanText(item?.message_text),
-      timestamp: cleanText(item?.timestamp),
-    }))
+    .map((item, index) => {
+      const role = normalizeRole(item?.role || item?.sender || item?.from);
+      const message_text = cleanText(
+        item?.message_text || item?.message || item?.text || item?.content
+      );
+      const timestamp = cleanText(
+        item?.timestamp || item?.created_at || item?.date || item?.time
+      );
+
+      return {
+        role,
+        message_text,
+        timestamp,
+        _index: index,
+        _time: parseTimestamp(timestamp),
+      };
+    })
     .filter((item) => item.role || item.message_text || item.timestamp);
 }
 
-function summarizeRecentMessages(recentMessages, limit = 8) {
-  return recentMessages.slice(-limit).map((msg) => ({
-    role: msg.role || "unknown",
-    message_text: clamp(msg.message_text, 250),
-    timestamp: msg.timestamp || "",
-  }));
+function sortMessagesChronologically(messages) {
+  return [...messages].sort((a, b) => {
+    if (a._time !== null && b._time !== null) return a._time - b._time;
+    if (a._time !== null) return -1;
+    if (b._time !== null) return 1;
+    return a._index - b._index;
+  });
 }
+
+function removeCurrentUserMessageFromHistory(messages, currentMessage) {
+  const current = normalizeComparableText(currentMessage);
+  if (!current) return messages;
+
+  let removed = false;
+
+  return [...messages]
+    .reverse()
+    .filter((msg) => {
+      if (removed) return true;
+
+      const sameRole = msg.role === "user";
+      const sameText = normalizeComparableText(msg.message_text) === current;
+
+      if (sameRole && sameText) {
+        removed = true;
+        return false;
+      }
+
+      return true;
+    })
+    .reverse();
+}
+
+function sanitizeAndPrepareRecentMessages(recentMessages, currentMessage) {
+  const normalized = normalizeRecentMessages(recentMessages);
+  const sorted = sortMessagesChronologically(normalized);
+
+  const deduped = uniqueBy(sorted, (msg) => {
+    const role = msg.role || "unknown";
+    const text = normalizeComparableText(msg.message_text);
+    const time = msg.timestamp || "";
+    return `${role}|${text}|${time}`;
+  });
+
+  const withoutCurrentMessage = removeCurrentUserMessageFromHistory(
+    deduped,
+    currentMessage
+  );
+
+  return withoutCurrentMessage
+    .filter((msg) => msg.message_text)
+    .slice(-MAX_CONTEXT_MESSAGES)
+    .map((msg) => ({
+      role: msg.role || "unknown",
+      message_text: clamp(msg.message_text, MAX_MESSAGE_CHARS),
+      timestamp: msg.timestamp || "",
+    }));
+}
+
+function getLastEmmaMessages(messages, limit = 3) {
+  return messages
+    .filter((msg) => msg.role === "emma" && msg.message_text)
+    .slice(-limit)
+    .map((msg) => msg.message_text);
+}
+
+function getLastUserMessages(messages, limit = 3) {
+  return messages
+    .filter((msg) => msg.role === "user" && msg.message_text)
+    .slice(-limit)
+    .map((msg) => msg.message_text);
+}
+
+function hasLinkBeenSent(messages, linkPart) {
+  const needle = cleanText(linkPart).toLowerCase();
+  if (!needle) return false;
+
+  return messages.some(
+    (msg) =>
+      msg.role === "emma" &&
+      cleanText(msg.message_text).toLowerCase().includes(needle)
+  );
+}
+
+function hasPriceBeenMentioned(messages) {
+  return messages.some(
+    (msg) =>
+      msg.role === "emma" &&
+      /€\s*123|123\s*euro|programma kost/i.test(msg.message_text)
+  );
+}
+
+function hasCheckoutLinkBeenSent(messages) {
+  return messages.some(
+    (msg) =>
+      msg.role === "emma" &&
+      /bestellen-nl-control-1x|bestellen-be-control-1x/i.test(msg.message_text)
+  );
+}
+
+function hasAskedCountry(messages) {
+  return messages.some(
+    (msg) =>
+      msg.role === "emma" &&
+      /nederland of belgi[eë]|welk land|in welk land/i.test(msg.message_text)
+  );
+}
+
+function hasAskedOrderNumber(messages) {
+  return messages.some(
+    (msg) =>
+      msg.role === "emma" &&
+      /ordernummer/i.test(msg.message_text)
+  );
+}
+
+function detectState({
+  currentMessage,
+  recentMessages,
+  lastSummary,
+  currentPhase,
+}) {
+  const hasPreviousEmmaMessage = recentMessages.some(
+    (msg) => msg.role === "emma"
+  );
+
+  const isExistingConversation =
+    hasPreviousEmmaMessage || Boolean(cleanText(lastSummary));
+
+  const latest = cleanText(currentMessage).toLowerCase();
+
+  const hasMedicalTrigger =
+    /\b(medicatie|medicijnen|zwanger|borstvoeding|diabetes|hart|lever|nieren|darmziekte|eetstoornis|arts|apotheker|veilig bij|mag dit met)\b/i.test(
+      latest
+    );
+
+  const hasPurchaseClaim =
+    /\b(besteld|order|ordernummer|betaald|gekocht|whatsapp.?groep|groep|toegang)\b/i.test(
+      latest
+    );
+
+  const hasExplicitBuyingIntent =
+    /\b(bestellen|starten|ik wil starten|hoe bestel|link|kopen|aanschaffen|doorgaan)\b/i.test(
+      latest
+    );
+
+  const lowIntent =
+    /^(ok|oke|ja|nee|weet niet|misschien|kan|vertel maar|hoe bedoel je|prima|goed|klinkt goed)\.?$/i.test(
+      latest
+    );
+
+  return {
+    is_existing_conversation: isExistingConversation,
+    has_previous_emma_message: hasPreviousEmmaMessage,
+    has_medical_trigger: hasMedicalTrigger,
+    has_purchase_claim: hasPurchaseClaim,
+    has_explicit_buying_intent: hasExplicitBuyingIntent,
+    is_low_intent: lowIntent,
+    current_phase: cleanText(currentPhase),
+  };
+}
+
+/* ------------------------------ CONTEXT BLOCK ----------------------------- */
 
 function buildContextBlock({
   customer_status,
@@ -83,27 +306,78 @@ function buildContextBlock({
   objections,
   last_summary,
   recent_messages,
+  latest_user_message,
 }) {
-  const lines = [];
+  const state = detectState({
+    currentMessage: latest_user_message,
+    recentMessages: recent_messages,
+    lastSummary: last_summary,
+    currentPhase: current_phase,
+  });
 
-  if (customer_status) lines.push(`Customer status: ${customer_status}`);
-  if (current_phase) lines.push(`Current phase: ${current_phase}`);
-  if (goal) lines.push(`Goal: ${goal}`);
-  if (objections) lines.push(`Objections: ${objections}`);
-  if (last_summary) lines.push(`Previous summary: ${last_summary}`);
+  const lastEmmaMessages = getLastEmmaMessages(recent_messages, 3);
+  const lastUserMessages = getLastUserMessages(recent_messages, 3);
 
-  if (recent_messages.length > 0) {
-    lines.push("Recent conversation history:");
-    for (const msg of recent_messages) {
-      const role = msg.role || "unknown";
-      const text = msg.message_text || "";
-      const timestamp = msg.timestamp ? ` (${msg.timestamp})` : "";
-      lines.push(`- ${role}${timestamp}: ${text}`);
-    }
-  }
+  const testimonialAlreadySent = hasLinkBeenSent(
+    recent_messages,
+    "youtube.com/@Nutrition-Works"
+  );
 
-  return lines.join("\n");
+  const priceAlreadyMentioned = hasPriceBeenMentioned(recent_messages);
+  const checkoutLinkAlreadySent = hasCheckoutLinkBeenSent(recent_messages);
+  const countryAlreadyAsked = hasAskedCountry(recent_messages);
+  const orderNumberAlreadyAsked = hasAskedOrderNumber(recent_messages);
+
+  const context = {
+    agent_name: "Emma",
+    runtime_state: {
+      ...state,
+      testimonial_already_sent: testimonialAlreadySent,
+      price_already_mentioned: priceAlreadyMentioned,
+      checkout_link_already_sent: checkoutLinkAlreadySent,
+      country_already_asked: countryAlreadyAsked,
+      order_number_already_asked: orderNumberAlreadyAsked,
+    },
+    crm_memory: {
+      customer_status: cleanText(customer_status),
+      current_phase: cleanText(current_phase),
+      goal: clamp(goal, MAX_GOAL_CHARS),
+      objections: clamp(objections, MAX_OBJECTIONS_CHARS),
+      last_summary: clamp(last_summary, MAX_SUMMARY_CHARS),
+    },
+    latest_user_message: clamp(latest_user_message, 1000),
+    recent_conversation_history: recent_messages.map((msg) => ({
+      role: msg.role,
+      message_text: clamp(msg.message_text, MAX_MESSAGE_CHARS),
+      timestamp: msg.timestamp || "",
+    })),
+    repetition_guard: {
+      do_not_repeat_these_recent_emma_messages: lastEmmaMessages,
+      last_user_messages_for_context_only: lastUserMessages,
+      rules: [
+        "Antwoord alleen op het nieuwste klantbericht.",
+        "Gebruik bekende CRM-data als achtergrond, niet als tekst om opnieuw op te sommen.",
+        "Herhaal geen vraag, uitleg, prijs, testimonial-link, checkout-link of ordernummer-instructie die al in de recente Emma-berichten staat.",
+        "Als iets al bekend is uit goal, objections, last_summary of recent_conversation_history: vraag er niet opnieuw naar.",
+        "Als het gesprek bestaand is: stel jezelf niet opnieuw voor en gebruik geen startbericht.",
+        "Als testimonial_already_sent true is: stuur de testimonial-link niet opnieuw, tenzij de klant er expliciet om vraagt.",
+        "Als price_already_mentioned true is: noem de prijs niet opnieuw, tenzij de klant ernaar vraagt.",
+        "Als country_already_asked true is: vraag niet opnieuw naar Nederland of België, tenzij het antwoord nog ontbreekt en het direct nodig is voor checkout.",
+        "Als checkout_link_already_sent true is: stuur geen nieuwe checkout-link, tenzij de klant er expliciet opnieuw om vraagt.",
+      ],
+    },
+  };
+
+  return [
+    "RUNTIME CONTEXT VOOR EMMA",
+    "Gebruik deze context als hoogste gespreksspecifieke input naast de system prompt.",
+    "De context is feitelijk; herhaal hem niet letterlijk naar de klant.",
+    "",
+    JSON.stringify(context, null, 2),
+  ].join("\n");
 }
+
+/* ----------------------------- JSON UTILITIES ----------------------------- */
 
 function safeJsonParse(value) {
   if (!value || typeof value !== "string") return null;
@@ -159,6 +433,8 @@ function extractOutputText(response) {
   return "";
 }
 
+/* -------------------------- OPENAI CRM EXTRACTION ------------------------- */
+
 async function getStructuredUpdates({
   message,
   customerStatus,
@@ -194,7 +470,7 @@ async function getStructuredUpdates({
       last_summary_update: {
         type: "string",
         description:
-          "Een korte feitelijke samenvatting van relevante nieuwe informatie uit het nieuwste gebruikersbericht. Alleen invullen als er echt relevante nieuwe info is. Anders lege string.",
+          "Korte feitelijke CRM-update op basis van het nieuwste gebruikersbericht. Niet herhalen wat al in current_last_summary staat. Anders lege string.",
       },
     },
     required: ["goal_update", "objections_update", "last_summary_update"],
@@ -203,14 +479,15 @@ async function getStructuredUpdates({
   const systemPrompt = [
     "Je bent een strikte CRM-extractor voor een WhatsApp salesgesprek.",
     "Je taak is NIET om te antwoorden op de gebruiker.",
-    "Je analyseert alleen het nieuwste gebruikersbericht in de context van de bestaande gegevens.",
+    "Je analyseert alleen het nieuwste gebruikersbericht in de context van bestaande CRM-data.",
     "",
-    "Je moet uitsluitend geldige JSON teruggeven in exact deze vorm:",
+    "Je geeft uitsluitend geldige JSON terug in exact deze vorm:",
     '{ "goal_update": "", "objections_update": "", "last_summary_update": "" }',
     "",
     "Regels:",
     "- Gebruik Nederlands.",
-    "- Vul alleen een veld als het nieuwste gebruikersbericht echt relevante nieuwe of duidelijk concretere informatie toevoegt.",
+    "- Vul alleen een veld als het nieuwste gebruikersbericht echt nieuwe of duidelijk concretere informatie toevoegt.",
+    "- Herhaal geen informatie die al in current_goal, current_objections of current_last_summary staat.",
     "- Als er geen relevante update is voor een veld, geef een lege string terug.",
     "- Verzin niets.",
     "- Houd goal_update kort en concreet.",
@@ -226,7 +503,11 @@ async function getStructuredUpdates({
     current_goal: cleanText(currentGoal),
     current_objections: cleanText(currentObjections),
     current_last_summary: cleanText(currentLastSummary),
-    recent_messages: summarizeRecentMessages(recentMessages),
+    recent_messages: recentMessages.slice(-8).map((msg) => ({
+      role: msg.role || "unknown",
+      message_text: clamp(msg.message_text, 250),
+      timestamp: msg.timestamp || "",
+    })),
   };
 
   const controller = new AbortController();
@@ -290,6 +571,69 @@ async function getStructuredUpdates({
   }
 }
 
+/* ---------------------------- REPLY VALIDATION ---------------------------- */
+
+function isLikelyRepetitiveReply(reply, recentMessages) {
+  const normalizedReply = normalizeComparableText(reply);
+  if (!normalizedReply) return false;
+
+  const recentEmmaMessages = getLastEmmaMessages(recentMessages, 3);
+
+  return recentEmmaMessages.some((oldReply) => {
+    const normalizedOld = normalizeComparableText(oldReply);
+    if (!normalizedOld) return false;
+
+    if (normalizedReply === normalizedOld) return true;
+
+    const shorter = normalizedReply.length < normalizedOld.length
+      ? normalizedReply
+      : normalizedOld;
+
+    const longer = normalizedReply.length >= normalizedOld.length
+      ? normalizedReply
+      : normalizedOld;
+
+    return shorter.length > 80 && longer.includes(shorter);
+  });
+}
+
+function violatesHardRepetitionRules(reply, recentMessages) {
+  const text = cleanText(reply);
+
+  const testimonialAlreadySent = hasLinkBeenSent(
+    recentMessages,
+    "youtube.com/@Nutrition-Works"
+  );
+
+  const checkoutAlreadySent = hasCheckoutLinkBeenSent(recentMessages);
+  const priceAlreadyMentioned = hasPriceBeenMentioned(recentMessages);
+
+  if (
+    testimonialAlreadySent &&
+    /youtube\.com\/@Nutrition-Works/i.test(text)
+  ) {
+    return "testimonial_repeated";
+  }
+
+  if (
+    checkoutAlreadySent &&
+    /bestellen-nl-control-1x|bestellen-be-control-1x/i.test(text)
+  ) {
+    return "checkout_link_repeated";
+  }
+
+  if (
+    priceAlreadyMentioned &&
+    /€\s*123|123\s*euro|programma kost/i.test(text)
+  ) {
+    return "price_repeated";
+  }
+
+  return "";
+}
+
+/* ----------------------------- ELEVENLABS CHAT ---------------------------- */
+
 async function getElevenReply({
   userId,
   message,
@@ -321,7 +665,7 @@ async function getElevenReply({
       ws = new WebSocket(wsUrl);
 
       timeout = setTimeout(() => {
-        console.error("ELEVENLABS TIMEOUT: geen reply binnen 20 seconden");
+        console.error("ELEVENLABS TIMEOUT: geen reply binnen deadline");
         try {
           ws.close();
         } catch {}
@@ -329,6 +673,16 @@ async function getElevenReply({
       }, ELEVEN_TIMEOUT_MS);
 
       ws.on("open", () => {
+        const contextBlock = buildContextBlock({
+          customer_status: customerStatus,
+          current_phase: currentPhase,
+          goal,
+          objections,
+          last_summary: lastSummary,
+          recent_messages: recentMessages,
+          latest_user_message: message,
+        });
+
         ws.send(
           JSON.stringify({
             type: "conversation_initiation_client_data",
@@ -341,23 +695,12 @@ async function getElevenReply({
           })
         );
 
-        const contextBlock = buildContextBlock({
-          customer_status: customerStatus,
-          current_phase: currentPhase,
-          goal,
-          objections,
-          last_summary: lastSummary,
-          recent_messages: recentMessages,
-        });
-
-        if (contextBlock) {
-          ws.send(
-            JSON.stringify({
-              type: "contextual_update",
-              text: contextBlock,
-            })
-          );
-        }
+        ws.send(
+          JSON.stringify({
+            type: "contextual_update",
+            text: contextBlock,
+          })
+        );
 
         ws.send(
           JSON.stringify({
@@ -421,6 +764,8 @@ async function getElevenReply({
   });
 }
 
+/* -------------------------------- ROUTES -------------------------------- */
+
 app.get("/health", (_req, res) => {
   return res.json({ ok: true });
 });
@@ -443,23 +788,28 @@ app.post("/chat", async (req, res) => {
   const normalizedMessage = cleanText(message);
   const normalizedCustomerStatus = cleanText(customer_status);
   const normalizedCurrentPhase = cleanText(current_phase);
-  const normalizedGoal = cleanText(goal);
-  const normalizedObjections = cleanText(objections);
-  const normalizedLastSummary = cleanText(last_summary);
-  const normalizedRecentMessages = normalizeRecentMessages(recent_messages);
+  const normalizedGoal = clamp(goal, MAX_GOAL_CHARS);
+  const normalizedObjections = clamp(objections, MAX_OBJECTIONS_CHARS);
+  const normalizedLastSummary = clamp(last_summary, MAX_SUMMARY_CHARS);
+
+  const normalizedRecentMessages = sanitizeAndPrepareRecentMessages(
+    recent_messages,
+    normalizedMessage
+  );
 
   console.log("CHAT HIT");
   console.log(
     JSON.stringify(
       {
         user_id: normalizedUserId,
-        message: normalizedMessage,
+        message_preview: clamp(normalizedMessage, 120),
         customer_status: normalizedCustomerStatus,
         current_phase: normalizedCurrentPhase,
-        goal: normalizedGoal,
-        objections: normalizedObjections,
-        last_summary: normalizedLastSummary,
+        has_goal: Boolean(normalizedGoal),
+        has_objections: Boolean(normalizedObjections),
+        has_last_summary: Boolean(normalizedLastSummary),
         recent_messages_count: normalizedRecentMessages.length,
+        last_roles: normalizedRecentMessages.slice(-5).map((m) => m.role),
       },
       null,
       2
@@ -468,29 +818,17 @@ app.post("/chat", async (req, res) => {
 
   if (!normalizedUserId) {
     console.error("REQUEST ERROR: user_id ontbreekt");
-    return res.json(
-      buildResponse({
-        reply: FALLBACK_REPLY,
-      })
-    );
+    return res.json(buildResponse({ reply: FALLBACK_REPLY }));
   }
 
   if (!normalizedMessage) {
     console.error("REQUEST ERROR: message ontbreekt");
-    return res.json(
-      buildResponse({
-        reply: FALLBACK_REPLY,
-      })
-    );
+    return res.json(buildResponse({ reply: FALLBACK_REPLY }));
   }
 
   if (!agentId) {
     console.error("CONFIG ERROR: ELEVENLABS_AGENT_ID ontbreekt");
-    return res.json(
-      buildResponse({
-        reply: FALLBACK_REPLY,
-      })
-    );
+    return res.json(buildResponse({ reply: FALLBACK_REPLY }));
   }
 
   try {
@@ -517,13 +855,30 @@ app.post("/chat", async (req, res) => {
       }),
     ]);
 
-    const reply =
+    let reply =
       replyResult.status === "fulfilled"
         ? cleanReplyText(replyResult.value) || FALLBACK_REPLY
         : FALLBACK_REPLY;
 
     if (replyResult.status === "rejected") {
       console.error("ELEVENLABS PROMISE ERROR:", replyResult.reason);
+    }
+
+    const repeatedReason = violatesHardRepetitionRules(
+      reply,
+      normalizedRecentMessages
+    );
+
+    if (repeatedReason) {
+      console.error("REPETITION GUARD HIT:", repeatedReason);
+      reply =
+        "Ik pak je laatste bericht erbij en ga daarop verder. Kun je kort bevestigen wat je nu het liefst wil weten of regelen?";
+    }
+
+    if (isLikelyRepetitiveReply(reply, normalizedRecentMessages)) {
+      console.error("REPETITION GUARD HIT: reply lijkt op eerdere Emma-reactie");
+      reply =
+        "Ik ga hier niet opnieuw hetzelfde over uitleggen. Op basis van wat je al hebt gedeeld: wat is nu je grootste twijfel om hiermee te starten?";
     }
 
     const extraction =
@@ -549,11 +904,7 @@ app.post("/chat", async (req, res) => {
     );
   } catch (error) {
     console.error("SERVER ERROR:", error?.message || error);
-    return res.json(
-      buildResponse({
-        reply: FALLBACK_REPLY,
-      })
-    );
+    return res.json(buildResponse({ reply: FALLBACK_REPLY }));
   }
 });
 
