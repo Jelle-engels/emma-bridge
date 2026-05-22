@@ -308,6 +308,36 @@ function isOrderControlTrigger(message) {
   );
 }
 
+function looksLikeOrderNumber(message) {
+  const text = cleanText(message);
+  if (!text) return false;
+
+  // Herkent geldige ordercodes zoals JP1234, JP-1234, JP_1234.
+  if (/\bJP[A-Z0-9-_]{2,}\b/i.test(text)) return true;
+
+  // Herkent losse mogelijke ordercodes zoals 12345 of AB1234.
+  // Dit is bewust ruimer, zodat ongeldige codes ook server-side worden afgehandeld.
+  if (/^[A-Z0-9-_]{4,}$/i.test(text) && /\d/.test(text)) return true;
+
+  return false;
+}
+
+function recentEmmaRequestedOrderNumber(recentMessages) {
+  return recentMessages.some((msg) => {
+    if (msg.role !== "emma") return false;
+
+    const text = cleanText(msg.message_text).toLowerCase();
+
+    return (
+      /ordernummer.*nodig/i.test(text) ||
+      /ordernummer.*doorsturen/i.test(text) ||
+      /ordernummer.*delen/i.test(text) ||
+      /stuur.*ordernummer/i.test(text) ||
+      /order.*nummer.*nodig/i.test(text)
+    );
+  });
+}
+
 function extractPossibleOrderNumber(message) {
   const text = cleanText(message);
   if (!text) return "";
@@ -324,8 +354,15 @@ function isValidOrderNumber(orderNumber) {
   return /JP/i.test(cleanText(orderNumber));
 }
 
-function handleOrderControlIfNeeded(message) {
-  if (!isOrderControlTrigger(message)) {
+function handleOrderControlIfNeeded(message, recentMessages = []) {
+  const hasOrderTrigger = isOrderControlTrigger(message);
+  const hasPossibleOrderNumber = looksLikeOrderNumber(message);
+  const wasAskedForOrderNumber = recentEmmaRequestedOrderNumber(recentMessages);
+
+  const shouldHandleOrderControl =
+    hasOrderTrigger || hasPossibleOrderNumber || wasAskedForOrderNumber;
+
+  if (!shouldHandleOrderControl) {
     return null;
   }
 
@@ -388,6 +425,7 @@ function buildContextBlock({
       checkout_link_already_sent: checkoutLinkAlreadySent,
       country_already_asked: countryAlreadyAsked,
       order_number_already_asked: orderNumberAlreadyAsked,
+      order_validation_server_side: true,
     },
     crm_memory: {
       customer_status: cleanText(customer_status),
@@ -415,6 +453,7 @@ function buildContextBlock({
         "Als price_already_mentioned true is: noem de prijs niet opnieuw, tenzij de klant ernaar vraagt.",
         "Als country_already_asked true is: vraag niet opnieuw naar Nederland of België, tenzij het antwoord nog ontbreekt en het direct nodig is voor checkout.",
         "Als checkout_link_already_sent true is: stuur geen nieuwe checkout-link, tenzij de klant er expliciet opnieuw om vraagt.",
+        "Ordervalidatie wordt server-side uitgevoerd. Emma mag nooit zelf een ordernummer goedkeuren of de WhatsApp-link zelfstandig delen.",
       ],
     },
   };
@@ -879,7 +918,10 @@ app.post("/chat", async (req, res) => {
     return res.json(buildResponse({ reply: FALLBACK_REPLY }));
   }
 
-  const orderControlResponse = handleOrderControlIfNeeded(normalizedMessage);
+  const orderControlResponse = handleOrderControlIfNeeded(
+    normalizedMessage,
+    normalizedRecentMessages
+  );
 
   if (orderControlResponse) {
     console.log("ORDER CONTROL HANDLED SERVER-SIDE");
