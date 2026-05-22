@@ -49,10 +49,6 @@ function cleanText(value) {
   return String(value).replace(/\s+/g, " ").trim();
 }
 
-function normalizeAgentNameInText(value) {
-  return cleanText(value).replace(/\bMila\b/gi, "Emma");
-}
-
 function removePromptLeakTerms(value) {
   if (value === null || value === undefined) return "";
 
@@ -80,7 +76,7 @@ function removePromptLeakTerms(value) {
 function cleanReplyText(value) {
   if (value === null || value === undefined) return "";
 
-  return normalizeAgentNameInText(removePromptLeakTerms(value))
+  return removePromptLeakTerms(value)
     .replace(/\r\n/g, "\n")
     .replace(/\r/g, "\n")
     .replace(/[ \t]+\n/g, "\n")
@@ -91,13 +87,13 @@ function cleanReplyText(value) {
 }
 
 function clamp(value, max = 500) {
-  const text = normalizeAgentNameInText(value);
+  const text = cleanText(value);
   if (text.length <= max) return text;
   return `${text.slice(0, max).trim()}...`;
 }
 
 function normalizeComparableText(value) {
-  return normalizeAgentNameInText(value)
+  return cleanText(value)
     .toLowerCase()
     .replace(/[^\p{L}\p{N}\s]/gu, "")
     .replace(/\s+/g, " ")
@@ -126,9 +122,9 @@ function buildResponse({
 }) {
   return {
     reply: cleanReplyText(reply),
-    goal_update: normalizeAgentNameInText(goal_update),
-    objections_update: normalizeAgentNameInText(objections_update),
-    last_summary_update: normalizeAgentNameInText(last_summary_update),
+    goal_update: cleanText(goal_update),
+    objections_update: cleanText(objections_update),
+    last_summary_update: cleanText(last_summary_update),
   };
 }
 
@@ -137,7 +133,7 @@ function buildResponse({
 function normalizeRole(role) {
   const r = cleanText(role).toLowerCase();
 
-  if (["emma", "assistant", "ai", "agent", "bot", "mila"].includes(r)) {
+  if (["emma", "assistant", "ai", "agent", "bot"].includes(r)) {
     return "emma";
   }
 
@@ -162,7 +158,7 @@ function normalizeRecentMessages(value) {
   return value
     .map((item, index) => {
       const role = normalizeRole(item?.role || item?.sender || item?.from);
-      const message_text = normalizeAgentNameInText(
+      const message_text = cleanText(
         item?.message_text || item?.message || item?.text || item?.content
       );
       const timestamp = cleanText(
@@ -243,14 +239,14 @@ function getLastEmmaMessages(messages, limit = 3) {
   return messages
     .filter((msg) => msg.role === "emma" && msg.message_text)
     .slice(-limit)
-    .map((msg) => normalizeAgentNameInText(msg.message_text));
+    .map((msg) => msg.message_text);
 }
 
 function getLastUserMessages(messages, limit = 3) {
   return messages
     .filter((msg) => msg.role === "user" && msg.message_text)
     .slice(-limit)
-    .map((msg) => normalizeAgentNameInText(msg.message_text));
+    .map((msg) => msg.message_text);
 }
 
 function hasLinkBeenSent(messages, linkPart) {
@@ -260,7 +256,7 @@ function hasLinkBeenSent(messages, linkPart) {
   return messages.some(
     (msg) =>
       msg.role === "emma" &&
-      normalizeAgentNameInText(msg.message_text).toLowerCase().includes(needle)
+      cleanText(msg.message_text).toLowerCase().includes(needle)
   );
 }
 
@@ -268,9 +264,7 @@ function hasPriceBeenMentioned(messages) {
   return messages.some(
     (msg) =>
       msg.role === "emma" &&
-      /€\s*123|123\s*euro|programma kost/i.test(
-        normalizeAgentNameInText(msg.message_text)
-      )
+      /€\s*123|123\s*euro|programma kost/i.test(msg.message_text)
   );
 }
 
@@ -278,9 +272,15 @@ function hasCheckoutLinkBeenSent(messages) {
   return messages.some(
     (msg) =>
       msg.role === "emma" &&
-      /bestellen-nl-control-1x|bestellen-be-control-1x/i.test(
-        normalizeAgentNameInText(msg.message_text)
-      )
+      /bestellen-nl-control-1x|bestellen-be-control-1x/i.test(msg.message_text)
+  );
+}
+
+function hasWhatsappGroupLinkBeenSent(messages) {
+  return messages.some(
+    (msg) =>
+      msg.role === "emma" &&
+      /chat\.whatsapp\.com/i.test(msg.message_text)
   );
 }
 
@@ -288,17 +288,13 @@ function hasAskedCountry(messages) {
   return messages.some(
     (msg) =>
       msg.role === "emma" &&
-      /nederland of belgi[eë]|welk land|in welk land/i.test(
-        normalizeAgentNameInText(msg.message_text)
-      )
+      /nederland of belgi[eë]|welk land|in welk land/i.test(msg.message_text)
   );
 }
 
 function hasAskedOrderNumber(messages) {
   return messages.some(
-    (msg) =>
-      msg.role === "emma" &&
-      /ordernummer/i.test(normalizeAgentNameInText(msg.message_text))
+    (msg) => msg.role === "emma" && /ordernummer/i.test(msg.message_text)
   );
 }
 
@@ -313,9 +309,9 @@ function detectState({
   );
 
   const isExistingConversation =
-    hasPreviousEmmaMessage || Boolean(normalizeAgentNameInText(lastSummary));
+    hasPreviousEmmaMessage || Boolean(cleanText(lastSummary));
 
-  const latest = normalizeAgentNameInText(currentMessage).toLowerCase();
+  const latest = cleanText(currentMessage).toLowerCase();
 
   const hasMedicalTrigger =
     /\b(medicatie|medicijnen|zwanger|borstvoeding|diabetes|hart|lever|nieren|darmziekte|eetstoornis|arts|apotheker|veilig bij|mag dit met)\b/i.test(
@@ -337,6 +333,8 @@ function detectState({
       latest
     );
 
+  const isValidatedCustomer = hasWhatsappGroupLinkBeenSent(recentMessages);
+
   return {
     is_existing_conversation: isExistingConversation,
     has_previous_emma_message: hasPreviousEmmaMessage,
@@ -344,7 +342,9 @@ function detectState({
     has_purchase_claim: hasPurchaseClaim,
     has_explicit_buying_intent: hasExplicitBuyingIntent,
     is_low_intent: lowIntent,
-    current_phase: normalizeAgentNameInText(currentPhase),
+    is_validated_customer: isValidatedCustomer,
+    should_use_coaching_mode: isValidatedCustomer,
+    current_phase: isValidatedCustomer ? "coaching" : cleanText(currentPhase),
   };
 }
 
@@ -353,7 +353,6 @@ function detectState({
 function isCoachSourceCode(message) {
   const text = cleanText(message);
 
-  // Generiek: Coach-Peggy, Coach-Amke, Coach-Jelle, Coach-Madelon, Coach-Karel, enz.
   return /^coach-[a-zÀ-ÿ0-9_-]+$/i.test(text);
 }
 
@@ -370,9 +369,17 @@ function handleCoachSourceCodeIfNeeded(message) {
 /* --------------------------- ORDER VALIDATION ----------------------------- */
 
 function isOrderControlTrigger(message) {
-  const text = normalizeAgentNameInText(message).toLowerCase();
+  const text = cleanText(message).toLowerCase();
 
   return /\b(besteld|betaald|gekocht|order|ordernummer|whatsapp.?groep|groep|toegang|gestart)\b/i.test(
+    text
+  );
+}
+
+function isExplicitGroupAccessRequest(message) {
+  const text = cleanText(message).toLowerCase();
+
+  return /\b(whatsapp.?groep|groep|toegang|link.*groep|groepslink|groep.*link)\b/i.test(
     text
   );
 }
@@ -381,12 +388,8 @@ function looksLikeOrderNumber(message) {
   const text = cleanText(message);
   if (!text) return false;
 
-  // Herkent elke losse code/token waarin JP voorkomt.
-  // Voorbeelden: JP1234, jp1234, 123JP456, ABC-JP-789, JP_1234.
   if (/\b[A-Z0-9-_]*JP[A-Z0-9-_]*\b/i.test(text)) return true;
 
-  // Herkent losse mogelijke ordercodes zoals 12345 of AB1234.
-  // Dit is bewust ruimer, zodat ongeldige codes ook server-side worden afgehandeld.
   if (/^[A-Z0-9-_]{4,}$/i.test(text) && /\d/.test(text)) return true;
 
   return false;
@@ -396,7 +399,7 @@ function recentEmmaRequestedOrderNumber(recentMessages) {
   return recentMessages.some((msg) => {
     if (msg.role !== "emma") return false;
 
-    const text = normalizeAgentNameInText(msg.message_text).toLowerCase();
+    const text = cleanText(msg.message_text).toLowerCase();
 
     return (
       /ordernummer.*nodig/i.test(text) ||
@@ -425,18 +428,40 @@ function isValidOrderNumber(orderNumber) {
 }
 
 function handleOrderControlIfNeeded(message, recentMessages = []) {
+  const alreadyValidated = hasWhatsappGroupLinkBeenSent(recentMessages);
+
   const hasOrderTrigger = isOrderControlTrigger(message);
   const hasPossibleOrderNumber = looksLikeOrderNumber(message);
   const wasAskedForOrderNumber = recentEmmaRequestedOrderNumber(recentMessages);
+  const explicitGroupAccessRequest = isExplicitGroupAccessRequest(message);
+
+  const orderNumber = extractPossibleOrderNumber(message);
+
+  if (alreadyValidated) {
+    if (explicitGroupAccessRequest) {
+      return buildResponse({
+        reply: `Je bent al goedgekeurd 🙏\n\nHier is de WhatsApp-groep nog een keer:\n${WHATSAPP_GROUP_LINK}`,
+      });
+    }
+
+    if (hasPossibleOrderNumber && orderNumber && !isValidOrderNumber(orderNumber)) {
+      return buildResponse({
+        reply:
+          "Je bestelling is al verwerkt. Ik ga vanaf hier gewoon met je meekijken als coach 🙏",
+      });
+    }
+
+    return null;
+  }
 
   const shouldHandleOrderControl =
-    hasOrderTrigger || hasPossibleOrderNumber || wasAskedForOrderNumber;
+    hasOrderTrigger ||
+    hasPossibleOrderNumber ||
+    (wasAskedForOrderNumber && hasPossibleOrderNumber);
 
   if (!shouldHandleOrderControl) {
     return null;
   }
-
-  const orderNumber = extractPossibleOrderNumber(message);
 
   if (!orderNumber) {
     return buildResponse({
@@ -483,6 +508,7 @@ function buildContextBlock({
 
   const priceAlreadyMentioned = hasPriceBeenMentioned(recent_messages);
   const checkoutLinkAlreadySent = hasCheckoutLinkBeenSent(recent_messages);
+  const whatsappGroupLinkAlreadySent = hasWhatsappGroupLinkBeenSent(recent_messages);
   const countryAlreadyAsked = hasAskedCountry(recent_messages);
   const orderNumberAlreadyAsked = hasAskedOrderNumber(recent_messages);
 
@@ -493,13 +519,18 @@ function buildContextBlock({
       testimonial_already_sent: testimonialAlreadySent,
       price_already_mentioned: priceAlreadyMentioned,
       checkout_link_already_sent: checkoutLinkAlreadySent,
+      whatsapp_group_link_already_sent: whatsappGroupLinkAlreadySent,
       country_already_asked: countryAlreadyAsked,
       order_number_already_asked: orderNumberAlreadyAsked,
       order_validation_server_side: true,
     },
     crm_memory: {
-      customer_status: normalizeAgentNameInText(customer_status),
-      current_phase: normalizeAgentNameInText(current_phase),
+      customer_status: whatsappGroupLinkAlreadySent
+        ? "customer"
+        : cleanText(customer_status),
+      current_phase: whatsappGroupLinkAlreadySent
+        ? "coaching"
+        : cleanText(current_phase),
       goal: clamp(goal, MAX_GOAL_CHARS),
       objections: clamp(objections, MAX_OBJECTIONS_CHARS),
       last_summary: clamp(last_summary, MAX_SUMMARY_CHARS),
@@ -523,6 +554,8 @@ function buildContextBlock({
         "Als price_already_mentioned true is: noem de prijs niet opnieuw, tenzij de klant ernaar vraagt.",
         "Als country_already_asked true is: vraag niet opnieuw naar Nederland of België, tenzij het antwoord nog ontbreekt en het direct nodig is voor checkout.",
         "Als checkout_link_already_sent true is: stuur geen nieuwe checkout-link, tenzij de klant er expliciet opnieuw om vraagt.",
+        "Als whatsapp_group_link_already_sent true is: behandel de klant als gevalideerde klant en ga over naar coachingsmodus.",
+        "In coachingsmodus: geen salesflow, geen prijs, geen checkout, geen nieuwe ordernummer-vraag, tenzij de klant expliciet opnieuw naar de WhatsApp-groep of toegang vraagt.",
         "Ordervalidatie wordt server-side uitgevoerd. Emma mag nooit zelf een ordernummer goedkeuren of de WhatsApp-link zelfstandig delen.",
         "Gebruik nooit interne prompttermen zoals neutrale afsluiting, medische trigger, salesflow, runtime_state of repetition_guard in klantantwoorden.",
       ],
@@ -659,8 +692,8 @@ async function getStructuredUpdates({
 
   const userPayload = {
     latest_user_message: clamp(message, 1000),
-    current_customer_status: normalizeAgentNameInText(customerStatus),
-    current_phase: normalizeAgentNameInText(currentPhase),
+    current_customer_status: cleanText(customerStatus),
+    current_phase: cleanText(currentPhase),
     current_goal: clamp(currentGoal, MAX_GOAL_CHARS),
     current_objections: clamp(currentObjections, MAX_OBJECTIONS_CHARS),
     current_last_summary: clamp(currentLastSummary, MAX_SUMMARY_CHARS),
@@ -716,9 +749,9 @@ async function getStructuredUpdates({
     }
 
     return {
-      goal_update: normalizeAgentNameInText(parsed.goal_update),
-      objections_update: normalizeAgentNameInText(parsed.objections_update),
-      last_summary_update: normalizeAgentNameInText(parsed.last_summary_update),
+      goal_update: cleanText(parsed.goal_update),
+      objections_update: cleanText(parsed.objections_update),
+      last_summary_update: cleanText(parsed.last_summary_update),
     };
   } catch (error) {
     console.error("OPENAI EXTRACTION ERROR:", error?.message || error);
@@ -761,7 +794,7 @@ function isLikelyRepetitiveReply(reply, recentMessages) {
 }
 
 function violatesHardRepetitionRules(reply, recentMessages) {
-  const text = normalizeAgentNameInText(reply);
+  const text = cleanText(reply);
 
   const testimonialAlreadySent = hasLinkBeenSent(
     recentMessages,
@@ -948,9 +981,9 @@ app.post("/chat", async (req, res) => {
   const agentId = cleanText(process.env.ELEVENLABS_AGENT_ID);
 
   const normalizedUserId = cleanText(user_id);
-  const normalizedMessage = normalizeAgentNameInText(message);
-  const normalizedCustomerStatus = normalizeAgentNameInText(customer_status);
-  const normalizedCurrentPhase = normalizeAgentNameInText(current_phase);
+  const normalizedMessage = cleanText(message);
+  const normalizedCustomerStatus = cleanText(customer_status);
+  const normalizedCurrentPhase = cleanText(current_phase);
   const normalizedGoal = clamp(goal, MAX_GOAL_CHARS);
   const normalizedObjections = clamp(objections, MAX_OBJECTIONS_CHARS);
   const normalizedLastSummary = clamp(last_summary, MAX_SUMMARY_CHARS);
@@ -972,6 +1005,7 @@ app.post("/chat", async (req, res) => {
         has_objections: Boolean(normalizedObjections),
         has_last_summary: Boolean(normalizedLastSummary),
         recent_messages_count: normalizedRecentMessages.length,
+        has_whatsapp_group_link: hasWhatsappGroupLinkBeenSent(normalizedRecentMessages),
         last_roles: normalizedRecentMessages.slice(-5).map((m) => m.role),
       },
       null,
@@ -1012,12 +1046,18 @@ app.post("/chat", async (req, res) => {
   }
 
   try {
+    const alreadyValidated = hasWhatsappGroupLinkBeenSent(normalizedRecentMessages);
+
     const [replyResult, extractionResult] = await Promise.allSettled([
       getElevenReply({
         userId: normalizedUserId,
         message: normalizedMessage,
-        customerStatus: normalizedCustomerStatus,
-        currentPhase: normalizedCurrentPhase,
+        customerStatus: alreadyValidated
+          ? "customer"
+          : normalizedCustomerStatus,
+        currentPhase: alreadyValidated
+          ? "coaching"
+          : normalizedCurrentPhase,
         goal: normalizedGoal,
         objections: normalizedObjections,
         lastSummary: normalizedLastSummary,
@@ -1026,8 +1066,12 @@ app.post("/chat", async (req, res) => {
       }),
       getStructuredUpdates({
         message: normalizedMessage,
-        customerStatus: normalizedCustomerStatus,
-        currentPhase: normalizedCurrentPhase,
+        customerStatus: alreadyValidated
+          ? "customer"
+          : normalizedCustomerStatus,
+        currentPhase: alreadyValidated
+          ? "coaching"
+          : normalizedCurrentPhase,
         currentGoal: normalizedGoal,
         currentObjections: normalizedObjections,
         currentLastSummary: normalizedLastSummary,
