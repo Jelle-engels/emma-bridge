@@ -25,6 +25,19 @@ const WHATSAPP_GROUP_LINK =
 const FALLBACK_REPLY =
   "Er ging iets mis met mijn antwoord, kun je je bericht nog een keer sturen";
 
+const COACH_SOURCE_START_REPLY =
+  "Hallo, ik ben Emma 😊\n\n" +
+  "Ik ben de AI-assistent van Nutrition Works en ik help dagelijks mensen om hun doelen te bereiken 🤗✨\n\n" +
+  "We hebben al tienduizenden mensen geholpen en ik denk echt dat ik jou ook kan helpen 💚\n\n" +
+  "Om je zo goed mogelijk te helpen, mag je me meteen wat meer vertellen over jouw situatie 🙏\n\n" +
+  "Bijvoorbeeld:\n" +
+  "• je huidige gewicht\n" +
+  "• waar je naartoe wil\n" +
+  "• je leeftijd\n" +
+  "• wat je al geprobeerd hebt\n" +
+  "• waar je nu tegenaan loopt\n\n" +
+  "Hoe meer je deelt, hoe beter ik je kan helpen 🤗";
+
 const openai = process.env.OPENAI_API_KEY
   ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
   : null;
@@ -36,10 +49,14 @@ function cleanText(value) {
   return String(value).replace(/\s+/g, " ").trim();
 }
 
+function normalizeAgentNameInText(value) {
+  return cleanText(value).replace(/\bMila\b/gi, "Emma");
+}
+
 function cleanReplyText(value) {
   if (value === null || value === undefined) return "";
 
-  return String(value)
+  return normalizeAgentNameInText(value)
     .replace(/\r\n/g, "\n")
     .replace(/\r/g, "\n")
     .replace(/[ \t]+\n/g, "\n")
@@ -49,13 +66,13 @@ function cleanReplyText(value) {
 }
 
 function clamp(value, max = 500) {
-  const text = cleanText(value);
+  const text = normalizeAgentNameInText(value);
   if (text.length <= max) return text;
   return `${text.slice(0, max).trim()}...`;
 }
 
 function normalizeComparableText(value) {
-  return cleanText(value)
+  return normalizeAgentNameInText(value)
     .toLowerCase()
     .replace(/[^\p{L}\p{N}\s]/gu, "")
     .replace(/\s+/g, " ")
@@ -84,9 +101,9 @@ function buildResponse({
 }) {
   return {
     reply: cleanReplyText(reply),
-    goal_update: cleanText(goal_update),
-    objections_update: cleanText(objections_update),
-    last_summary_update: cleanText(last_summary_update),
+    goal_update: normalizeAgentNameInText(goal_update),
+    objections_update: normalizeAgentNameInText(objections_update),
+    last_summary_update: normalizeAgentNameInText(last_summary_update),
   };
 }
 
@@ -120,7 +137,7 @@ function normalizeRecentMessages(value) {
   return value
     .map((item, index) => {
       const role = normalizeRole(item?.role || item?.sender || item?.from);
-      const message_text = cleanText(
+      const message_text = normalizeAgentNameInText(
         item?.message_text || item?.message || item?.text || item?.content
       );
       const timestamp = cleanText(
@@ -201,14 +218,14 @@ function getLastEmmaMessages(messages, limit = 3) {
   return messages
     .filter((msg) => msg.role === "emma" && msg.message_text)
     .slice(-limit)
-    .map((msg) => msg.message_text);
+    .map((msg) => normalizeAgentNameInText(msg.message_text));
 }
 
 function getLastUserMessages(messages, limit = 3) {
   return messages
     .filter((msg) => msg.role === "user" && msg.message_text)
     .slice(-limit)
-    .map((msg) => msg.message_text);
+    .map((msg) => normalizeAgentNameInText(msg.message_text));
 }
 
 function hasLinkBeenSent(messages, linkPart) {
@@ -218,7 +235,7 @@ function hasLinkBeenSent(messages, linkPart) {
   return messages.some(
     (msg) =>
       msg.role === "emma" &&
-      cleanText(msg.message_text).toLowerCase().includes(needle)
+      normalizeAgentNameInText(msg.message_text).toLowerCase().includes(needle)
   );
 }
 
@@ -226,7 +243,9 @@ function hasPriceBeenMentioned(messages) {
   return messages.some(
     (msg) =>
       msg.role === "emma" &&
-      /€\s*123|123\s*euro|programma kost/i.test(msg.message_text)
+      /€\s*123|123\s*euro|programma kost/i.test(
+        normalizeAgentNameInText(msg.message_text)
+      )
   );
 }
 
@@ -234,7 +253,9 @@ function hasCheckoutLinkBeenSent(messages) {
   return messages.some(
     (msg) =>
       msg.role === "emma" &&
-      /bestellen-nl-control-1x|bestellen-be-control-1x/i.test(msg.message_text)
+      /bestellen-nl-control-1x|bestellen-be-control-1x/i.test(
+        normalizeAgentNameInText(msg.message_text)
+      )
   );
 }
 
@@ -242,13 +263,17 @@ function hasAskedCountry(messages) {
   return messages.some(
     (msg) =>
       msg.role === "emma" &&
-      /nederland of belgi[eë]|welk land|in welk land/i.test(msg.message_text)
+      /nederland of belgi[eë]|welk land|in welk land/i.test(
+        normalizeAgentNameInText(msg.message_text)
+      )
   );
 }
 
 function hasAskedOrderNumber(messages) {
   return messages.some(
-    (msg) => msg.role === "emma" && /ordernummer/i.test(msg.message_text)
+    (msg) =>
+      msg.role === "emma" &&
+      /ordernummer/i.test(normalizeAgentNameInText(msg.message_text))
   );
 }
 
@@ -263,9 +288,9 @@ function detectState({
   );
 
   const isExistingConversation =
-    hasPreviousEmmaMessage || Boolean(cleanText(lastSummary));
+    hasPreviousEmmaMessage || Boolean(normalizeAgentNameInText(lastSummary));
 
-  const latest = cleanText(currentMessage).toLowerCase();
+  const latest = normalizeAgentNameInText(currentMessage).toLowerCase();
 
   const hasMedicalTrigger =
     /\b(medicatie|medicijnen|zwanger|borstvoeding|diabetes|hart|lever|nieren|darmziekte|eetstoornis|arts|apotheker|veilig bij|mag dit met)\b/i.test(
@@ -294,14 +319,33 @@ function detectState({
     has_purchase_claim: hasPurchaseClaim,
     has_explicit_buying_intent: hasExplicitBuyingIntent,
     is_low_intent: lowIntent,
-    current_phase: cleanText(currentPhase),
+    current_phase: normalizeAgentNameInText(currentPhase),
   };
+}
+
+/* --------------------------- COACH SOURCE CODE ---------------------------- */
+
+function isCoachSourceCode(message) {
+  const text = cleanText(message);
+
+  // Generiek: Coach-Peggy, Coach-Amke, Coach-Jelle, Coach-Madelon, Coach-123, enz.
+  return /^coach-[a-zÀ-ÿ0-9_-]+$/i.test(text);
+}
+
+function handleCoachSourceCodeIfNeeded(message) {
+  if (!isCoachSourceCode(message)) {
+    return null;
+  }
+
+  return buildResponse({
+    reply: COACH_SOURCE_START_REPLY,
+  });
 }
 
 /* --------------------------- ORDER VALIDATION ----------------------------- */
 
 function isOrderControlTrigger(message) {
-  const text = cleanText(message).toLowerCase();
+  const text = normalizeAgentNameInText(message).toLowerCase();
 
   return /\b(besteld|betaald|gekocht|order|ordernummer|whatsapp.?groep|groep|toegang|gestart)\b/i.test(
     text
@@ -312,8 +356,9 @@ function looksLikeOrderNumber(message) {
   const text = cleanText(message);
   if (!text) return false;
 
-  // Herkent geldige ordercodes zoals JP1234, JP-1234, JP_1234.
-  if (/\bJP[A-Z0-9-_]{2,}\b/i.test(text)) return true;
+  // Herkent elke losse code/token waarin JP voorkomt.
+  // Voorbeelden: JP1234, jp1234, 123JP456, ABC-JP-789, JP_1234.
+  if (/\b[A-Z0-9-_]*JP[A-Z0-9-_]*\b/i.test(text)) return true;
 
   // Herkent losse mogelijke ordercodes zoals 12345 of AB1234.
   // Dit is bewust ruimer, zodat ongeldige codes ook server-side worden afgehandeld.
@@ -326,7 +371,7 @@ function recentEmmaRequestedOrderNumber(recentMessages) {
   return recentMessages.some((msg) => {
     if (msg.role !== "emma") return false;
 
-    const text = cleanText(msg.message_text).toLowerCase();
+    const text = normalizeAgentNameInText(msg.message_text).toLowerCase();
 
     return (
       /ordernummer.*nodig/i.test(text) ||
@@ -428,8 +473,8 @@ function buildContextBlock({
       order_validation_server_side: true,
     },
     crm_memory: {
-      customer_status: cleanText(customer_status),
-      current_phase: cleanText(current_phase),
+      customer_status: normalizeAgentNameInText(customer_status),
+      current_phase: normalizeAgentNameInText(current_phase),
       goal: clamp(goal, MAX_GOAL_CHARS),
       objections: clamp(objections, MAX_OBJECTIONS_CHARS),
       last_summary: clamp(last_summary, MAX_SUMMARY_CHARS),
@@ -588,11 +633,11 @@ async function getStructuredUpdates({
 
   const userPayload = {
     latest_user_message: clamp(message, 1000),
-    current_customer_status: cleanText(customerStatus),
-    current_phase: cleanText(currentPhase),
-    current_goal: cleanText(currentGoal),
-    current_objections: cleanText(currentObjections),
-    current_last_summary: cleanText(currentLastSummary),
+    current_customer_status: normalizeAgentNameInText(customerStatus),
+    current_phase: normalizeAgentNameInText(currentPhase),
+    current_goal: clamp(currentGoal, MAX_GOAL_CHARS),
+    current_objections: clamp(currentObjections, MAX_OBJECTIONS_CHARS),
+    current_last_summary: clamp(currentLastSummary, MAX_SUMMARY_CHARS),
     recent_messages: recentMessages.slice(-8).map((msg) => ({
       role: msg.role || "unknown",
       message_text: clamp(msg.message_text, 250),
@@ -645,9 +690,9 @@ async function getStructuredUpdates({
     }
 
     return {
-      goal_update: cleanText(parsed.goal_update),
-      objections_update: cleanText(parsed.objections_update),
-      last_summary_update: cleanText(parsed.last_summary_update),
+      goal_update: normalizeAgentNameInText(parsed.goal_update),
+      objections_update: normalizeAgentNameInText(parsed.objections_update),
+      last_summary_update: normalizeAgentNameInText(parsed.last_summary_update),
     };
   } catch (error) {
     console.error("OPENAI EXTRACTION ERROR:", error?.message || error);
@@ -690,7 +735,7 @@ function isLikelyRepetitiveReply(reply, recentMessages) {
 }
 
 function violatesHardRepetitionRules(reply, recentMessages) {
-  const text = cleanText(reply);
+  const text = normalizeAgentNameInText(reply);
 
   const testimonialAlreadySent = hasLinkBeenSent(
     recentMessages,
@@ -877,9 +922,9 @@ app.post("/chat", async (req, res) => {
   const agentId = cleanText(process.env.ELEVENLABS_AGENT_ID);
 
   const normalizedUserId = cleanText(user_id);
-  const normalizedMessage = cleanText(message);
-  const normalizedCustomerStatus = cleanText(customer_status);
-  const normalizedCurrentPhase = cleanText(current_phase);
+  const normalizedMessage = normalizeAgentNameInText(message);
+  const normalizedCustomerStatus = normalizeAgentNameInText(customer_status);
+  const normalizedCurrentPhase = normalizeAgentNameInText(current_phase);
   const normalizedGoal = clamp(goal, MAX_GOAL_CHARS);
   const normalizedObjections = clamp(objections, MAX_OBJECTIONS_CHARS);
   const normalizedLastSummary = clamp(last_summary, MAX_SUMMARY_CHARS);
@@ -916,6 +961,13 @@ app.post("/chat", async (req, res) => {
   if (!normalizedMessage) {
     console.error("REQUEST ERROR: message ontbreekt");
     return res.json(buildResponse({ reply: FALLBACK_REPLY }));
+  }
+
+  const coachSourceResponse = handleCoachSourceCodeIfNeeded(normalizedMessage);
+
+  if (coachSourceResponse) {
+    console.log("COACH SOURCE CODE HANDLED SERVER-SIDE");
+    return res.json(coachSourceResponse);
   }
 
   const orderControlResponse = handleOrderControlIfNeeded(
