@@ -53,14 +53,39 @@ function normalizeAgentNameInText(value) {
   return cleanText(value).replace(/\bMila\b/gi, "Emma");
 }
 
+function removePromptLeakTerms(value) {
+  if (value === null || value === undefined) return "";
+
+  return String(value)
+    .replace(/\bneutrale afsluiting\b/gi, "")
+    .replace(/\bkorte erkenning\b/gi, "")
+    .replace(/\bduidelijke afbakening\b/gi, "")
+    .replace(/\bdoorverwijzing\b/gi, "")
+    .replace(/\bzonder verkoopdruk\b/gi, "")
+    .replace(/\bstructuur van het antwoord\b/gi, "")
+    .replace(/\bmedische trigger\b/gi, "")
+    .replace(/\bmedical trigger\b/gi, "")
+    .replace(/\bsalesflow\b/gi, "")
+    .replace(/\bexit-conditie\b/gi, "")
+    .replace(/\bexit conditie\b/gi, "")
+    .replace(/\bcontextblok\b/gi, "")
+    .replace(/\bruntime context\b/gi, "")
+    .replace(/\bruntime_state\b/gi, "")
+    .replace(/\bcrm_memory\b/gi, "")
+    .replace(/\brepetition_guard\b/gi, "")
+    .replace(/\blatest_user_message\b/gi, "")
+    .replace(/\brecent_conversation_history\b/gi, "");
+}
+
 function cleanReplyText(value) {
   if (value === null || value === undefined) return "";
 
-  return normalizeAgentNameInText(value)
+  return normalizeAgentNameInText(removePromptLeakTerms(value))
     .replace(/\r\n/g, "\n")
     .replace(/\r/g, "\n")
     .replace(/[ \t]+\n/g, "\n")
     .replace(/\n[ \t]+/g, "\n")
+    .replace(/[ \t]{2,}/g, " ")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
@@ -328,7 +353,7 @@ function detectState({
 function isCoachSourceCode(message) {
   const text = cleanText(message);
 
-  // Generiek: Coach-Peggy, Coach-Amke, Coach-Jelle, Coach-Madelon, Coach-123, enz.
+  // Generiek: Coach-Peggy, Coach-Amke, Coach-Jelle, Coach-Madelon, Coach-Karel, enz.
   return /^coach-[a-zÀ-ÿ0-9_-]+$/i.test(text);
 }
 
@@ -499,6 +524,7 @@ function buildContextBlock({
         "Als country_already_asked true is: vraag niet opnieuw naar Nederland of België, tenzij het antwoord nog ontbreekt en het direct nodig is voor checkout.",
         "Als checkout_link_already_sent true is: stuur geen nieuwe checkout-link, tenzij de klant er expliciet opnieuw om vraagt.",
         "Ordervalidatie wordt server-side uitgevoerd. Emma mag nooit zelf een ordernummer goedkeuren of de WhatsApp-link zelfstandig delen.",
+        "Gebruik nooit interne prompttermen zoals neutrale afsluiting, medische trigger, salesflow, runtime_state of repetition_guard in klantantwoorden.",
       ],
     },
   };
@@ -1034,6 +1060,8 @@ app.post("/chat", async (req, res) => {
       reply =
         "Ik ga hier niet opnieuw hetzelfde over uitleggen. Op basis van wat je al hebt gedeeld: wat is nu je grootste twijfel om hiermee te starten?";
     }
+
+    reply = cleanReplyText(reply);
 
     const extraction =
       extractionResult.status === "fulfilled"
