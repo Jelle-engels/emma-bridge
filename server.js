@@ -19,6 +19,9 @@ const MAX_SUMMARY_CHARS = Number(process.env.MAX_SUMMARY_CHARS || 900);
 const MAX_GOAL_CHARS = Number(process.env.MAX_GOAL_CHARS || 300);
 const MAX_OBJECTIONS_CHARS = Number(process.env.MAX_OBJECTIONS_CHARS || 400);
 
+const WHATSAPP_GROUP_LINK =
+  "https://chat.whatsapp.com/IlulN0LkWTFA5T4G1klynS?mode=gi_t";
+
 const FALLBACK_REPLY =
   "Er ging iets mis met mijn antwoord, kun je je bericht nog een keer sturen";
 
@@ -245,9 +248,7 @@ function hasAskedCountry(messages) {
 
 function hasAskedOrderNumber(messages) {
   return messages.some(
-    (msg) =>
-      msg.role === "emma" &&
-      /ordernummer/i.test(msg.message_text)
+    (msg) => msg.role === "emma" && /ordernummer/i.test(msg.message_text)
   );
 }
 
@@ -295,6 +296,56 @@ function detectState({
     is_low_intent: lowIntent,
     current_phase: cleanText(currentPhase),
   };
+}
+
+/* --------------------------- ORDER VALIDATION ----------------------------- */
+
+function isOrderControlTrigger(message) {
+  const text = cleanText(message).toLowerCase();
+
+  return /\b(besteld|betaald|gekocht|order|ordernummer|whatsapp.?groep|groep|toegang|gestart)\b/i.test(
+    text
+  );
+}
+
+function extractPossibleOrderNumber(message) {
+  const text = cleanText(message);
+  if (!text) return "";
+
+  const candidates = text.match(/\b[A-Z0-9][A-Z0-9-_]{3,}\b/gi) || [];
+
+  const withJp = candidates.find((candidate) => /JP/i.test(candidate));
+  if (withJp) return withJp;
+
+  return candidates.find((candidate) => /\d/.test(candidate)) || "";
+}
+
+function isValidOrderNumber(orderNumber) {
+  return /JP/i.test(cleanText(orderNumber));
+}
+
+function handleOrderControlIfNeeded(message) {
+  if (!isOrderControlTrigger(message)) {
+    return null;
+  }
+
+  const orderNumber = extractPossibleOrderNumber(message);
+
+  if (!orderNumber) {
+    return buildResponse({
+      reply: "Om je goed te kunnen helpen heb ik eerst even je ordernummer nodig 🙏",
+    });
+  }
+
+  if (!isValidOrderNumber(orderNumber)) {
+    return buildResponse({
+      reply: "Zou je het ordernummer nog eens willen controleren?",
+    });
+  }
+
+  return buildResponse({
+    reply: `Top, je ordernummer is goedgekeurd 🙏\n\nHier is de WhatsApp-groep waar je direct kunt starten met tips en begeleiding:\n${WHATSAPP_GROUP_LINK}`,
+  });
 }
 
 /* ------------------------------ CONTEXT BLOCK ----------------------------- */
@@ -585,13 +636,15 @@ function isLikelyRepetitiveReply(reply, recentMessages) {
 
     if (normalizedReply === normalizedOld) return true;
 
-    const shorter = normalizedReply.length < normalizedOld.length
-      ? normalizedReply
-      : normalizedOld;
+    const shorter =
+      normalizedReply.length < normalizedOld.length
+        ? normalizedReply
+        : normalizedOld;
 
-    const longer = normalizedReply.length >= normalizedOld.length
-      ? normalizedReply
-      : normalizedOld;
+    const longer =
+      normalizedReply.length >= normalizedOld.length
+        ? normalizedReply
+        : normalizedOld;
 
     return shorter.length > 80 && longer.includes(shorter);
   });
@@ -824,6 +877,13 @@ app.post("/chat", async (req, res) => {
   if (!normalizedMessage) {
     console.error("REQUEST ERROR: message ontbreekt");
     return res.json(buildResponse({ reply: FALLBACK_REPLY }));
+  }
+
+  const orderControlResponse = handleOrderControlIfNeeded(normalizedMessage);
+
+  if (orderControlResponse) {
+    console.log("ORDER CONTROL HANDLED SERVER-SIDE");
+    return res.json(orderControlResponse);
   }
 
   if (!agentId) {
