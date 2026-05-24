@@ -24,6 +24,8 @@ const MAX_SUMMARY_CHARS = Number(process.env.MAX_SUMMARY_CHARS || 900);
 const MAX_GOAL_CHARS = Number(process.env.MAX_GOAL_CHARS || 300);
 const MAX_OBJECTIONS_CHARS = Number(process.env.MAX_OBJECTIONS_CHARS || 400);
 
+const NO_REPLY = "__NO_REPLY__";
+
 const WHATSAPP_GROUP_LINK =
   "https://chat.whatsapp.com/IlulN0LkWTFA5T4G1klynS?mode=gi_t";
 
@@ -130,16 +132,26 @@ function buildResponse({
   last_summary_update = "",
   send_reply,
 }) {
-  const cleanedReply = cleanReplyText(reply);
+  const rawReply = reply === NO_REPLY ? NO_REPLY : cleanReplyText(reply);
 
   return {
     send_reply:
-      typeof send_reply === "boolean" ? send_reply : Boolean(cleanedReply),
-    reply: cleanedReply,
+      typeof send_reply === "boolean" ? send_reply : rawReply !== "" && rawReply !== NO_REPLY,
+    reply: rawReply,
     goal_update: cleanText(goal_update),
     objections_update: cleanText(objections_update),
     last_summary_update: cleanText(last_summary_update),
   };
+}
+
+function buildNoReplyResponse() {
+  return buildResponse({
+    send_reply: false,
+    reply: NO_REPLY,
+    goal_update: "",
+    objections_update: "",
+    last_summary_update: "",
+  });
 }
 
 /* ------------------------ SERVER-SIDE MESSAGE DEBOUNCE -------------------- */
@@ -236,9 +248,7 @@ setInterval(() => {
 function normalizeRole(role) {
   const r = cleanText(role).toLowerCase();
 
-  if (["emma", "assistant", "ai", "agent", "bot"].includes(r)) {
-    return "emma";
-  }
+  if (["emma", "assistant", "ai", "agent", "bot"].includes(r)) return "emma";
 
   if (["user", "customer", "klant", "client", "lead", "persoon"].includes(r)) {
     return "user";
@@ -470,9 +480,7 @@ function isCoachSourceCode(message) {
 }
 
 function handleCoachSourceCodeIfNeeded(message) {
-  if (!isCoachSourceCode(message)) {
-    return null;
-  }
+  if (!isCoachSourceCode(message)) return null;
 
   return buildResponse({
     send_reply: true,
@@ -502,9 +510,7 @@ function looksLikeOrderNumber(message) {
   const text = cleanText(message);
   if (!text) return false;
 
-  if (/\b[A-Z0-9-_]*JP[A-Z0-9-_]*\b/i.test(text)) return true;
-
-  return false;
+  return /\b[A-Z0-9-_]*JP[A-Z0-9-_]*\b/i.test(text);
 }
 
 function recentEmmaRequestedOrderNumber(recentMessages) {
@@ -528,11 +534,7 @@ function extractPossibleOrderNumber(message) {
   if (!text) return "";
 
   const candidates = text.match(/\b[A-Z0-9][A-Z0-9-_]{3,}\b/gi) || [];
-
-  const withJp = candidates.find((candidate) => /JP/i.test(candidate));
-  if (withJp) return withJp;
-
-  return "";
+  return candidates.find((candidate) => /JP/i.test(candidate)) || "";
 }
 
 function isValidOrderNumber(orderNumber) {
@@ -573,9 +575,7 @@ function handleOrderControlIfNeeded(message, recentMessages = []) {
     hasPossibleOrderNumber ||
     (wasAskedForOrderNumber && hasPossibleOrderNumber);
 
-  if (!shouldHandleOrderControl) {
-    return null;
-  }
+  if (!shouldHandleOrderControl) return null;
 
   if (!orderNumber) {
     return buildResponse({
@@ -720,9 +720,7 @@ function safeJsonParse(value) {
 }
 
 function extractOutputText(response) {
-  if (cleanText(response?.output_text)) {
-    return cleanText(response.output_text);
-  }
+  if (cleanText(response?.output_text)) return cleanText(response.output_text);
 
   if (Array.isArray(response?.output)) {
     const textParts = [];
@@ -905,7 +903,10 @@ function violatesHardRepetitionRules(reply, recentMessages) {
     return "testimonial_repeated";
   }
 
-  if (checkoutAlreadySent && /bestellen-nl-control-1x|bestellen-be-control-1x/i.test(text)) {
+  if (
+    checkoutAlreadySent &&
+    /bestellen-nl-control-1x|bestellen-be-control-1x/i.test(text)
+  ) {
     return "checkout_link_repeated";
   }
 
@@ -1120,15 +1121,7 @@ app.post("/chat", async (req, res) => {
       )
     );
 
-    return res.json(
-      buildResponse({
-        send_reply: false,
-        reply: "",
-        goal_update: "",
-        objections_update: "",
-        last_summary_update: "",
-      })
-    );
+    return res.json(buildNoReplyResponse());
   }
 
   const normalizedMessage = cleanText(debounced.message || originalMessage);
@@ -1154,15 +1147,7 @@ app.post("/chat", async (req, res) => {
   );
 
   if (!normalizedMessage) {
-    return res.json(
-      buildResponse({
-        send_reply: false,
-        reply: "",
-        goal_update: "",
-        objections_update: "",
-        last_summary_update: "",
-      })
-    );
+    return res.json(buildNoReplyResponse());
   }
 
   const coachSourceResponse = handleCoachSourceCodeIfNeeded(normalizedMessage);
