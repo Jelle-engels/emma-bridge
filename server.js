@@ -26,8 +26,24 @@ const MAX_OBJECTIONS_CHARS = Number(process.env.MAX_OBJECTIONS_CHARS || 400);
 
 const NO_REPLY = "__NO_REPLY__";
 
+const WHATSAPP_GROUP_LINK =
+  "https://chat.whatsapp.com/IlulN0LkWTFA5T4G1klynS?mode=gi_t";
+
 const FALLBACK_REPLY =
   "Er ging iets mis met mijn antwoord, kun je je bericht nog een keer sturen";
+
+const COACH_SOURCE_START_REPLY =
+  "Hallo, ik ben Emma 😊\n\n" +
+  "Ik ben de AI-assistent van Nutrition Works en ik help dagelijks mensen om hun doelen te bereiken 🤗✨\n\n" +
+  "We hebben al tienduizenden mensen geholpen en ik denk echt dat ik jou ook kan helpen 💚\n\n" +
+  "Om je zo goed mogelijk te helpen, mag je me meteen wat meer vertellen over jouw situatie 🙏\n\n" +
+  "Bijvoorbeeld:\n" +
+  "• je huidige gewicht\n" +
+  "• waar je naartoe wil\n" +
+  "• je leeftijd\n" +
+  "• wat je al geprobeerd hebt\n" +
+  "• waar je nu tegenaan loopt\n\n" +
+  "Hoe meer je deelt, hoe beter ik je kan helpen 🤗";
 
 const openai = process.env.OPENAI_API_KEY
   ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
@@ -44,10 +60,34 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function cleanReplyText(value) {
+function removePromptLeakTerms(value) {
   if (value === null || value === undefined) return "";
 
   return String(value)
+    .replace(/\bneutrale afsluiting\b/gi, "")
+    .replace(/\bkorte erkenning\b/gi, "")
+    .replace(/\bduidelijke afbakening\b/gi, "")
+    .replace(/\bdoorverwijzing\b/gi, "")
+    .replace(/\bzonder verkoopdruk\b/gi, "")
+    .replace(/\bstructuur van het antwoord\b/gi, "")
+    .replace(/\bmedische trigger\b/gi, "")
+    .replace(/\bmedical trigger\b/gi, "")
+    .replace(/\bsalesflow\b/gi, "")
+    .replace(/\bexit-conditie\b/gi, "")
+    .replace(/\bexit conditie\b/gi, "")
+    .replace(/\bcontextblok\b/gi, "")
+    .replace(/\bruntime context\b/gi, "")
+    .replace(/\bruntime_state\b/gi, "")
+    .replace(/\bcrm_memory\b/gi, "")
+    .replace(/\brepetition_guard\b/gi, "")
+    .replace(/\blatest_user_message\b/gi, "")
+    .replace(/\brecent_conversation_history\b/gi, "");
+}
+
+function cleanReplyText(value) {
+  if (value === null || value === undefined) return "";
+
+  return removePromptLeakTerms(value)
     .replace(/\r\n/g, "\n")
     .replace(/\r/g, "\n")
     .replace(/[ \t]+\n/g, "\n")
@@ -71,6 +111,20 @@ function normalizeComparableText(value) {
     .trim();
 }
 
+function uniqueBy(items, keyFn) {
+  const seen = new Set();
+  const out = [];
+
+  for (const item of items) {
+    const key = keyFn(item);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(item);
+  }
+
+  return out;
+}
+
 function buildResponse({
   reply,
   goal_update = "",
@@ -82,9 +136,7 @@ function buildResponse({
 
   return {
     send_reply:
-      typeof send_reply === "boolean"
-        ? send_reply
-        : rawReply !== "" && rawReply !== NO_REPLY,
+      typeof send_reply === "boolean" ? send_reply : rawReply !== "" && rawReply !== NO_REPLY,
     reply: rawReply,
     goal_update: cleanText(goal_update),
     objections_update: cleanText(objections_update),
@@ -107,7 +159,17 @@ function buildNoReplyResponse() {
 const pendingDebounceByUser = new Map();
 
 function buildDebouncedUserMessage(messages) {
-  return messages.map(cleanText).filter(Boolean).join("\n");
+  const cleanedMessages = messages.map(cleanText).filter(Boolean);
+
+  const nonCoachMessages = cleanedMessages.filter(
+    (message) => !isCoachSourceCode(message)
+  );
+
+  if (nonCoachMessages.length === 0) {
+    return cleanedMessages[cleanedMessages.length - 1] || "";
+  }
+
+  return nonCoachMessages.join("\n");
 }
 
 async function waitForDebouncedUserMessage({ userId, message }) {
@@ -260,21 +322,6 @@ function removeCurrentUserMessageFromHistory(messages, currentMessage) {
     .reverse();
 }
 
-function uniqueBy(items, keyFn) {
-  const seen = new Set();
-  const out = [];
-
-  for (const item of items) {
-    const key = keyFn(item);
-    if (!key || seen.has(key)) continue;
-
-    seen.add(key);
-    out.push(item);
-  }
-
-  return out;
-}
-
 function sanitizeAndPrepareRecentMessages(recentMessages, currentMessage) {
   const normalized = normalizeRecentMessages(recentMessages);
   const sorted = sortMessagesChronologically(normalized);
@@ -308,11 +355,59 @@ function getLastEmmaMessages(messages, limit = 3) {
     .map((msg) => msg.message_text);
 }
 
+function getLastUserMessages(messages, limit = 3) {
+  return messages
+    .filter((msg) => msg.role === "user" && msg.message_text)
+    .slice(-limit)
+    .map((msg) => msg.message_text);
+}
+
+function hasLinkBeenSent(messages, linkPart) {
+  const needle = cleanText(linkPart).toLowerCase();
+  if (!needle) return false;
+
+  return messages.some(
+    (msg) =>
+      msg.role === "emma" &&
+      cleanText(msg.message_text).toLowerCase().includes(needle)
+  );
+}
+
+function hasPriceBeenMentioned(messages) {
+  return messages.some(
+    (msg) =>
+      msg.role === "emma" &&
+      /€\s*123|123\s*euro|programma kost/i.test(msg.message_text)
+  );
+}
+
+function hasCheckoutLinkBeenSent(messages) {
+  return messages.some(
+    (msg) =>
+      msg.role === "emma" &&
+      /bestellen-nl-control-1x|bestellen-be-control-1x/i.test(msg.message_text)
+  );
+}
+
 function hasWhatsappGroupLinkBeenSent(messages) {
   return messages.some(
     (msg) =>
       msg.role === "emma" &&
-      /chat\.whatsapp\.com/i.test(cleanText(msg.message_text))
+      /chat\.whatsapp\.com/i.test(msg.message_text)
+  );
+}
+
+function hasAskedCountry(messages) {
+  return messages.some(
+    (msg) =>
+      msg.role === "emma" &&
+      /nederland of belgi[eë]|welk land|in welk land/i.test(msg.message_text)
+  );
+}
+
+function hasAskedOrderNumber(messages) {
+  return messages.some(
+    (msg) => msg.role === "emma" && /ordernummer/i.test(msg.message_text)
   );
 }
 
@@ -322,8 +417,6 @@ function isCustomerStatusValidated(customerStatus, recentMessages) {
     hasWhatsappGroupLinkBeenSent(recentMessages)
   );
 }
-
-/* ------------------------------ CONTEXT BLOCK ----------------------------- */
 
 function detectState({
   currentMessage,
@@ -347,12 +440,17 @@ function detectState({
     );
 
   const hasPurchaseClaim =
-    /\b(besteld|order|ordernummer|betaald|gekocht|whatsapp.?groep|groep|toegang|gestart)\b/i.test(
+    /\b(besteld|order|ordernummer|betaald|gekocht|whatsapp.?groep|groep|toegang)\b/i.test(
       latest
     );
 
   const hasExplicitBuyingIntent =
     /\b(bestellen|starten|ik wil starten|hoe bestel|link|kopen|aanschaffen|doorgaan)\b/i.test(
+      latest
+    );
+
+  const lowIntent =
+    /^(ok|oke|ja|nee|weet niet|misschien|kan|vertel maar|hoe bedoel je|prima|goed|klinkt goed)\.?$/i.test(
       latest
     );
 
@@ -367,11 +465,139 @@ function detectState({
     has_medical_trigger: hasMedicalTrigger,
     has_purchase_claim: hasPurchaseClaim,
     has_explicit_buying_intent: hasExplicitBuyingIntent,
+    is_low_intent: lowIntent,
     is_validated_customer: isValidatedCustomer,
     should_use_coaching_mode: isValidatedCustomer,
     current_phase: isValidatedCustomer ? "coaching" : cleanText(currentPhase),
   };
 }
+
+/* --------------------------- COACH SOURCE CODE ---------------------------- */
+
+function isCoachSourceCode(message) {
+  const text = cleanText(message);
+  return /^coach-[a-zÀ-ÿ0-9_-]+$/i.test(text);
+}
+
+function handleCoachSourceCodeIfNeeded(message) {
+  if (!isCoachSourceCode(message)) return null;
+
+  return buildResponse({
+    send_reply: true,
+    reply: COACH_SOURCE_START_REPLY,
+  });
+}
+
+/* --------------------------- ORDER VALIDATION ----------------------------- */
+
+function isOrderControlTrigger(message) {
+  const text = cleanText(message).toLowerCase();
+
+  return /\b(besteld|betaald|gekocht|order|ordernummer|whatsapp.?groep|groep|toegang|gestart)\b/i.test(
+    text
+  );
+}
+
+function isExplicitGroupAccessRequest(message) {
+  const text = cleanText(message).toLowerCase();
+
+  return /\b(whatsapp.?groep|groep|toegang|link.*groep|groepslink|groep.*link)\b/i.test(
+    text
+  );
+}
+
+function looksLikeOrderNumber(message) {
+  const text = cleanText(message);
+  if (!text) return false;
+
+  return /\b[A-Z0-9-_]*JP[A-Z0-9-_]*\b/i.test(text);
+}
+
+function recentEmmaRequestedOrderNumber(recentMessages) {
+  return recentMessages.some((msg) => {
+    if (msg.role !== "emma") return false;
+
+    const text = cleanText(msg.message_text).toLowerCase();
+
+    return (
+      /ordernummer.*nodig/i.test(text) ||
+      /ordernummer.*doorsturen/i.test(text) ||
+      /ordernummer.*delen/i.test(text) ||
+      /stuur.*ordernummer/i.test(text) ||
+      /order.*nummer.*nodig/i.test(text)
+    );
+  });
+}
+
+function extractPossibleOrderNumber(message) {
+  const text = cleanText(message);
+  if (!text) return "";
+
+  const candidates = text.match(/\b[A-Z0-9][A-Z0-9-_]{3,}\b/gi) || [];
+  return candidates.find((candidate) => /JP/i.test(candidate)) || "";
+}
+
+function isValidOrderNumber(orderNumber) {
+  return /JP/i.test(cleanText(orderNumber));
+}
+
+function handleOrderControlIfNeeded(message, recentMessages = []) {
+  const alreadyValidated = hasWhatsappGroupLinkBeenSent(recentMessages);
+
+  const hasOrderTrigger = isOrderControlTrigger(message);
+  const hasPossibleOrderNumber = looksLikeOrderNumber(message);
+  const wasAskedForOrderNumber = recentEmmaRequestedOrderNumber(recentMessages);
+  const explicitGroupAccessRequest = isExplicitGroupAccessRequest(message);
+
+  const orderNumber = extractPossibleOrderNumber(message);
+
+  if (alreadyValidated) {
+    if (explicitGroupAccessRequest) {
+      return buildResponse({
+        send_reply: true,
+        reply: `Je bent al goedgekeurd 🙏\n\nHier is de WhatsApp-groep nog een keer:\n${WHATSAPP_GROUP_LINK}`,
+      });
+    }
+
+    if (hasPossibleOrderNumber && orderNumber && !isValidOrderNumber(orderNumber)) {
+      return buildResponse({
+        send_reply: true,
+        reply:
+          "Je bestelling is al verwerkt. Ik ga vanaf hier gewoon met je meekijken als coach 🙏",
+      });
+    }
+
+    return null;
+  }
+
+  const shouldHandleOrderControl =
+    hasOrderTrigger ||
+    hasPossibleOrderNumber ||
+    (wasAskedForOrderNumber && hasPossibleOrderNumber);
+
+  if (!shouldHandleOrderControl) return null;
+
+  if (!orderNumber) {
+    return buildResponse({
+      send_reply: true,
+      reply: "Om je goed te kunnen helpen heb ik eerst even je ordernummer nodig 🙏",
+    });
+  }
+
+  if (!isValidOrderNumber(orderNumber)) {
+    return buildResponse({
+      send_reply: true,
+      reply: "Zou je het ordernummer nog eens willen controleren?",
+    });
+  }
+
+  return buildResponse({
+    send_reply: true,
+    reply: `Top, je ordernummer is goedgekeurd 🙏\n\nHier is de WhatsApp-groep waar je direct kunt starten met tips en begeleiding:\n${WHATSAPP_GROUP_LINK}`,
+  });
+}
+
+/* ------------------------------ CONTEXT BLOCK ----------------------------- */
 
 function buildContextBlock({
   customer_status,
@@ -390,16 +616,40 @@ function buildContextBlock({
     customerStatus: customer_status,
   });
 
+  const lastEmmaMessages = getLastEmmaMessages(recent_messages, 3);
+  const lastUserMessages = getLastUserMessages(recent_messages, 3);
+
+  const testimonialAlreadySent = hasLinkBeenSent(
+    recent_messages,
+    "youtube.com/@Nutrition-Works"
+  );
+
+  const priceAlreadyMentioned = hasPriceBeenMentioned(recent_messages);
+  const checkoutLinkAlreadySent = hasCheckoutLinkBeenSent(recent_messages);
+  const whatsappGroupLinkAlreadySent = hasWhatsappGroupLinkBeenSent(recent_messages);
+  const countryAlreadyAsked = hasAskedCountry(recent_messages);
+  const orderNumberAlreadyAsked = hasAskedOrderNumber(recent_messages);
+
+  const validatedCustomer = isCustomerStatusValidated(
+    customer_status,
+    recent_messages
+  );
+
   const context = {
     agent_name: "Emma",
-    runtime_state: state,
+    runtime_state: {
+      ...state,
+      testimonial_already_sent: testimonialAlreadySent,
+      price_already_mentioned: priceAlreadyMentioned,
+      checkout_link_already_sent: checkoutLinkAlreadySent,
+      whatsapp_group_link_already_sent: whatsappGroupLinkAlreadySent,
+      country_already_asked: countryAlreadyAsked,
+      order_number_already_asked: orderNumberAlreadyAsked,
+      order_validation_server_side: true,
+    },
     crm_memory: {
-      customer_status: state.is_validated_customer
-        ? "customer"
-        : cleanText(customer_status),
-      current_phase: state.is_validated_customer
-        ? "coaching"
-        : cleanText(current_phase),
+      customer_status: validatedCustomer ? "customer" : cleanText(customer_status),
+      current_phase: validatedCustomer ? "coaching" : cleanText(current_phase),
       goal: clamp(goal, MAX_GOAL_CHARS),
       objections: clamp(objections, MAX_OBJECTIONS_CHARS),
       last_summary: clamp(last_summary, MAX_SUMMARY_CHARS),
@@ -410,12 +660,32 @@ function buildContextBlock({
       message_text: clamp(msg.message_text, MAX_MESSAGE_CHARS),
       timestamp: msg.timestamp || "",
     })),
-    do_not_repeat_recent_emma_messages: getLastEmmaMessages(recent_messages, 3),
+    repetition_guard: {
+      do_not_repeat_these_recent_emma_messages: lastEmmaMessages,
+      last_user_messages_for_context_only: lastUserMessages,
+      rules: [
+        "Antwoord alleen op het nieuwste klantbericht.",
+        "Gebruik bekende CRM-data als achtergrond, niet als tekst om opnieuw op te sommen.",
+        "Herhaal geen vraag, uitleg, prijs, testimonial-link, checkout-link of ordernummer-instructie die al in de recente Emma-berichten staat.",
+        "Als iets al bekend is uit goal, objections, last_summary of recent_conversation_history: vraag er niet opnieuw naar.",
+        "Als het gesprek bestaand is: stel jezelf niet opnieuw voor en gebruik geen startbericht.",
+        "Als testimonial_already_sent true is: stuur de testimonial-link niet opnieuw, tenzij de klant er expliciet om vraagt.",
+        "Als price_already_mentioned true is: noem de prijs niet opnieuw, tenzij de klant ernaar vraagt.",
+        "Als country_already_asked true is: vraag niet opnieuw naar Nederland of België, tenzij het antwoord nog ontbreekt en het direct nodig is voor checkout.",
+        "Als checkout_link_already_sent true is: stuur geen nieuwe checkout-link, tenzij de klant er expliciet opnieuw om vraagt.",
+        "Als whatsapp_group_link_already_sent true is: behandel de klant als gevalideerde klant en ga over naar coachingsmodus.",
+        "In coachingsmodus: geen salesflow, geen prijs, geen checkout, geen nieuwe ordernummer-vraag, tenzij de klant expliciet opnieuw naar de WhatsApp-groep of toegang vraagt.",
+        "Ordervalidatie wordt server-side uitgevoerd. Emma mag nooit zelf een ordernummer goedkeuren of de WhatsApp-link zelfstandig delen.",
+        "Gebruik nooit interne prompttermen zoals neutrale afsluiting, medische trigger, salesflow, runtime_state of repetition_guard in klantantwoorden.",
+      ],
+    },
   };
 
   return [
     "RUNTIME CONTEXT VOOR EMMA",
-    "Gebruik deze context als feitelijke achtergrondinformatie. Herhaal deze context niet letterlijk.",
+    "Gebruik deze context als hoogste gespreksspecifieke input naast de system prompt.",
+    "De context is feitelijk; herhaal hem niet letterlijk naar de klant.",
+    "",
     JSON.stringify(context, null, 2),
   ].join("\n");
 }
@@ -440,7 +710,6 @@ function safeJsonParse(value) {
 
   const firstBrace = trimmed.indexOf("{");
   const lastBrace = trimmed.lastIndexOf("}");
-
   if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
     try {
       return JSON.parse(trimmed.slice(firstBrace, lastBrace + 1));
@@ -507,12 +776,12 @@ async function getStructuredUpdates({
   };
 
   const systemPrompt = [
-    "Je bent een strikte CRM-extractor voor een WhatsApp-gesprek.",
-    "Je taak is niet om te antwoorden op de gebruiker.",
+    "Je bent een strikte CRM-extractor voor een WhatsApp salesgesprek.",
+    "Je taak is NIET om te antwoorden op de gebruiker.",
     "Je analyseert alleen het nieuwste gebruikersbericht in de context van bestaande CRM-data.",
     "Je geeft uitsluitend geldige JSON terug.",
     "Gebruik Nederlands.",
-    "Vul alleen een veld als het nieuwste gebruikersbericht echt nieuwe of concretere informatie toevoegt.",
+    "Vul alleen een veld als het nieuwste gebruikersbericht echt nieuwe of duidelijk concretere informatie toevoegt.",
     "Herhaal geen informatie die al in current_goal, current_objections of current_last_summary staat.",
     "Als er geen relevante update is voor een veld, geef een lege string terug.",
     "Verzin niets.",
@@ -589,6 +858,63 @@ async function getStructuredUpdates({
   } finally {
     clearTimeout(timer);
   }
+}
+
+/* ---------------------------- REPLY VALIDATION ---------------------------- */
+
+function isLikelyRepetitiveReply(reply, recentMessages) {
+  const normalizedReply = normalizeComparableText(reply);
+  if (!normalizedReply) return false;
+
+  const recentEmmaMessages = getLastEmmaMessages(recentMessages, 3);
+
+  return recentEmmaMessages.some((oldReply) => {
+    const normalizedOld = normalizeComparableText(oldReply);
+    if (!normalizedOld) return false;
+
+    if (normalizedReply === normalizedOld) return true;
+
+    const shorter =
+      normalizedReply.length < normalizedOld.length
+        ? normalizedReply
+        : normalizedOld;
+
+    const longer =
+      normalizedReply.length >= normalizedOld.length
+        ? normalizedReply
+        : normalizedOld;
+
+    return shorter.length > 80 && longer.includes(shorter);
+  });
+}
+
+function violatesHardRepetitionRules(reply, recentMessages) {
+  const text = cleanText(reply);
+
+  const testimonialAlreadySent = hasLinkBeenSent(
+    recentMessages,
+    "youtube.com/@Nutrition-Works"
+  );
+
+  const checkoutAlreadySent = hasCheckoutLinkBeenSent(recentMessages);
+  const priceAlreadyMentioned = hasPriceBeenMentioned(recentMessages);
+
+  if (testimonialAlreadySent && /youtube\.com\/@Nutrition-Works/i.test(text)) {
+    return "testimonial_repeated";
+  }
+
+  if (
+    checkoutAlreadySent &&
+    /bestellen-nl-control-1x|bestellen-be-control-1x/i.test(text)
+  ) {
+    return "checkout_link_repeated";
+  }
+
+  if (priceAlreadyMentioned && /€\s*123|123\s*euro|programma kost/i.test(text)) {
+    return "price_repeated";
+  }
+
+  return "";
 }
 
 /* ----------------------------- ELEVENLABS CHAT ---------------------------- */
@@ -749,6 +1075,24 @@ app.post("/chat", async (req, res) => {
   const normalizedObjections = clamp(objections, MAX_OBJECTIONS_CHARS);
   const normalizedLastSummary = clamp(last_summary, MAX_SUMMARY_CHARS);
 
+  console.log("CHAT HIT");
+  console.log(
+    JSON.stringify(
+      {
+        user_id: normalizedUserId,
+        message_preview: clamp(originalMessage, 120),
+        customer_status: normalizedCustomerStatus,
+        current_phase: normalizedCurrentPhase,
+        has_goal: Boolean(normalizedGoal),
+        has_objections: Boolean(normalizedObjections),
+        has_last_summary: Boolean(normalizedLastSummary),
+        debounce_ms: DEBOUNCE_MS,
+      },
+      null,
+      2
+    )
+  );
+
   if (!normalizedUserId) {
     console.error("REQUEST ERROR: user_id ontbreekt");
     return res.json(buildResponse({ send_reply: true, reply: FALLBACK_REPLY }));
@@ -765,19 +1109,63 @@ app.post("/chat", async (req, res) => {
   });
 
   if (!debounced.shouldProcess) {
+    console.log(
+      JSON.stringify(
+        {
+          event: "DEBOUNCE_SKIPPED_OLDER_MESSAGE",
+          user_id: normalizedUserId,
+          original_message_preview: clamp(originalMessage, 120),
+        },
+        null,
+        2
+      )
+    );
+
     return res.json(buildNoReplyResponse());
   }
 
   const normalizedMessage = cleanText(debounced.message || originalMessage);
 
-  if (!normalizedMessage) {
-    return res.json(buildNoReplyResponse());
-  }
-
   const normalizedRecentMessages = sanitizeAndPrepareRecentMessages(
     recent_messages,
     normalizedMessage
   );
+
+  console.log(
+    JSON.stringify(
+      {
+        event: "DEBOUNCE_PROCESSING_LATEST_MESSAGE",
+        user_id: normalizedUserId,
+        final_message_preview: clamp(normalizedMessage, 300),
+        recent_messages_count: normalizedRecentMessages.length,
+        has_whatsapp_group_link: hasWhatsappGroupLinkBeenSent(normalizedRecentMessages),
+        last_roles: normalizedRecentMessages.slice(-5).map((m) => m.role),
+      },
+      null,
+      2
+    )
+  );
+
+  if (!normalizedMessage) {
+    return res.json(buildNoReplyResponse());
+  }
+
+  const coachSourceResponse = handleCoachSourceCodeIfNeeded(normalizedMessage);
+
+  if (coachSourceResponse) {
+    console.log("COACH SOURCE CODE HANDLED SERVER-SIDE");
+    return res.json(coachSourceResponse);
+  }
+
+  const orderControlResponse = handleOrderControlIfNeeded(
+    normalizedMessage,
+    normalizedRecentMessages
+  );
+
+  if (orderControlResponse) {
+    console.log("ORDER CONTROL HANDLED SERVER-SIDE");
+    return res.json(orderControlResponse);
+  }
 
   if (!agentId) {
     console.error("CONFIG ERROR: ELEVENLABS_AGENT_ID ontbreekt");
@@ -790,20 +1178,16 @@ app.post("/chat", async (req, res) => {
       normalizedRecentMessages
     );
 
-    const effectiveCustomerStatus = alreadyValidated
-      ? "customer"
-      : normalizedCustomerStatus;
-
-    const effectiveCurrentPhase = alreadyValidated
-      ? "coaching"
-      : normalizedCurrentPhase;
-
     const [replyResult, extractionResult] = await Promise.allSettled([
       getElevenReply({
         userId: normalizedUserId,
         message: normalizedMessage,
-        customerStatus: effectiveCustomerStatus,
-        currentPhase: effectiveCurrentPhase,
+        customerStatus: alreadyValidated
+          ? "customer"
+          : normalizedCustomerStatus,
+        currentPhase: alreadyValidated
+          ? "coaching"
+          : normalizedCurrentPhase,
         goal: normalizedGoal,
         objections: normalizedObjections,
         lastSummary: normalizedLastSummary,
@@ -812,8 +1196,12 @@ app.post("/chat", async (req, res) => {
       }),
       getStructuredUpdates({
         message: normalizedMessage,
-        customerStatus: effectiveCustomerStatus,
-        currentPhase: effectiveCurrentPhase,
+        customerStatus: alreadyValidated
+          ? "customer"
+          : normalizedCustomerStatus,
+        currentPhase: alreadyValidated
+          ? "coaching"
+          : normalizedCurrentPhase,
         currentGoal: normalizedGoal,
         currentObjections: normalizedObjections,
         currentLastSummary: normalizedLastSummary,
@@ -821,7 +1209,7 @@ app.post("/chat", async (req, res) => {
       }),
     ]);
 
-    const reply =
+    let reply =
       replyResult.status === "fulfilled"
         ? cleanReplyText(replyResult.value) || FALLBACK_REPLY
         : FALLBACK_REPLY;
@@ -829,6 +1217,25 @@ app.post("/chat", async (req, res) => {
     if (replyResult.status === "rejected") {
       console.error("ELEVENLABS PROMISE ERROR:", replyResult.reason);
     }
+
+    const repeatedReason = violatesHardRepetitionRules(
+      reply,
+      normalizedRecentMessages
+    );
+
+    if (repeatedReason) {
+      console.error("REPETITION GUARD HIT:", repeatedReason);
+      reply =
+        "Ik pak je laatste bericht erbij en ga daarop verder. Kun je kort bevestigen wat je nu het liefst wil weten of regelen?";
+    }
+
+    if (isLikelyRepetitiveReply(reply, normalizedRecentMessages)) {
+      console.error("REPETITION GUARD HIT: reply lijkt op eerdere Emma-reactie");
+      reply =
+        "Ik ga hier niet opnieuw hetzelfde over uitleggen. Kun je kort aangeven waar je nu precies op wilt reageren?";
+    }
+
+    reply = cleanReplyText(reply);
 
     const extraction =
       extractionResult.status === "fulfilled"
