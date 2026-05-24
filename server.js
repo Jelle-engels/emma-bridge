@@ -2,6 +2,7 @@ import express from "express";
 import WebSocket from "ws";
 import OpenAI from "openai";
 import dotenv from "dotenv";
+import { randomUUID } from "crypto";
 
 dotenv.config();
 
@@ -12,6 +13,10 @@ const PORT = process.env.PORT || 3000;
 
 const ELEVEN_TIMEOUT_MS = Number(process.env.ELEVEN_TIMEOUT_MS || 20000);
 const OPENAI_TIMEOUT_MS = Number(process.env.OPENAI_TIMEOUT_MS || 12000);
+
+const DEBOUNCE_MS = Number(process.env.DEBOUNCE_MS || 12000);
+const DEBOUNCE_MAX_MESSAGES = Number(process.env.DEBOUNCE_MAX_MESSAGES || 8);
+const DEBOUNCE_MAX_AGE_MS = Number(process.env.DEBOUNCE_MAX_AGE_MS || 120000);
 
 const MAX_CONTEXT_MESSAGES = Number(process.env.MAX_CONTEXT_MESSAGES || 12);
 const MAX_MESSAGE_CHARS = Number(process.env.MAX_MESSAGE_CHARS || 500);
@@ -47,6 +52,10 @@ const openai = process.env.OPENAI_API_KEY
 function cleanText(value) {
   if (value === null || value === undefined) return "";
   return String(value).replace(/\s+/g, " ").trim();
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function removePromptLeakTerms(value) {
@@ -127,6 +136,93 @@ function buildResponse({
     last_summary_update: cleanText(last_summary_update),
   };
 }
+
+/* ------------------------ SERVER-SIDE MESSAGE DEBOUNCE -------------------- */
+
+const pendingDebounceByUser = new Map();
+
+function buildDebouncedUserMessage(messages) {
+  const cleanedMessages = messages.map(cleanText).filter(Boolean);
+
+  const nonCoachMessages = cleanedMessages.filter(
+    (message) => !isCoachSourceCode(message)
+  );
+
+  if (nonCoachMessages.length === 0) {
+    return cleanedMessages[cleanedMessages.length - 1] || "";
+  }
+
+  return nonCoachMessages.join("\n");
+}
+
+async function waitForDebouncedUserMessage({ userId, message }) {
+  if (!DEBOUNCE_MS || DEBOUNCE_MS <= 0) {
+    return {
+      shouldProcess: true,
+      message: cleanText(message),
+      skipped: false,
+    };
+  }
+
+  const key = cleanText(userId);
+  const cleanMessage = cleanText(message);
+  const requestId = randomUUID();
+  const now = Date.now();
+
+  const existing = pendingDebounceByUser.get(key);
+
+  const entry = existing || {
+    latestRequestId: requestId,
+    messages: [],
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  entry.latestRequestId = requestId;
+  entry.updatedAt = now;
+
+  entry.messages.push({
+    requestId,
+    message: cleanMessage,
+    timestamp: now,
+  });
+
+  entry.messages = entry.messages
+    .filter((item) => now - item.timestamp <= DEBOUNCE_MAX_AGE_MS)
+    .slice(-DEBOUNCE_MAX_MESSAGES);
+
+  pendingDebounceByUser.set(key, entry);
+
+  await sleep(DEBOUNCE_MS);
+
+  const current = pendingDebounceByUser.get(key);
+
+  if (!current || current.latestRequestId !== requestId) {
+    return {
+      shouldProcess: false,
+      message: "",
+      skipped: true,
+    };
+  }
+
+  pendingDebounceByUser.delete(key);
+
+  return {
+    shouldProcess: true,
+    message: buildDebouncedUserMessage(current.messages.map((item) => item.message)),
+    skipped: false,
+  };
+}
+
+setInterval(() => {
+  const now = Date.now();
+
+  for (const [key, entry] of pendingDebounceByUser.entries()) {
+    if (now - entry.updatedAt > DEBOUNCE_MAX_AGE_MS) {
+      pendingDebounceByUser.delete(key);
+    }
+  }
+}, 60000).unref?.();
 
 /* -------------------------- MESSAGE NORMALIZATION ------------------------- */
 
@@ -298,11 +394,19 @@ function hasAskedOrderNumber(messages) {
   );
 }
 
+function isCustomerStatusValidated(customerStatus, recentMessages) {
+  return (
+    cleanText(customerStatus).toLowerCase() === "customer" ||
+    hasWhatsappGroupLinkBeenSent(recentMessages)
+  );
+}
+
 function detectState({
   currentMessage,
   recentMessages,
   lastSummary,
   currentPhase,
+  customerStatus = "",
 }) {
   const hasPreviousEmmaMessage = recentMessages.some(
     (msg) => msg.role === "emma"
@@ -333,7 +437,10 @@ function detectState({
       latest
     );
 
-  const isValidatedCustomer = hasWhatsappGroupLinkBeenSent(recentMessages);
+  const isValidatedCustomer = isCustomerStatusValidated(
+    customerStatus,
+    recentMessages
+  );
 
   return {
     is_existing_conversation: isExistingConversation,
@@ -352,7 +459,6 @@ function detectState({
 
 function isCoachSourceCode(message) {
   const text = cleanText(message);
-
   return /^coach-[a-zÀ-ÿ0-9_-]+$/i.test(text);
 }
 
@@ -496,6 +602,7 @@ function buildContextBlock({
     recentMessages: recent_messages,
     lastSummary: last_summary,
     currentPhase: current_phase,
+    customerStatus: customer_status,
   });
 
   const lastEmmaMessages = getLastEmmaMessages(recent_messages, 3);
@@ -512,6 +619,11 @@ function buildContextBlock({
   const countryAlreadyAsked = hasAskedCountry(recent_messages);
   const orderNumberAlreadyAsked = hasAskedOrderNumber(recent_messages);
 
+  const validatedCustomer = isCustomerStatusValidated(
+    customer_status,
+    recent_messages
+  );
+
   const context = {
     agent_name: "Emma",
     runtime_state: {
@@ -525,12 +637,8 @@ function buildContextBlock({
       order_validation_server_side: true,
     },
     crm_memory: {
-      customer_status: whatsappGroupLinkAlreadySent
-        ? "customer"
-        : cleanText(customer_status),
-      current_phase: whatsappGroupLinkAlreadySent
-        ? "coaching"
-        : cleanText(current_phase),
+      customer_status: validatedCustomer ? "customer" : cleanText(customer_status),
+      current_phase: validatedCustomer ? "coaching" : cleanText(current_phase),
       goal: clamp(goal, MAX_GOAL_CHARS),
       objections: clamp(objections, MAX_OBJECTIONS_CHARS),
       last_summary: clamp(last_summary, MAX_SUMMARY_CHARS),
@@ -981,32 +1089,25 @@ app.post("/chat", async (req, res) => {
   const agentId = cleanText(process.env.ELEVENLABS_AGENT_ID);
 
   const normalizedUserId = cleanText(user_id);
-  const normalizedMessage = cleanText(message);
+  const originalMessage = cleanText(message);
   const normalizedCustomerStatus = cleanText(customer_status);
   const normalizedCurrentPhase = cleanText(current_phase);
   const normalizedGoal = clamp(goal, MAX_GOAL_CHARS);
   const normalizedObjections = clamp(objections, MAX_OBJECTIONS_CHARS);
   const normalizedLastSummary = clamp(last_summary, MAX_SUMMARY_CHARS);
 
-  const normalizedRecentMessages = sanitizeAndPrepareRecentMessages(
-    recent_messages,
-    normalizedMessage
-  );
-
   console.log("CHAT HIT");
   console.log(
     JSON.stringify(
       {
         user_id: normalizedUserId,
-        message_preview: clamp(normalizedMessage, 120),
+        message_preview: clamp(originalMessage, 120),
         customer_status: normalizedCustomerStatus,
         current_phase: normalizedCurrentPhase,
         has_goal: Boolean(normalizedGoal),
         has_objections: Boolean(normalizedObjections),
         has_last_summary: Boolean(normalizedLastSummary),
-        recent_messages_count: normalizedRecentMessages.length,
-        has_whatsapp_group_link: hasWhatsappGroupLinkBeenSent(normalizedRecentMessages),
-        last_roles: normalizedRecentMessages.slice(-5).map((m) => m.role),
+        debounce_ms: DEBOUNCE_MS,
       },
       null,
       2
@@ -1018,9 +1119,70 @@ app.post("/chat", async (req, res) => {
     return res.json(buildResponse({ reply: FALLBACK_REPLY }));
   }
 
-  if (!normalizedMessage) {
+  if (!originalMessage) {
     console.error("REQUEST ERROR: message ontbreekt");
     return res.json(buildResponse({ reply: FALLBACK_REPLY }));
+  }
+
+  const debounced = await waitForDebouncedUserMessage({
+    userId: normalizedUserId,
+    message: originalMessage,
+  });
+
+  if (!debounced.shouldProcess) {
+    console.log(
+      JSON.stringify(
+        {
+          event: "DEBOUNCE_SKIPPED_OLDER_MESSAGE",
+          user_id: normalizedUserId,
+          original_message_preview: clamp(originalMessage, 120),
+        },
+        null,
+        2
+      )
+    );
+
+    return res.json(
+      buildResponse({
+        reply: "",
+        goal_update: "",
+        objections_update: "",
+        last_summary_update: "",
+      })
+    );
+  }
+
+  const normalizedMessage = cleanText(debounced.message || originalMessage);
+
+  const normalizedRecentMessages = sanitizeAndPrepareRecentMessages(
+    recent_messages,
+    normalizedMessage
+  );
+
+  console.log(
+    JSON.stringify(
+      {
+        event: "DEBOUNCE_PROCESSING_LATEST_MESSAGE",
+        user_id: normalizedUserId,
+        final_message_preview: clamp(normalizedMessage, 300),
+        recent_messages_count: normalizedRecentMessages.length,
+        has_whatsapp_group_link: hasWhatsappGroupLinkBeenSent(normalizedRecentMessages),
+        last_roles: normalizedRecentMessages.slice(-5).map((m) => m.role),
+      },
+      null,
+      2
+    )
+  );
+
+  if (!normalizedMessage) {
+    return res.json(
+      buildResponse({
+        reply: "",
+        goal_update: "",
+        objections_update: "",
+        last_summary_update: "",
+      })
+    );
   }
 
   const coachSourceResponse = handleCoachSourceCodeIfNeeded(normalizedMessage);
@@ -1046,7 +1208,10 @@ app.post("/chat", async (req, res) => {
   }
 
   try {
-    const alreadyValidated = hasWhatsappGroupLinkBeenSent(normalizedRecentMessages);
+    const alreadyValidated = isCustomerStatusValidated(
+      normalizedCustomerStatus,
+      normalizedRecentMessages
+    );
 
     const [replyResult, extractionResult] = await Promise.allSettled([
       getElevenReply({
@@ -1102,7 +1267,7 @@ app.post("/chat", async (req, res) => {
     if (isLikelyRepetitiveReply(reply, normalizedRecentMessages)) {
       console.error("REPETITION GUARD HIT: reply lijkt op eerdere Emma-reactie");
       reply =
-        "Ik ga hier niet opnieuw hetzelfde over uitleggen. Op basis van wat je al hebt gedeeld: wat is nu je grootste twijfel om hiermee te starten?";
+        "Ik ga hier niet opnieuw hetzelfde over uitleggen. Kun je kort aangeven waar je nu precies op wilt reageren?";
     }
 
     reply = cleanReplyText(reply);
