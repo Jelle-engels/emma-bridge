@@ -1131,3 +1131,4 @@ app.post("/chat", async (req, res) => {
  
 app.listen(PORT, () => {
   console.log(`Server draait op poort ${PORT}`);
+});
