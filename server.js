@@ -128,9 +128,14 @@ function buildResponse({
   goal_update = "",
   objections_update = "",
   last_summary_update = "",
+  send_reply,
 }) {
+  const cleanedReply = cleanReplyText(reply);
+
   return {
-    reply: cleanReplyText(reply),
+    send_reply:
+      typeof send_reply === "boolean" ? send_reply : Boolean(cleanedReply),
+    reply: cleanedReply,
     goal_update: cleanText(goal_update),
     objections_update: cleanText(objections_update),
     last_summary_update: cleanText(last_summary_update),
@@ -209,7 +214,9 @@ async function waitForDebouncedUserMessage({ userId, message }) {
 
   return {
     shouldProcess: true,
-    message: buildDebouncedUserMessage(current.messages.map((item) => item.message)),
+    message: buildDebouncedUserMessage(
+      current.messages.map((item) => item.message)
+    ),
     skipped: false,
   };
 }
@@ -468,6 +475,7 @@ function handleCoachSourceCodeIfNeeded(message) {
   }
 
   return buildResponse({
+    send_reply: true,
     reply: COACH_SOURCE_START_REPLY,
   });
 }
@@ -495,8 +503,6 @@ function looksLikeOrderNumber(message) {
   if (!text) return false;
 
   if (/\b[A-Z0-9-_]*JP[A-Z0-9-_]*\b/i.test(text)) return true;
-
-  if (/^[A-Z0-9-_]{4,}$/i.test(text) && /\d/.test(text)) return true;
 
   return false;
 }
@@ -526,7 +532,7 @@ function extractPossibleOrderNumber(message) {
   const withJp = candidates.find((candidate) => /JP/i.test(candidate));
   if (withJp) return withJp;
 
-  return candidates.find((candidate) => /\d/.test(candidate)) || "";
+  return "";
 }
 
 function isValidOrderNumber(orderNumber) {
@@ -546,12 +552,14 @@ function handleOrderControlIfNeeded(message, recentMessages = []) {
   if (alreadyValidated) {
     if (explicitGroupAccessRequest) {
       return buildResponse({
+        send_reply: true,
         reply: `Je bent al goedgekeurd 🙏\n\nHier is de WhatsApp-groep nog een keer:\n${WHATSAPP_GROUP_LINK}`,
       });
     }
 
     if (hasPossibleOrderNumber && orderNumber && !isValidOrderNumber(orderNumber)) {
       return buildResponse({
+        send_reply: true,
         reply:
           "Je bestelling is al verwerkt. Ik ga vanaf hier gewoon met je meekijken als coach 🙏",
       });
@@ -571,17 +579,20 @@ function handleOrderControlIfNeeded(message, recentMessages = []) {
 
   if (!orderNumber) {
     return buildResponse({
+      send_reply: true,
       reply: "Om je goed te kunnen helpen heb ik eerst even je ordernummer nodig 🙏",
     });
   }
 
   if (!isValidOrderNumber(orderNumber)) {
     return buildResponse({
+      send_reply: true,
       reply: "Zou je het ordernummer nog eens willen controleren?",
     });
   }
 
   return buildResponse({
+    send_reply: true,
     reply: `Top, je ordernummer is goedgekeurd 🙏\n\nHier is de WhatsApp-groep waar je direct kunt starten met tips en begeleiding:\n${WHATSAPP_GROUP_LINK}`,
   });
 }
@@ -759,21 +770,9 @@ async function getStructuredUpdates({
     type: "object",
     additionalProperties: false,
     properties: {
-      goal_update: {
-        type: "string",
-        description:
-          "Alleen invullen als het nieuwste gebruikersbericht een nieuwe of duidelijk concretere doelomschrijving bevat. Anders lege string.",
-      },
-      objections_update: {
-        type: "string",
-        description:
-          "Alleen invullen als het nieuwste gebruikersbericht een nieuw of duidelijk concreter bezwaar, twijfel, weerstand of koopobstakel bevat. Anders lege string.",
-      },
-      last_summary_update: {
-        type: "string",
-        description:
-          "Korte feitelijke CRM-update op basis van het nieuwste gebruikersbericht. Niet herhalen wat al in current_last_summary staat. Anders lege string.",
-      },
+      goal_update: { type: "string" },
+      objections_update: { type: "string" },
+      last_summary_update: { type: "string" },
     },
     required: ["goal_update", "objections_update", "last_summary_update"],
   };
@@ -782,20 +781,12 @@ async function getStructuredUpdates({
     "Je bent een strikte CRM-extractor voor een WhatsApp salesgesprek.",
     "Je taak is NIET om te antwoorden op de gebruiker.",
     "Je analyseert alleen het nieuwste gebruikersbericht in de context van bestaande CRM-data.",
-    "",
-    "Je geeft uitsluitend geldige JSON terug in exact deze vorm:",
-    '{ "goal_update": "", "objections_update": "", "last_summary_update": "" }',
-    "",
-    "Regels:",
-    "- Gebruik Nederlands.",
-    "- Vul alleen een veld als het nieuwste gebruikersbericht echt nieuwe of duidelijk concretere informatie toevoegt.",
-    "- Herhaal geen informatie die al in current_goal, current_objections of current_last_summary staat.",
-    "- Als er geen relevante update is voor een veld, geef een lege string terug.",
-    "- Verzin niets.",
-    "- Houd goal_update kort en concreet.",
-    "- Houd objections_update kort en concreet.",
-    "- Houd last_summary_update compact, feitelijk en bruikbaar voor CRM.",
-    "- Geef geen uitleg buiten de JSON.",
+    "Je geeft uitsluitend geldige JSON terug.",
+    "Gebruik Nederlands.",
+    "Vul alleen een veld als het nieuwste gebruikersbericht echt nieuwe of duidelijk concretere informatie toevoegt.",
+    "Herhaal geen informatie die al in current_goal, current_objections of current_last_summary staat.",
+    "Als er geen relevante update is voor een veld, geef een lege string terug.",
+    "Verzin niets.",
   ].join("\n");
 
   const userPayload = {
@@ -839,9 +830,7 @@ async function getStructuredUpdates({
           },
         },
       },
-      {
-        signal: controller.signal,
-      }
+      { signal: controller.signal }
     );
 
     const rawText = extractOutputText(response);
@@ -912,24 +901,15 @@ function violatesHardRepetitionRules(reply, recentMessages) {
   const checkoutAlreadySent = hasCheckoutLinkBeenSent(recentMessages);
   const priceAlreadyMentioned = hasPriceBeenMentioned(recentMessages);
 
-  if (
-    testimonialAlreadySent &&
-    /youtube\.com\/@Nutrition-Works/i.test(text)
-  ) {
+  if (testimonialAlreadySent && /youtube\.com\/@Nutrition-Works/i.test(text)) {
     return "testimonial_repeated";
   }
 
-  if (
-    checkoutAlreadySent &&
-    /bestellen-nl-control-1x|bestellen-be-control-1x/i.test(text)
-  ) {
+  if (checkoutAlreadySent && /bestellen-nl-control-1x|bestellen-be-control-1x/i.test(text)) {
     return "checkout_link_repeated";
   }
 
-  if (
-    priceAlreadyMentioned &&
-    /€\s*123|123\s*euro|programma kost/i.test(text)
-  ) {
+  if (priceAlreadyMentioned && /€\s*123|123\s*euro|programma kost/i.test(text)) {
     return "price_repeated";
   }
 
@@ -991,9 +971,7 @@ async function getElevenReply({
           JSON.stringify({
             type: "conversation_initiation_client_data",
             conversation_config_override: {
-              conversation: {
-                text_only: true,
-              },
+              conversation: { text_only: true },
             },
             user_id: userId,
           })
@@ -1116,12 +1094,12 @@ app.post("/chat", async (req, res) => {
 
   if (!normalizedUserId) {
     console.error("REQUEST ERROR: user_id ontbreekt");
-    return res.json(buildResponse({ reply: FALLBACK_REPLY }));
+    return res.json(buildResponse({ send_reply: true, reply: FALLBACK_REPLY }));
   }
 
   if (!originalMessage) {
     console.error("REQUEST ERROR: message ontbreekt");
-    return res.json(buildResponse({ reply: FALLBACK_REPLY }));
+    return res.json(buildResponse({ send_reply: true, reply: FALLBACK_REPLY }));
   }
 
   const debounced = await waitForDebouncedUserMessage({
@@ -1144,6 +1122,7 @@ app.post("/chat", async (req, res) => {
 
     return res.json(
       buildResponse({
+        send_reply: false,
         reply: "",
         goal_update: "",
         objections_update: "",
@@ -1177,6 +1156,7 @@ app.post("/chat", async (req, res) => {
   if (!normalizedMessage) {
     return res.json(
       buildResponse({
+        send_reply: false,
         reply: "",
         goal_update: "",
         objections_update: "",
@@ -1204,7 +1184,7 @@ app.post("/chat", async (req, res) => {
 
   if (!agentId) {
     console.error("CONFIG ERROR: ELEVENLABS_AGENT_ID ontbreekt");
-    return res.json(buildResponse({ reply: FALLBACK_REPLY }));
+    return res.json(buildResponse({ send_reply: true, reply: FALLBACK_REPLY }));
   }
 
   try {
@@ -1287,6 +1267,7 @@ app.post("/chat", async (req, res) => {
 
     return res.json(
       buildResponse({
+        send_reply: true,
         reply,
         goal_update: extraction.goal_update,
         objections_update: extraction.objections_update,
@@ -1295,7 +1276,7 @@ app.post("/chat", async (req, res) => {
     );
   } catch (error) {
     console.error("SERVER ERROR:", error?.message || error);
-    return res.json(buildResponse({ reply: FALLBACK_REPLY }));
+    return res.json(buildResponse({ send_reply: true, reply: FALLBACK_REPLY }));
   }
 });
 
