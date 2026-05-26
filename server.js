@@ -1082,6 +1082,21 @@ app.post("/chat", async (req, res) => {
       console.error("ELEVENLABS PROMISE ERROR:", replyResult.reason);
     }
  
+    console.log(
+      JSON.stringify(
+        {
+          event: "ELEVENLABS_RAW_REPLY",
+          user_id: normalizedUserId,
+          raw_reply_preview: clamp(
+            replyResult.status === "fulfilled" ? replyResult.value : "",
+            400
+          ),
+        },
+        null,
+        2
+      )
+    );
+ 
     const repeatedReason = violatesHardRepetitionRules(
       reply,
       normalizedRecentMessages
@@ -1113,6 +1128,21 @@ app.post("/chat", async (req, res) => {
     if (extractionResult.status === "rejected") {
       console.error("OPENAI PROMISE ERROR:", extractionResult.reason);
     }
+ 
+    console.log(
+      JSON.stringify(
+        {
+          event: "FINAL_REPLY_SENT",
+          user_id: normalizedUserId,
+          final_reply_preview: clamp(reply, 400),
+          goal_update_preview: clamp(extraction.goal_update, 200),
+          objections_update_preview: clamp(extraction.objections_update, 200),
+          last_summary_update_preview: clamp(extraction.last_summary_update, 200),
+        },
+        null,
+        2
+      )
+    );
  
     return res.json(
       buildResponse({
