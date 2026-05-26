@@ -1042,36 +1042,43 @@ app.post("/chat", async (req, res) => {
       normalizedRecentMessages
     );
  
-    const [replyResult, extractionResult] = await Promise.allSettled([
-      getElevenReply({
-        userId: normalizedUserId,
-        message: normalizedMessage,
-        customerStatus: alreadyValidated
-          ? "customer"
-          : normalizedCustomerStatus,
-        currentPhase: alreadyValidated
-          ? "coaching"
-          : normalizedCurrentPhase,
-        goal: normalizedGoal,
-        objections: normalizedObjections,
-        lastSummary: normalizedLastSummary,
-        recentMessages: normalizedRecentMessages,
-        agentId,
-      }),
-      getStructuredUpdates({
-        message: normalizedMessage,
-        customerStatus: alreadyValidated
-          ? "customer"
-          : normalizedCustomerStatus,
-        currentPhase: alreadyValidated
-          ? "coaching"
-          : normalizedCurrentPhase,
-        currentGoal: normalizedGoal,
-        currentObjections: normalizedObjections,
-        currentLastSummary: normalizedLastSummary,
-        recentMessages: normalizedRecentMessages,
-      }),
-    ]);
+    // Start both calls in parallel. We only block on ElevenLabs (the customer-facing reply);
+    // OpenAI extraction runs alongside and is awaited briefly later with a grace timeout
+    // so it cannot push the total response time past ManyChat's webhook timeout.
+    const replyPromise = getElevenReply({
+      userId: normalizedUserId,
+      message: normalizedMessage,
+      customerStatus: alreadyValidated
+        ? "customer"
+        : normalizedCustomerStatus,
+      currentPhase: alreadyValidated
+        ? "coaching"
+        : normalizedCurrentPhase,
+      goal: normalizedGoal,
+      objections: normalizedObjections,
+      lastSummary: normalizedLastSummary,
+      recentMessages: normalizedRecentMessages,
+      agentId,
+    });
+ 
+    const extractionPromise = getStructuredUpdates({
+      message: normalizedMessage,
+      customerStatus: alreadyValidated
+        ? "customer"
+        : normalizedCustomerStatus,
+      currentPhase: alreadyValidated
+        ? "coaching"
+        : normalizedCurrentPhase,
+      currentGoal: normalizedGoal,
+      currentObjections: normalizedObjections,
+      currentLastSummary: normalizedLastSummary,
+      recentMessages: normalizedRecentMessages,
+    });
+ 
+    const replyResult = await replyPromise.then(
+      (value) => ({ status: "fulfilled", value }),
+      (reason) => ({ status: "rejected", reason })
+    );
  
     let reply =
       replyResult.status === "fulfilled"
@@ -1116,6 +1123,31 @@ app.post("/chat", async (req, res) => {
  
     reply = cleanReplyText(reply);
  
+    // Give OpenAI a short grace period to finish after ElevenLabs is done.
+    // If it hasn't returned by then, give up and send empty updates so the
+    // response goes back to Make fast. The OpenAI call keeps running in
+    // the background; its result for this turn is simply discarded.
+    const POST_REPLY_EXTRACTION_GRACE_MS = Number(
+      process.env.POST_REPLY_EXTRACTION_GRACE_MS || 1500
+    );
+ 
+    const extractionResult = await Promise.race([
+      extractionPromise.then(
+        (value) => ({ status: "fulfilled", value }),
+        (reason) => ({ status: "rejected", reason })
+      ),
+      new Promise((resolve) =>
+        setTimeout(
+          () =>
+            resolve({
+              status: "rejected",
+              reason: "post_reply_grace_timeout",
+            }),
+          POST_REPLY_EXTRACTION_GRACE_MS
+        )
+      ),
+    ]);
+ 
     const extraction =
       extractionResult.status === "fulfilled"
         ? extractionResult.value
@@ -1126,7 +1158,10 @@ app.post("/chat", async (req, res) => {
           };
  
     if (extractionResult.status === "rejected") {
-      console.error("OPENAI PROMISE ERROR:", extractionResult.reason);
+      console.error(
+        "OPENAI EXTRACTION SKIPPED OR FAILED:",
+        extractionResult.reason
+      );
     }
  
     console.log(
