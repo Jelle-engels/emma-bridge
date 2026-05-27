@@ -317,10 +317,13 @@ function hasPriceBeenMentioned(messages) {
 }
  
 function hasCheckoutLinkBeenSent(messages) {
+  // Generic matcher for any Nutrition Works checkout link (tr.ee/bestellen-{country}-{product}-{...}).
+  // This will pick up future product URLs automatically (basic, deluxe, exclusive, combos, etc.)
+  // without requiring a code change when those programs are added.
   return messages.some(
     (msg) =>
       msg.role === "emma" &&
-      /bestellen-nl-control-1x|bestellen-be-control-1x/i.test(msg.message_text)
+      /tr\.ee\/bestellen-(nl|be)-[a-z0-9-]+/i.test(msg.message_text)
   );
 }
  
@@ -781,26 +784,37 @@ async function getStructuredUpdates({
     "- Geef de huidige fase terug zodra die verandert ten opzichte van current_phase.",
     "- Als de fase niet duidelijk verandert: lege string.",
     "",
-    "interested_in_program_update — Welk programma de klant heeft genoemd of waar Emma haar in stuurt.",
+    "interested_in_program_update — Welk specifiek programma (Basic, Deluxe of Exclusive) in het gesprek expliciet bij naam wordt genoemd door de klant of door Emma.",
     "- Geldige waarden: Basic / Deluxe / Exclusive / (lege string).",
-    "- Vul alleen in als er een duidelijke verandering is ten opzichte van current_interested_in_program.",
-    "- Bij geen verandering of geen duidelijke interesse: lege string.",
+    "- Vul ALLEEN in als de exacte programmanaam letterlijk in het gesprek voorkomt.",
+    "- Algemene koopintentie, het bestellen van Control, of interesse in afvallen tellen NIET als programma-interesse.",
+    "- Kies nooit een default programma. Als geen programmanaam letterlijk genoemd is: lege string.",
     "",
-    "interested_in_control_update — Of de klant interesse heeft in Control of het is besproken.",
+    "interested_in_control_update — Of de klant interesse heeft in Control of dat Control is besproken.",
     "- Geldige waarden: ja / nee / (lege string).",
-    "- ja = Emma heeft Control besproken of de klant toont interesse.",
+    "- ja = Emma heeft Control besproken of de klant toont duidelijk interesse in Control.",
     "- nee = de klant heeft Control expliciet afgewezen.",
     "- Bij geen verandering of geen duidelijke positie: lege string.",
     "",
-    "purchased_program_update — Welk programma de klant heeft besteld.",
+    "purchased_program_update — Welk programma de klant heeft besteld (Basic, Deluxe of Exclusive).",
     "- Geldige waarden: Basic / Deluxe / Exclusive / (lege string).",
-    "- Vul ALLEEN in als de klant in haar bericht expliciet vermeldt welk programma ze heeft besteld.",
-    "- Anders altijd lege string. Verzin nooit een aankoop.",
+    "- Vul ALLEEN in wanneer er overtuigend bewijs is dat dit specifieke programma is besteld:",
+    "  • De klant noemt expliciet welk programma is besteld, OF",
+    "  • Emma heeft een specifiek programma (Basic, Deluxe of Exclusive) aanbevolen, de klant heeft ingestemd met dat aanbod, en daarna is er een ordernummer doorgegeven en gevalideerd in het gesprek.",
+    "- Als alleen Control is besproken zonder dat een programma is genoemd: lege string.",
+    "- Als geen ordernummer is gevalideerd in het gesprek: lege string.",
+    "- Verzin nooit een programma. Kies geen 'default' als er geen specifiek programma is besteld.",
     "",
     "has_control_update — Of de klant Control heeft besteld.",
     "- Geldige waarden: ja / nee / (lege string).",
-    "- Vul ALLEEN in als de klant expliciet vermeldt of Control wel of niet in haar bestelling zit.",
-    "- Anders altijd lege string.",
+    "- Vul \"ja\" in wanneer er overtuigend bewijs is dat de klant Control heeft besteld:",
+    "  • De klant noemt expliciet dat Control onderdeel was van haar bestelling, OF",
+    "  • Emma heeft Control aanbevolen of besproken, de klant heeft positief gereageerd op Control, en daarna is er een ordernummer doorgegeven en gevalideerd in het gesprek.",
+    "- Vul \"nee\" in wanneer er overtuigend bewijs is dat de klant GEEN Control heeft besteld:",
+    "  • De klant heeft Control expliciet afgewezen en heeft een andere aankoop gedaan, OF",
+    "  • Emma heeft een programma aanbevolen zónder Control, de klant heeft daarmee ingestemd, en daarna is er een ordernummer gevalideerd.",
+    "- Als geen ordernummer is gevalideerd in het gesprek: lege string.",
+    "- Bij twijfel: lege string.",
     "",
     "Belangrijk: voor elk veld geldt — als er niets is veranderd, retourneer een lege string.",
   ].join("\n");
@@ -1114,6 +1128,126 @@ app.post("/chat", async (req, res) => {
  
   if (orderControlResponse) {
     console.log("ORDER CONTROL HANDLED SERVER-SIDE");
+ 
+    // If this is a validation event (customer just got promoted to "customer"),
+    // also run the OpenAI extractor so that goal/objections/last_summary etc.
+    // are refreshed to reflect the post-purchase state. Without this, Airtable
+    // keeps showing the pre-purchase summary even though the customer is now
+    // a paying customer in coaching mode.
+    const isValidationEvent =
+      orderControlResponse.customer_status_update === "customer";
+ 
+    if (isValidationEvent) {
+      const extractorMessage =
+        normalizedMessage +
+        "\n[SYSTEEM-NOTITIE: Ordernummer is zojuist succesvol gevalideerd. " +
+        "De klant is nu customer en de gespreksfase is coaching. " +
+        "Bepaal op basis van het voorgaande gesprek welk programma (Basic, Deluxe of Exclusive) en/of Control de klant heeft besteld, " +
+        "en werk last_summary, purchased_program, has_control en interested_in_control daarop bij. " +
+        "Als alleen Control is besproken: purchased_program blijft leeg en has_control wordt 'ja'.]";
+ 
+      try {
+        const extractionPromise = getStructuredUpdates({
+          message: extractorMessage,
+          customerStatus: "customer",
+          currentPhase: "coaching",
+          currentGoal: normalizedGoal,
+          currentObjections: normalizedObjections,
+          currentLastSummary: normalizedLastSummary,
+          currentInterestedInProgram: normalizedInterestedInProgram,
+          currentInterestedInControl: normalizedInterestedInControl,
+          currentPurchasedProgram: normalizedPurchasedProgram,
+          currentHasControl: normalizedHasControl,
+          recentMessages: normalizedRecentMessages,
+        });
+ 
+        const POST_REPLY_EXTRACTION_GRACE_MS = Number(
+          process.env.POST_REPLY_EXTRACTION_GRACE_MS || 3000
+        );
+ 
+        const extractionResult = await Promise.race([
+          extractionPromise.then(
+            (value) => ({ status: "fulfilled", value }),
+            (reason) => ({ status: "rejected", reason })
+          ),
+          new Promise((resolve) =>
+            setTimeout(
+              () =>
+                resolve({
+                  status: "rejected",
+                  reason: "post_reply_grace_timeout",
+                }),
+              POST_REPLY_EXTRACTION_GRACE_MS
+            )
+          ),
+        ]);
+ 
+        if (extractionResult.status === "fulfilled") {
+          const ext = extractionResult.value;
+          // Merge full extractor output. Only customer_status_update and
+          // current_phase_update remain authoritative from order-control
+          // (those are always "customer" / "coaching" on a validated order,
+          // regardless of which product was purchased). All product-specific
+          // fields (has_control, interested_in_control, purchased_program,
+          // interested_in_program) are determined by the extractor based on
+          // conversation context — this keeps the code product-agnostic.
+          orderControlResponse.goal_update = ext.goal_update;
+          orderControlResponse.objections_update = ext.objections_update;
+          orderControlResponse.last_summary_update = ext.last_summary_update;
+          orderControlResponse.interested_in_program_update =
+            ext.interested_in_program_update;
+          orderControlResponse.interested_in_control_update =
+            ext.interested_in_control_update;
+          orderControlResponse.purchased_program_update =
+            ext.purchased_program_update;
+          orderControlResponse.has_control_update = ext.has_control_update;
+        } else {
+          console.error(
+            "VALIDATION EXTRACTOR SKIPPED OR FAILED:",
+            extractionResult.reason
+          );
+        }
+      } catch (error) {
+        console.error(
+          "VALIDATION EXTRACTOR ERROR:",
+          error?.message || error
+        );
+      }
+    }
+ 
+    console.log(
+      JSON.stringify(
+        {
+          event: "FINAL_REPLY_SENT",
+          user_id: normalizedUserId,
+          final_reply_preview: clamp(orderControlResponse.reply, 400),
+          goal_update_preview: clamp(orderControlResponse.goal_update, 200),
+          objections_update_preview: clamp(
+            orderControlResponse.objections_update,
+            200
+          ),
+          last_summary_update_preview: clamp(
+            orderControlResponse.last_summary_update,
+            200
+          ),
+          customer_status_update_preview:
+            orderControlResponse.customer_status_update,
+          current_phase_update_preview:
+            orderControlResponse.current_phase_update,
+          interested_in_program_update_preview:
+            orderControlResponse.interested_in_program_update,
+          interested_in_control_update_preview:
+            orderControlResponse.interested_in_control_update,
+          purchased_program_update_preview:
+            orderControlResponse.purchased_program_update,
+          has_control_update_preview:
+            orderControlResponse.has_control_update,
+        },
+        null,
+        2
+      )
+    );
+ 
     return res.json(orderControlResponse);
   }
  
