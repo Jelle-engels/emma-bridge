@@ -18,6 +18,7 @@ const MAX_MESSAGE_CHARS = Number(process.env.MAX_MESSAGE_CHARS || 500);
 const MAX_SUMMARY_CHARS = Number(process.env.MAX_SUMMARY_CHARS || 900);
 const MAX_GOAL_CHARS = Number(process.env.MAX_GOAL_CHARS || 300);
 const MAX_OBJECTIONS_CHARS = Number(process.env.MAX_OBJECTIONS_CHARS || 400);
+const MAX_SHORT_FIELD_CHARS = Number(process.env.MAX_SHORT_FIELD_CHARS || 30);
  
 const NO_REPLY = "__NO_REPLY__";
  
@@ -102,6 +103,36 @@ function normalizeComparableText(value) {
     .trim();
 }
  
+function normalizeBinaryFlag(value) {
+  const v = cleanText(value).toLowerCase();
+  if (v === "ja" || v === "yes" || v === "wel" || v === "true") return "ja";
+  if (v === "nee" || v === "no" || v === "niet" || v === "false") return "nee";
+  return "";
+}
+ 
+function normalizeProgramName(value) {
+  const v = cleanText(value).toLowerCase();
+  if (v === "basic") return "Basic";
+  if (v === "deluxe") return "Deluxe";
+  if (v === "exclusive") return "Exclusive";
+  return "";
+}
+ 
+function normalizePhaseName(value) {
+  const v = cleanText(value).toLowerCase();
+  const allowed = [
+    "intake",
+    "verdieping",
+    "analyse",
+    "advies",
+    "commitment",
+    "closing",
+    "checkout",
+    "coaching",
+  ];
+  return allowed.includes(v) ? v : "";
+}
+ 
 function uniqueBy(items, keyFn) {
   const seen = new Set();
   const out = [];
@@ -121,6 +152,12 @@ function buildResponse({
   goal_update = "",
   objections_update = "",
   last_summary_update = "",
+  customer_status_update = "",
+  current_phase_update = "",
+  interested_in_program_update = "",
+  interested_in_control_update = "",
+  purchased_program_update = "",
+  has_control_update = "",
   send_reply,
 }) {
   const rawReply = reply === NO_REPLY ? NO_REPLY : cleanReplyText(reply);
@@ -132,6 +169,12 @@ function buildResponse({
     goal_update: cleanText(goal_update),
     objections_update: cleanText(objections_update),
     last_summary_update: cleanText(last_summary_update),
+    customer_status_update: cleanText(customer_status_update),
+    current_phase_update: cleanText(current_phase_update),
+    interested_in_program_update: cleanText(interested_in_program_update),
+    interested_in_control_update: cleanText(interested_in_control_update),
+    purchased_program_update: cleanText(purchased_program_update),
+    has_control_update: cleanText(has_control_update),
   };
 }
  
@@ -448,6 +491,8 @@ function handleOrderControlIfNeeded(message, recentMessages = []) {
       return buildResponse({
         send_reply: true,
         reply: `Je bent al goedgekeurd 🙏\n\nHier is de WhatsApp-groep nog een keer:\n${WHATSAPP_GROUP_LINK}`,
+        customer_status_update: "customer",
+        current_phase_update: "coaching",
       });
     }
  
@@ -456,6 +501,8 @@ function handleOrderControlIfNeeded(message, recentMessages = []) {
         send_reply: true,
         reply:
           "Je bestelling is al verwerkt. Ik ga vanaf hier gewoon met je meekijken als coach 🙏",
+        customer_status_update: "customer",
+        current_phase_update: "coaching",
       });
     }
  
@@ -486,6 +533,8 @@ function handleOrderControlIfNeeded(message, recentMessages = []) {
   return buildResponse({
     send_reply: true,
     reply: `Top, je ordernummer is goedgekeurd 🙏\n\nHier is de WhatsApp-groep waar je direct kunt starten met tips en begeleiding:\n${WHATSAPP_GROUP_LINK}`,
+    customer_status_update: "customer",
+    current_phase_update: "coaching",
   });
 }
  
@@ -497,6 +546,10 @@ function buildContextBlock({
   goal,
   objections,
   last_summary,
+  interested_in_program,
+  interested_in_control,
+  purchased_program,
+  has_control,
   recent_messages,
   latest_user_message,
 }) {
@@ -545,6 +598,10 @@ function buildContextBlock({
       goal: clamp(goal, MAX_GOAL_CHARS),
       objections: clamp(objections, MAX_OBJECTIONS_CHARS),
       last_summary: clamp(last_summary, MAX_SUMMARY_CHARS),
+      interested_in_program: clamp(interested_in_program, MAX_SHORT_FIELD_CHARS),
+      interested_in_control: clamp(interested_in_control, MAX_SHORT_FIELD_CHARS),
+      purchased_program: clamp(purchased_program, MAX_SHORT_FIELD_CHARS),
+      has_control: clamp(has_control, MAX_SHORT_FIELD_CHARS),
     },
     latest_user_message: clamp(latest_user_message, 1000),
     recent_conversation_history: recent_messages.map((msg) => ({
@@ -645,15 +702,26 @@ async function getStructuredUpdates({
   currentGoal,
   currentObjections,
   currentLastSummary,
+  currentInterestedInProgram,
+  currentInterestedInControl,
+  currentPurchasedProgram,
+  currentHasControl,
   recentMessages,
 }) {
+  const emptyResult = {
+    goal_update: "",
+    objections_update: "",
+    last_summary_update: "",
+    current_phase_update: "",
+    interested_in_program_update: "",
+    interested_in_control_update: "",
+    purchased_program_update: "",
+    has_control_update: "",
+  };
+ 
   if (!openai) {
     console.error("OPENAI CONFIG ERROR: OPENAI_API_KEY ontbreekt");
-    return {
-      goal_update: "",
-      objections_update: "",
-      last_summary_update: "",
-    };
+    return emptyResult;
   }
  
   const schema = {
@@ -663,20 +731,78 @@ async function getStructuredUpdates({
       goal_update: { type: "string" },
       objections_update: { type: "string" },
       last_summary_update: { type: "string" },
+      current_phase_update: { type: "string" },
+      interested_in_program_update: { type: "string" },
+      interested_in_control_update: { type: "string" },
+      purchased_program_update: { type: "string" },
+      has_control_update: { type: "string" },
     },
-    required: ["goal_update", "objections_update", "last_summary_update"],
+    required: [
+      "goal_update",
+      "objections_update",
+      "last_summary_update",
+      "current_phase_update",
+      "interested_in_program_update",
+      "interested_in_control_update",
+      "purchased_program_update",
+      "has_control_update",
+    ],
   };
  
   const systemPrompt = [
-    "Je bent een strikte CRM-extractor voor een WhatsApp salesgesprek.",
+    "Je bent een strikte CRM-extractor voor een WhatsApp salesgesprek voor Nutrition Works.",
     "Je taak is NIET om te antwoorden op de gebruiker.",
-    "Je analyseert alleen het nieuwste gebruikersbericht in de context van bestaande CRM-data.",
-    "Je geeft uitsluitend geldige JSON terug.",
-    "Gebruik Nederlands.",
-    "Vul alleen een veld als het nieuwste gebruikersbericht echt nieuwe of duidelijk concretere informatie toevoegt.",
-    "Herhaal geen informatie die al in current_goal, current_objections of current_last_summary staat.",
-    "Als er geen relevante update is voor een veld, geef een lege string terug.",
-    "Verzin niets.",
+    "Je analyseert het nieuwste gebruikersbericht in de context van het hele gesprek en de bestaande CRM-data.",
+    "Je geeft uitsluitend geldige JSON terug volgens het schema. Gebruik Nederlands.",
+    "Verzin niets. Vul nooit iets in dat niet uit het gesprek volgt.",
+    "",
+    "REGELS PER VELD:",
+    "",
+    "goal_update — De VOLLEDIGE, bijgewerkte doelomschrijving van de klant.",
+    "- Geef de complete bijgewerkte goal terug, met bestaande info plus eventuele nieuwe info uit het laatste bericht.",
+    "- Max 300 tekens.",
+    "- Als er werkelijk niets is veranderd ten opzichte van current_goal: lege string.",
+    "",
+    "objections_update — ALLE bezwaren die de klant tot nu toe heeft geuit, als één samenhangende tekst.",
+    "- Geef de complete bijgewerkte objections terug, met bestaande bezwaren plus eventuele nieuwe bezwaren uit het laatste bericht.",
+    "- Max 400 tekens.",
+    "- Als er werkelijk niets is veranderd ten opzichte van current_objections: lege string.",
+    "",
+    "last_summary_update — Een narratieve samenvatting van het hele gesprek tot nu toe, in beknopte alinea-vorm.",
+    "- Bevat: doel, situatie, sleutelemoties, eerdere pogingen, koopintentie, gespreksfase, en (na aankoop) coaching-context.",
+    "- Geef de complete bijgewerkte samenvatting terug, herformuleer waar nodig, integreer nieuwe info.",
+    "- Bedoeld als langetermijngeheugen — moet bruikbaar zijn ook als terugkerende klant maanden later iets vraagt.",
+    "- Max 900 tekens.",
+    "- Als er werkelijk niets is veranderd: lege string.",
+    "",
+    "current_phase_update — De gespreksfase op basis van wat er tot nu toe is besproken.",
+    "- Een van: intake / verdieping / analyse / advies / commitment / closing / checkout / coaching.",
+    "- coaching is alleen wanneer de klant al gevalideerd klant is (customer_status = customer).",
+    "- Geef de huidige fase terug zodra die verandert ten opzichte van current_phase.",
+    "- Als de fase niet duidelijk verandert: lege string.",
+    "",
+    "interested_in_program_update — Welk programma de klant heeft genoemd of waar Emma haar in stuurt.",
+    "- Geldige waarden: Basic / Deluxe / Exclusive / (lege string).",
+    "- Vul alleen in als er een duidelijke verandering is ten opzichte van current_interested_in_program.",
+    "- Bij geen verandering of geen duidelijke interesse: lege string.",
+    "",
+    "interested_in_control_update — Of de klant interesse heeft in Control of het is besproken.",
+    "- Geldige waarden: ja / nee / (lege string).",
+    "- ja = Emma heeft Control besproken of de klant toont interesse.",
+    "- nee = de klant heeft Control expliciet afgewezen.",
+    "- Bij geen verandering of geen duidelijke positie: lege string.",
+    "",
+    "purchased_program_update — Welk programma de klant heeft besteld.",
+    "- Geldige waarden: Basic / Deluxe / Exclusive / (lege string).",
+    "- Vul ALLEEN in als de klant in haar bericht expliciet vermeldt welk programma ze heeft besteld.",
+    "- Anders altijd lege string. Verzin nooit een aankoop.",
+    "",
+    "has_control_update — Of de klant Control heeft besteld.",
+    "- Geldige waarden: ja / nee / (lege string).",
+    "- Vul ALLEEN in als de klant expliciet vermeldt of Control wel of niet in haar bestelling zit.",
+    "- Anders altijd lege string.",
+    "",
+    "Belangrijk: voor elk veld geldt — als er niets is veranderd, retourneer een lege string.",
   ].join("\n");
  
   const userPayload = {
@@ -686,6 +812,10 @@ async function getStructuredUpdates({
     current_goal: clamp(currentGoal, MAX_GOAL_CHARS),
     current_objections: clamp(currentObjections, MAX_OBJECTIONS_CHARS),
     current_last_summary: clamp(currentLastSummary, MAX_SUMMARY_CHARS),
+    current_interested_in_program: clamp(currentInterestedInProgram, MAX_SHORT_FIELD_CHARS),
+    current_interested_in_control: clamp(currentInterestedInControl, MAX_SHORT_FIELD_CHARS),
+    current_purchased_program: clamp(currentPurchasedProgram, MAX_SHORT_FIELD_CHARS),
+    current_has_control: clamp(currentHasControl, MAX_SHORT_FIELD_CHARS),
     recent_messages: recentMessages.slice(-8).map((msg) => ({
       role: msg.role || "unknown",
       message_text: clamp(msg.message_text, 250),
@@ -728,85 +858,25 @@ async function getStructuredUpdates({
  
     if (!parsed || typeof parsed !== "object") {
       console.error("OPENAI EXTRACTION ERROR: ongeldige JSON output", rawText);
-      return {
-        goal_update: "",
-        objections_update: "",
-        last_summary_update: "",
-      };
+      return emptyResult;
     }
  
     return {
       goal_update: cleanText(parsed.goal_update),
       objections_update: cleanText(parsed.objections_update),
       last_summary_update: cleanText(parsed.last_summary_update),
+      current_phase_update: normalizePhaseName(parsed.current_phase_update),
+      interested_in_program_update: normalizeProgramName(parsed.interested_in_program_update),
+      interested_in_control_update: normalizeBinaryFlag(parsed.interested_in_control_update),
+      purchased_program_update: normalizeProgramName(parsed.purchased_program_update),
+      has_control_update: normalizeBinaryFlag(parsed.has_control_update),
     };
   } catch (error) {
     console.error("OPENAI EXTRACTION ERROR:", error?.message || error);
-    return {
-      goal_update: "",
-      objections_update: "",
-      last_summary_update: "",
-    };
+    return emptyResult;
   } finally {
     clearTimeout(timer);
   }
-}
- 
-/* ---------------------------- REPLY VALIDATION ---------------------------- */
- 
-function isLikelyRepetitiveReply(reply, recentMessages) {
-  const normalizedReply = normalizeComparableText(reply);
-  if (!normalizedReply) return false;
- 
-  const recentEmmaMessages = getLastEmmaMessages(recentMessages, 3);
- 
-  return recentEmmaMessages.some((oldReply) => {
-    const normalizedOld = normalizeComparableText(oldReply);
-    if (!normalizedOld) return false;
- 
-    if (normalizedReply === normalizedOld) return true;
- 
-    const shorter =
-      normalizedReply.length < normalizedOld.length
-        ? normalizedReply
-        : normalizedOld;
- 
-    const longer =
-      normalizedReply.length >= normalizedOld.length
-        ? normalizedReply
-        : normalizedOld;
- 
-    return shorter.length > 80 && longer.includes(shorter);
-  });
-}
- 
-function violatesHardRepetitionRules(reply, recentMessages) {
-  const text = cleanText(reply);
- 
-  const testimonialAlreadySent = hasLinkBeenSent(
-    recentMessages,
-    "youtube.com/@Nutrition-Works"
-  );
- 
-  const checkoutAlreadySent = hasCheckoutLinkBeenSent(recentMessages);
-  const priceAlreadyMentioned = hasPriceBeenMentioned(recentMessages);
- 
-  if (testimonialAlreadySent && /youtube\.com\/@Nutrition-Works/i.test(text)) {
-    return "testimonial_repeated";
-  }
- 
-  if (
-    checkoutAlreadySent &&
-    /bestellen-nl-control-1x|bestellen-be-control-1x/i.test(text)
-  ) {
-    return "checkout_link_repeated";
-  }
- 
-  if (priceAlreadyMentioned && /€\s*123|123\s*euro|programma kost/i.test(text)) {
-    return "price_repeated";
-  }
- 
-  return "";
 }
  
 /* ----------------------------- ELEVENLABS CHAT ---------------------------- */
@@ -819,6 +889,10 @@ async function getElevenReply({
   goal,
   objections,
   lastSummary,
+  interestedInProgram,
+  interestedInControl,
+  purchasedProgram,
+  hasControl,
   recentMessages,
   agentId,
 }) {
@@ -856,6 +930,10 @@ async function getElevenReply({
           goal,
           objections,
           last_summary: lastSummary,
+          interested_in_program: interestedInProgram,
+          interested_in_control: interestedInControl,
+          purchased_program: purchasedProgram,
+          has_control: hasControl,
           recent_messages: recentMessages,
           latest_user_message: message,
         });
@@ -954,6 +1032,10 @@ app.post("/chat", async (req, res) => {
     goal = "",
     objections = "",
     last_summary = "",
+    interested_in_program = "",
+    interested_in_control = "",
+    purchased_program = "",
+    has_control = "",
     recent_messages = [],
   } = req.body ?? {};
  
@@ -966,6 +1048,10 @@ app.post("/chat", async (req, res) => {
   const normalizedGoal = clamp(goal, MAX_GOAL_CHARS);
   const normalizedObjections = clamp(objections, MAX_OBJECTIONS_CHARS);
   const normalizedLastSummary = clamp(last_summary, MAX_SUMMARY_CHARS);
+  const normalizedInterestedInProgram = clamp(interested_in_program, MAX_SHORT_FIELD_CHARS);
+  const normalizedInterestedInControl = clamp(interested_in_control, MAX_SHORT_FIELD_CHARS);
+  const normalizedPurchasedProgram = clamp(purchased_program, MAX_SHORT_FIELD_CHARS);
+  const normalizedHasControl = clamp(has_control, MAX_SHORT_FIELD_CHARS);
  
   console.log("CHAT HIT");
   console.log(
@@ -1057,6 +1143,10 @@ app.post("/chat", async (req, res) => {
       goal: normalizedGoal,
       objections: normalizedObjections,
       lastSummary: normalizedLastSummary,
+      interestedInProgram: normalizedInterestedInProgram,
+      interestedInControl: normalizedInterestedInControl,
+      purchasedProgram: normalizedPurchasedProgram,
+      hasControl: normalizedHasControl,
       recentMessages: normalizedRecentMessages,
       agentId,
     });
@@ -1072,6 +1162,10 @@ app.post("/chat", async (req, res) => {
       currentGoal: normalizedGoal,
       currentObjections: normalizedObjections,
       currentLastSummary: normalizedLastSummary,
+      currentInterestedInProgram: normalizedInterestedInProgram,
+      currentInterestedInControl: normalizedInterestedInControl,
+      currentPurchasedProgram: normalizedPurchasedProgram,
+      currentHasControl: normalizedHasControl,
       recentMessages: normalizedRecentMessages,
     });
  
@@ -1103,23 +1197,6 @@ app.post("/chat", async (req, res) => {
         2
       )
     );
- 
-    const repeatedReason = violatesHardRepetitionRules(
-      reply,
-      normalizedRecentMessages
-    );
- 
-    if (repeatedReason) {
-      console.error("REPETITION GUARD HIT:", repeatedReason);
-      reply =
-        "Ik pak je laatste bericht erbij en ga daarop verder. Kun je kort bevestigen wat je nu het liefst wil weten of regelen?";
-    }
- 
-    if (isLikelyRepetitiveReply(reply, normalizedRecentMessages)) {
-      console.error("REPETITION GUARD HIT: reply lijkt op eerdere Emma-reactie");
-      reply =
-        "Ik ga hier niet opnieuw hetzelfde over uitleggen. Kun je kort aangeven waar je nu precies op wilt reageren?";
-    }
  
     reply = cleanReplyText(reply);
  
@@ -1155,6 +1232,11 @@ app.post("/chat", async (req, res) => {
             goal_update: "",
             objections_update: "",
             last_summary_update: "",
+            current_phase_update: "",
+            interested_in_program_update: "",
+            interested_in_control_update: "",
+            purchased_program_update: "",
+            has_control_update: "",
           };
  
     if (extractionResult.status === "rejected") {
@@ -1163,6 +1245,29 @@ app.post("/chat", async (req, res) => {
         extractionResult.reason
       );
     }
+ 
+    // Self-healing: if the conversation history shows this person is already a
+    // validated customer (WhatsApp group link was sent earlier) but Airtable
+    // still says "lead", push customer_status back to "customer" so the record
+    // catches up. Same for current_phase moving to "coaching".
+    const selfHealCustomerStatus =
+      alreadyValidated &&
+      normalizedCustomerStatus.toLowerCase() !== "customer"
+        ? "customer"
+        : "";
+ 
+    const selfHealCurrentPhase =
+      alreadyValidated &&
+      normalizedCurrentPhase.toLowerCase() !== "coaching"
+        ? "coaching"
+        : "";
+ 
+    // customer_status is purely server-side (order control + self-healing).
+    // current_phase can come from the extractor, but self-healing overrides it
+    // to "coaching" once the customer is validated.
+    const finalCustomerStatusUpdate = selfHealCustomerStatus;
+    const finalCurrentPhaseUpdate =
+      selfHealCurrentPhase || extraction.current_phase_update;
  
     console.log(
       JSON.stringify(
@@ -1173,6 +1278,12 @@ app.post("/chat", async (req, res) => {
           goal_update_preview: clamp(extraction.goal_update, 200),
           objections_update_preview: clamp(extraction.objections_update, 200),
           last_summary_update_preview: clamp(extraction.last_summary_update, 200),
+          customer_status_update_preview: finalCustomerStatusUpdate,
+          current_phase_update_preview: finalCurrentPhaseUpdate,
+          interested_in_program_update_preview: extraction.interested_in_program_update,
+          interested_in_control_update_preview: extraction.interested_in_control_update,
+          purchased_program_update_preview: extraction.purchased_program_update,
+          has_control_update_preview: extraction.has_control_update,
         },
         null,
         2
@@ -1186,6 +1297,12 @@ app.post("/chat", async (req, res) => {
         goal_update: extraction.goal_update,
         objections_update: extraction.objections_update,
         last_summary_update: extraction.last_summary_update,
+        customer_status_update: finalCustomerStatusUpdate,
+        current_phase_update: finalCurrentPhaseUpdate,
+        interested_in_program_update: extraction.interested_in_program_update,
+        interested_in_control_update: extraction.interested_in_control_update,
+        purchased_program_update: extraction.purchased_program_update,
+        has_control_update: extraction.has_control_update,
       })
     );
   } catch (error) {
