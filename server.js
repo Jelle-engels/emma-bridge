@@ -1205,7 +1205,7 @@ app.post("/chat", async (req, res) => {
     // response goes back to Make fast. The OpenAI call keeps running in
     // the background; its result for this turn is simply discarded.
     const POST_REPLY_EXTRACTION_GRACE_MS = Number(
-      process.env.POST_REPLY_EXTRACTION_GRACE_MS || 1500
+      process.env.POST_REPLY_EXTRACTION_GRACE_MS || 3000
     );
  
     const extractionResult = await Promise.race([
