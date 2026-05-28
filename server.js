@@ -2,6 +2,7 @@ import express from "express";
 import WebSocket from "ws";
 import OpenAI from "openai";
 import dotenv from "dotenv";
+import { randomUUID } from "crypto";
  
 dotenv.config();
  
@@ -589,7 +590,27 @@ async function getStructuredUpdates({
   currentPurchasedProgram,
   currentHasControl,
   recentMessages,
+  requestId,
+  requestStartMs,
 }) {
+  const diag = (event, extra = {}) => {
+    const now = Date.now();
+    console.log(
+      JSON.stringify(
+        {
+          diag: true,
+          request_id: requestId,
+          event,
+          elapsed_ms: requestStartMs ? now - requestStartMs : null,
+          timestamp_ms: now,
+          ...extra,
+        },
+        null,
+        2
+      )
+    );
+  };
+ 
   const emptyResult = {
     goal_update: "",
     objections_update: "",
@@ -708,6 +729,13 @@ async function getStructuredUpdates({
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), OPENAI_TIMEOUT_MS);
  
+  const openaiStartMs = Date.now();
+  diag("OPENAI_REQUEST_START", {
+    model: process.env.OPENAI_EXTRACTION_MODEL || "gpt-5.4-mini",
+    payload_size_bytes: JSON.stringify(userPayload).length,
+    system_prompt_size_bytes: systemPrompt.length,
+  });
+ 
   try {
     const response = await openai.responses.create(
       {
@@ -738,6 +766,12 @@ async function getStructuredUpdates({
     const rawText = extractOutputText(response);
     const parsed = safeJsonParse(rawText);
  
+    diag("OPENAI_REQUEST_COMPLETE", {
+      duration_ms: Date.now() - openaiStartMs,
+      raw_text_size_bytes: typeof rawText === "string" ? rawText.length : 0,
+      parsed_ok: Boolean(parsed && typeof parsed === "object"),
+    });
+ 
     if (!parsed || typeof parsed !== "object") {
       console.error("OPENAI EXTRACTION ERROR: ongeldige JSON output", rawText);
       return emptyResult;
@@ -754,6 +788,10 @@ async function getStructuredUpdates({
       has_control_update: normalizeBinaryFlag(parsed.has_control_update),
     };
   } catch (error) {
+    diag("OPENAI_REQUEST_ERROR", {
+      duration_ms: Date.now() - openaiStartMs,
+      error_message: error?.message || String(error),
+    });
     console.error("OPENAI EXTRACTION ERROR:", error?.message || error);
     return emptyResult;
   } finally {
@@ -777,16 +815,40 @@ async function getElevenReply({
   hasControl,
   recentMessages,
   agentId,
+  requestId,
+  requestStartMs,
 }) {
+  const diag = (event, extra = {}) => {
+    const now = Date.now();
+    console.log(
+      JSON.stringify(
+        {
+          diag: true,
+          request_id: requestId,
+          event,
+          elapsed_ms: requestStartMs ? now - requestStartMs : null,
+          timestamp_ms: now,
+          ...extra,
+        },
+        null,
+        2
+      )
+    );
+  };
+ 
   return await new Promise((resolve) => {
     const wsUrl = `wss://api.elevenlabs.io/v1/convai/conversation?agent_id=${encodeURIComponent(
       agentId
     )}`;
  
     let finalReply = "";
+    let firstPartLogged = false;
     let settled = false;
     let timeout = null;
     let ws = null;
+    const wsStartMs = Date.now();
+ 
+    diag("ELEVENLABS_WS_CONNECT_ATTEMPT", { ws_url: wsUrl });
  
     const settle = (reply) => {
       if (settled) return;
@@ -798,6 +860,10 @@ async function getElevenReply({
       ws = new WebSocket(wsUrl);
  
       timeout = setTimeout(() => {
+        diag("ELEVENLABS_WS_TIMEOUT", {
+          ws_duration_ms: Date.now() - wsStartMs,
+          partial_reply_length: finalReply.length,
+        });
         console.error("ELEVENLABS TIMEOUT: geen reply binnen deadline");
         try {
           ws.close();
@@ -806,6 +872,10 @@ async function getElevenReply({
       }, ELEVEN_TIMEOUT_MS);
  
       ws.on("open", () => {
+        diag("ELEVENLABS_WS_OPEN", {
+          ws_open_after_ms: Date.now() - wsStartMs,
+        });
+ 
         const contextBlock = buildContextBlock({
           customer_status: customerStatus,
           current_phase: currentPhase,
@@ -818,6 +888,11 @@ async function getElevenReply({
           has_control: hasControl,
           recent_messages: recentMessages,
           latest_user_message: message,
+        });
+ 
+        diag("ELEVENLABS_WS_CONTEXT_PREPARED", {
+          context_block_size_bytes: contextBlock.length,
+          message_length: typeof message === "string" ? message.length : 0,
         });
  
         ws.send(
@@ -843,6 +918,8 @@ async function getElevenReply({
             text: message,
           })
         );
+ 
+        diag("ELEVENLABS_WS_MESSAGES_SENT");
       });
  
       ws.on("message", (raw) => {
@@ -859,12 +936,27 @@ async function getElevenReply({
           const partText = data.text_response_part?.text || "";
  
           if (partType === "start" || partType === "delta") {
+            if (!firstPartLogged) {
+              firstPartLogged = true;
+              diag("ELEVENLABS_WS_FIRST_PART", {
+                first_part_after_ms: Date.now() - wsStartMs,
+                first_part_type: partType,
+              });
+            }
             finalReply += partText;
           }
         }
  
         if (data.type === "agent_response") {
           clearTimeout(timeout);
+ 
+          diag("ELEVENLABS_WS_AGENT_RESPONSE", {
+            ws_duration_ms: Date.now() - wsStartMs,
+            reply_length: typeof data.agent_response_event?.agent_response === "string"
+              ? data.agent_response_event.agent_response.length
+              : 0,
+            streamed_reply_length: finalReply.length,
+          });
  
           try {
             ws.close();
@@ -880,18 +972,29 @@ async function getElevenReply({
       });
  
       ws.on("error", (err) => {
+        diag("ELEVENLABS_WS_ERROR", {
+          ws_duration_ms: Date.now() - wsStartMs,
+          error_message: err?.message || String(err),
+        });
         console.error("ELEVENLABS WS ERROR:", err?.message || err);
         clearTimeout(timeout);
         settle(finalReply || FALLBACK_REPLY);
       });
  
       ws.on("close", () => {
+        diag("ELEVENLABS_WS_CLOSE", {
+          ws_duration_ms: Date.now() - wsStartMs,
+          settled_before_close: settled,
+        });
         clearTimeout(timeout);
         if (!settled) {
           settle(finalReply || FALLBACK_REPLY);
         }
       });
     } catch (error) {
+      diag("ELEVENLABS_OUTER_ERROR", {
+        error_message: error?.message || String(error),
+      });
       console.error("ELEVENLABS OUTER ERROR:", error?.message || error);
       if (timeout) clearTimeout(timeout);
       settle(finalReply || FALLBACK_REPLY);
@@ -906,6 +1009,44 @@ app.get("/health", (_req, res) => {
 });
  
 app.post("/chat", async (req, res) => {
+  // Diagnostic logging setup: every request gets a unique ID and a start timestamp
+  // so we can reconstruct exactly what happened, in what order, and how long each
+  // step took. All diagnostic log lines include diag:true so they can be filtered
+  // in Render's log search.
+  const requestId = randomUUID();
+  const requestStartMs = Date.now();
+  const requestBodySize = (() => {
+    try {
+      return JSON.stringify(req.body ?? {}).length;
+    } catch {
+      return -1;
+    }
+  })();
+ 
+  const diag = (event, extra = {}) => {
+    const now = Date.now();
+    console.log(
+      JSON.stringify(
+        {
+          diag: true,
+          request_id: requestId,
+          event,
+          elapsed_ms: now - requestStartMs,
+          timestamp_ms: now,
+          ...extra,
+        },
+        null,
+        2
+      )
+    );
+  };
+ 
+  diag("REQUEST_START", {
+    request_body_size_bytes: requestBodySize,
+    has_body: Boolean(req.body),
+    remote_addr: req.ip,
+  });
+ 
   const {
     user_id,
     message,
@@ -935,6 +1076,31 @@ app.post("/chat", async (req, res) => {
   const normalizedPurchasedProgram = clamp(purchased_program, MAX_SHORT_FIELD_CHARS);
   const normalizedHasControl = clamp(has_control, MAX_SHORT_FIELD_CHARS);
  
+  diag("REQUEST_PARSED", {
+    user_id: normalizedUserId,
+    message_length: normalizedMessage.length,
+    customer_status: normalizedCustomerStatus,
+    current_phase: normalizedCurrentPhase,
+    recent_messages_count: Array.isArray(recent_messages) ? recent_messages.length : 0,
+  });
+ 
+  const sendDiagResponse = (label, responseObject) => {
+    let responseSize = -1;
+    try {
+      responseSize = JSON.stringify(responseObject).length;
+    } catch {}
+    diag("REQUEST_END", {
+      exit_label: label,
+      total_duration_ms: Date.now() - requestStartMs,
+      response_size_bytes: responseSize,
+      reply_length:
+        typeof responseObject?.reply === "string"
+          ? responseObject.reply.length
+          : 0,
+    });
+    return res.json(responseObject);
+  };
+ 
   console.log("CHAT HIT");
   console.log(
     JSON.stringify(
@@ -954,12 +1120,12 @@ app.post("/chat", async (req, res) => {
  
   if (!normalizedUserId) {
     console.error("REQUEST ERROR: user_id ontbreekt");
-    return res.json(buildResponse({ send_reply: true, reply: FALLBACK_REPLY }));
+    return sendDiagResponse("fallback_reply", buildResponse({ send_reply: true, reply: FALLBACK_REPLY }));
   }
  
   if (!normalizedMessage) {
     console.error("REQUEST ERROR: message ontbreekt");
-    return res.json(buildResponse({ send_reply: true, reply: FALLBACK_REPLY }));
+    return sendDiagResponse("fallback_reply", buildResponse({ send_reply: true, reply: FALLBACK_REPLY }));
   }
  
   const normalizedRecentMessages = sanitizeAndPrepareRecentMessages(
@@ -986,12 +1152,12 @@ app.post("/chat", async (req, res) => {
  
   if (coachSourceResponse) {
     console.log("COACH SOURCE CODE HANDLED SERVER-SIDE");
-    return res.json(coachSourceResponse);
+    return sendDiagResponse("coach_welcome", coachSourceResponse);
   }
  
   if (!agentId) {
     console.error("CONFIG ERROR: ELEVENLABS_AGENT_ID ontbreekt");
-    return res.json(buildResponse({ send_reply: true, reply: FALLBACK_REPLY }));
+    return sendDiagResponse("fallback_reply", buildResponse({ send_reply: true, reply: FALLBACK_REPLY }));
   }
  
   try {
@@ -999,6 +1165,13 @@ app.post("/chat", async (req, res) => {
       normalizedCustomerStatus,
       normalizedRecentMessages
     );
+ 
+    diag("ELEVENLABS_DISPATCH", {
+      already_validated: alreadyValidated,
+      customer_status_passed: alreadyValidated ? "customer" : normalizedCustomerStatus,
+      current_phase_passed: alreadyValidated ? "coaching" : normalizedCurrentPhase,
+      recent_messages_count: normalizedRecentMessages.length,
+    });
  
     // Start both calls in parallel. We only block on ElevenLabs (the customer-facing reply);
     // OpenAI extraction runs alongside and is awaited briefly later with a grace timeout
@@ -1021,6 +1194,8 @@ app.post("/chat", async (req, res) => {
       hasControl: normalizedHasControl,
       recentMessages: normalizedRecentMessages,
       agentId,
+      requestId,
+      requestStartMs,
     });
  
     const extractionPromise = getStructuredUpdates({
@@ -1039,12 +1214,26 @@ app.post("/chat", async (req, res) => {
       currentPurchasedProgram: normalizedPurchasedProgram,
       currentHasControl: normalizedHasControl,
       recentMessages: normalizedRecentMessages,
+      requestId,
+      requestStartMs,
     });
  
     const replyResult = await replyPromise.then(
       (value) => ({ status: "fulfilled", value }),
       (reason) => ({ status: "rejected", reason })
     );
+ 
+    diag("ELEVENLABS_DONE", {
+      status: replyResult.status,
+      reply_length:
+        replyResult.status === "fulfilled" && typeof replyResult.value === "string"
+          ? replyResult.value.length
+          : 0,
+      reject_reason:
+        replyResult.status === "rejected"
+          ? String(replyResult.reason?.message || replyResult.reason)
+          : null,
+    });
  
     let reply =
       replyResult.status === "fulfilled"
@@ -1080,6 +1269,7 @@ app.post("/chat", async (req, res) => {
       process.env.POST_REPLY_EXTRACTION_GRACE_MS || 3000
     );
  
+    const extractionRaceStartMs = Date.now();
     const extractionResult = await Promise.race([
       extractionPromise.then(
         (value) => ({ status: "fulfilled", value }),
@@ -1096,6 +1286,15 @@ app.post("/chat", async (req, res) => {
         )
       ),
     ]);
+ 
+    diag("OPENAI_DONE", {
+      status: extractionResult.status,
+      reason: extractionResult.status === "rejected"
+        ? String(extractionResult.reason?.message || extractionResult.reason)
+        : null,
+      grace_wait_ms: Date.now() - extractionRaceStartMs,
+      grace_limit_ms: POST_REPLY_EXTRACTION_GRACE_MS,
+    });
  
     const extraction =
       extractionResult.status === "fulfilled"
@@ -1162,7 +1361,8 @@ app.post("/chat", async (req, res) => {
       )
     );
  
-    return res.json(
+    return sendDiagResponse(
+      "normal_flow",
       buildResponse({
         send_reply: true,
         reply,
@@ -1178,8 +1378,11 @@ app.post("/chat", async (req, res) => {
       })
     );
   } catch (error) {
+    diag("SERVER_ERROR", {
+      error_message: error?.message || String(error),
+    });
     console.error("SERVER ERROR:", error?.message || error);
-    return res.json(buildResponse({ send_reply: true, reply: FALLBACK_REPLY }));
+    return sendDiagResponse("server_error_fallback", buildResponse({ send_reply: true, reply: FALLBACK_REPLY }));
   }
 });
  
