@@ -1388,3 +1388,7 @@ app.post("/chat", async (req, res) => {
     return sendDiagResponse("server_error_fallback", buildResponse({ send_reply: true, reply: FALLBACK_REPLY }));
   }
 });
+ 
+app.listen(PORT, () => {
+  console.log(`Server draait op poort ${PORT}`);
+});
