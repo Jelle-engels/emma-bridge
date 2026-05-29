@@ -684,26 +684,29 @@ async function getStructuredUpdates({
     "- Geef de huidige fase terug zodra die verandert ten opzichte van current_phase.",
     "- Als de fase niet duidelijk verandert: lege string.",
     "",
-    "interested_in_program_update — Welk programma de klant heeft genoemd of waar Emma haar in stuurt.",
+    "interested_in_program_update — Welk specifiek programma (Basic, Deluxe of Exclusive) in het gesprek expliciet bij naam wordt genoemd door de klant of door Emma.",
     "- Geldige waarden: Basic / Deluxe / Exclusive / (lege string).",
-    "- Vul alleen in als er een duidelijke verandering is ten opzichte van current_interested_in_program.",
-    "- Bij geen verandering of geen duidelijke interesse: lege string.",
+    "- Vul ALLEEN in als de exacte programmanaam (Basic, Deluxe of Exclusive) letterlijk in het gesprek voorkomt.",
+    "- Algemene koopintentie, het bestellen van Control, of interesse in afvallen tellen NIET als programma-interesse.",
+    "- Kies nooit een default programma. Als geen programmanaam letterlijk is genoemd: lege string. Verzin nooit een programma.",
     "",
-    "interested_in_control_update — Of de klant interesse heeft in Control of het is besproken.",
+    "interested_in_control_update — Of de klant interesse toont in Control of dat Control expliciet is besproken in het gesprek.",
     "- Geldige waarden: ja / nee / (lege string).",
-    "- ja = Emma heeft Control besproken of de klant toont interesse.",
-    "- nee = de klant heeft Control expliciet afgewezen.",
-    "- Bij geen verandering of geen duidelijke positie: lege string.",
+    "- Vul \"ja\" alleen in als het woord 'Control' letterlijk in het gesprek voorkomt (door de klant of door Emma) en daaruit interesse blijkt.",
+    "- Vul \"nee\" alleen als de klant Control expliciet heeft afgewezen.",
+    "- Bij geen letterlijke vermelding van Control in het gesprek: lege string.",
     "",
-    "purchased_program_update — Welk programma de klant heeft besteld.",
+    "purchased_program_update — Welk specifiek programma (Basic, Deluxe of Exclusive) de klant heeft besteld.",
     "- Geldige waarden: Basic / Deluxe / Exclusive / (lege string).",
-    "- Vul ALLEEN in als de klant in haar bericht expliciet vermeldt welk programma ze heeft besteld.",
-    "- Anders altijd lege string. Verzin nooit een aankoop.",
+    "- Vul ALLEEN in als de klant in haar bericht expliciet de naam van het bestelde programma noemt.",
+    "- Algemene koopintentie of het bestellen van Control telt NIET als programma-aankoop.",
+    "- Bij geen expliciete vermelding van een programmanaam in de aankoop: lege string. Verzin nooit een aankoop.",
     "",
-    "has_control_update — Of de klant Control heeft besteld.",
+    "has_control_update — Of de klant Control heeft besteld als onderdeel van haar bestelling.",
     "- Geldige waarden: ja / nee / (lege string).",
-    "- Vul ALLEEN in als de klant expliciet vermeldt of Control wel of niet in haar bestelling zit.",
-    "- Anders altijd lege string.",
+    "- Vul \"ja\" alleen in als de klant expliciet vermeldt dat Control onderdeel is van haar bestelling.",
+    "- Vul \"nee\" alleen als de klant expliciet aangeeft dat Control NIET in haar bestelling zit.",
+    "- Bij geen expliciete vermelding van Control in de aankoop: lege string. Verzin geen aankoop.",
     "",
     "Belangrijk: voor elk veld geldt — als er niets is veranderd, retourneer een lege string.",
   ].join("\n");
@@ -731,7 +734,7 @@ async function getStructuredUpdates({
  
   const openaiStartMs = Date.now();
   diag("OPENAI_REQUEST_START", {
-    model: process.env.OPENAI_EXTRACTION_MODEL || "gpt-5.4-mini",
+    model: process.env.OPENAI_EXTRACTION_MODEL || "gpt-4o-mini",
     payload_size_bytes: JSON.stringify(userPayload).length,
     system_prompt_size_bytes: systemPrompt.length,
   });
@@ -739,7 +742,7 @@ async function getStructuredUpdates({
   try {
     const response = await openai.responses.create(
       {
-        model: process.env.OPENAI_EXTRACTION_MODEL || "gpt-5.4-mini",
+        model: process.env.OPENAI_EXTRACTION_MODEL || "gpt-4o-mini",
         store: false,
         input: [
           {
@@ -1266,7 +1269,7 @@ app.post("/chat", async (req, res) => {
     // response goes back to Make fast. The OpenAI call keeps running in
     // the background; its result for this turn is simply discarded.
     const POST_REPLY_EXTRACTION_GRACE_MS = Number(
-      process.env.POST_REPLY_EXTRACTION_GRACE_MS || 3000
+      process.env.POST_REPLY_EXTRACTION_GRACE_MS || 2000
     );
  
     const extractionRaceStartMs = Date.now();
@@ -1384,8 +1387,4 @@ app.post("/chat", async (req, res) => {
     console.error("SERVER ERROR:", error?.message || error);
     return sendDiagResponse("server_error_fallback", buildResponse({ send_reply: true, reply: FALLBACK_REPLY }));
   }
-});
- 
-app.listen(PORT, () => {
-  console.log(`Server draait op poort ${PORT}`);
 });
