@@ -351,6 +351,169 @@ function isCustomerStatusValidated(customerStatus, recentMessages) {
   );
 }
  
+/* ---------------------- PRODUCT FIELD DERIVATION ------------------------- */
+// Internal product detection (deterministic, code-side).
+// Triggers when a valid order number has been shared AND a WhatsApp group
+// link has been sent — same gate as customer_status validation.
+// Once triggered, derives purchased_program, has_control, interested_in_program
+// and interested_in_control from the conversation content.
+ 
+const ORDER_NUMBER_PATTERN = /\bJP[-_]?[A-Z0-9]+\b/i;
+const PROGRAM_PATTERN = /\b(basic|deluxe|exclusive)\b/i;
+const PROGRAM_PATTERN_GLOBAL = /\b(basic|deluxe|exclusive)\b/gi;
+const CONTROL_MENTION_PATTERN = /\bcontrol\b/i;
+const CONTROL_COMBO_PATTERN =
+  /(?:\bmet[\s-]*(?:de[\s-]*)?control|\ben[\s-]*(?:de[\s-]*)?control|\binclusief[\s-]*control|\bcontrol[\s-]*erbij|(?:^|\s|\W)\+[\s-]*control)/i;
+ 
+function userMessagesContainOrderNumber(messages, currentUserMessage) {
+  if (currentUserMessage && ORDER_NUMBER_PATTERN.test(cleanText(currentUserMessage))) {
+    return true;
+  }
+ 
+  return messages.some(
+    (msg) =>
+      msg.role === "user" &&
+      ORDER_NUMBER_PATTERN.test(cleanText(msg.message_text))
+  );
+}
+ 
+function findProgramInText(text) {
+  if (!text) return "";
+  const matches = text.match(PROGRAM_PATTERN_GLOBAL);
+  if (!matches || matches.length === 0) return "";
+  const lastMatch = matches[matches.length - 1];
+  const lower = lastMatch.toLowerCase();
+  return lower.charAt(0).toUpperCase() + lower.slice(1);
+}
+ 
+function findEmmaConfirmationMessage(messages, currentReply) {
+  // The "confirmation" is the most recent Emma message that contains the
+  // WhatsApp group link. Prefer the current reply if it contains the link.
+  if (currentReply && /chat\.whatsapp\.com/i.test(cleanText(currentReply))) {
+    return cleanText(currentReply);
+  }
+ 
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (
+      msg.role === "emma" &&
+      /chat\.whatsapp\.com/i.test(cleanText(msg.message_text))
+    ) {
+      return cleanText(msg.message_text);
+    }
+  }
+ 
+  return "";
+}
+ 
+function extractPurchasedProgram(messages, currentReply) {
+  // Only look inside Emma's CONFIRMATION message (the one with the WhatsApp
+  // link). If she names a program there, that's what was purchased.
+  // If she names no program, the customer bought Control standalone.
+  const confirmationText = findEmmaConfirmationMessage(messages, currentReply);
+  return findProgramInText(confirmationText);
+}
+ 
+function extractInterestedInProgram(messages, currentUserMessage, currentReply) {
+  // Interest in a program can be expressed anywhere in the conversation by
+  // either Emma (offer) or the user (request). Take the LAST mention.
+  let lastMatch = "";
+ 
+  for (const msg of messages) {
+    const found = findProgramInText(cleanText(msg.message_text));
+    if (found) lastMatch = found;
+  }
+  const userFound = findProgramInText(cleanText(currentUserMessage));
+  if (userFound) lastMatch = userFound;
+  const replyFound = findProgramInText(cleanText(currentReply));
+  if (replyFound) lastMatch = replyFound;
+ 
+  return lastMatch;
+}
+ 
+function deriveHasControl(messages, currentReply, programName) {
+  // Default rule:
+  // - If no program was bought (pure Control purchase) -> true
+  // - If a program was bought -> only true when Emma's CONFIRMATION message
+  //   contains an explicit combo phrase ("met control", "+ control",
+  //   "en control", "inclusief control", ...). Otherwise -> false.
+  if (!programName) return "true";
+ 
+  const confirmationText = findEmmaConfirmationMessage(messages, currentReply);
+  if (!confirmationText) return "false";
+ 
+  return CONTROL_COMBO_PATTERN.test(confirmationText) ? "true" : "false";
+}
+ 
+function deriveInterestedInControl(messages, currentUserMessage, currentReply) {
+  // Customers come in for Control, so "ja" is the safe default once Control
+  // has been mentioned anywhere in the conversation by user or Emma.
+  const allTexts = [];
+  for (const msg of messages) {
+    if (msg.message_text) allTexts.push(cleanText(msg.message_text));
+  }
+  if (currentUserMessage) allTexts.push(cleanText(currentUserMessage));
+  if (currentReply) allTexts.push(cleanText(currentReply));
+ 
+  const joined = allTexts.join(" ");
+  return CONTROL_MENTION_PATTERN.test(joined) ? "ja" : "";
+}
+ 
+function derivePurchaseFields({
+  recentMessages,
+  currentUserMessage,
+  currentReply,
+  whatsappGroupLinkSentNowOrEarlier,
+}) {
+  // Hard gate: order number from user AND WhatsApp group link sent.
+  const orderNumberPresent = userMessagesContainOrderNumber(
+    recentMessages,
+    currentUserMessage
+  );
+ 
+  const validated = orderNumberPresent && whatsappGroupLinkSentNowOrEarlier;
+ 
+  // interested_in_program / interested_in_control can be derived independently
+  // of the purchase trigger (a customer can be "interested" before buying).
+  const interestedInProgram = extractInterestedInProgram(
+    recentMessages,
+    currentUserMessage,
+    currentReply
+  );
+  const interestedInControlSignal = deriveInterestedInControl(
+    recentMessages,
+    currentUserMessage,
+    currentReply
+  );
+ 
+  if (!validated) {
+    return {
+      validated: false,
+      purchased_program: "",
+      has_control: "",
+      interested_in_program: interestedInProgram,
+      interested_in_control: interestedInControlSignal,
+    };
+  }
+ 
+  // Validated purchase -> derive purchased_program from Emma's confirmation
+  // message only (the message that contains the WhatsApp group link).
+  const purchasedProgram = extractPurchasedProgram(recentMessages, currentReply);
+  const hasControl = deriveHasControl(
+    recentMessages,
+    currentReply,
+    purchasedProgram
+  );
+ 
+  return {
+    validated: true,
+    purchased_program: purchasedProgram,
+    has_control: hasControl,
+    interested_in_program: interestedInProgram,
+    interested_in_control: interestedInControlSignal || "ja",
+  };
+}
+ 
 function detectState({
   currentMessage,
   recentMessages,
@@ -1324,17 +1487,37 @@ app.post("/chat", async (req, res) => {
     // validated customer (WhatsApp group link was sent earlier) but Airtable
     // still says "lead", push customer_status back to "customer" so the record
     // catches up. Same for current_phase moving to "coaching".
+    const whatsappLinkInCurrentReply = /chat\.whatsapp\.com/i.test(
+      cleanText(reply)
+    );
+    const whatsappLinkSentNowOrEarlier =
+      whatsappLinkInCurrentReply ||
+      hasWhatsappGroupLinkBeenSent(normalizedRecentMessages);
+ 
+    const validatedNow =
+      alreadyValidated || whatsappLinkInCurrentReply;
+ 
     const selfHealCustomerStatus =
-      alreadyValidated &&
+      validatedNow &&
       normalizedCustomerStatus.toLowerCase() !== "customer"
         ? "customer"
         : "";
  
     const selfHealCurrentPhase =
-      alreadyValidated &&
+      validatedNow &&
       normalizedCurrentPhase.toLowerCase() !== "coaching"
         ? "coaching"
         : "";
+ 
+    // Server-side derivation of product fields (deterministic, replaces the
+    // extractor output for purchased_program, has_control, interested_in_program
+    // and interested_in_control).
+    const derivedPurchase = derivePurchaseFields({
+      recentMessages: normalizedRecentMessages,
+      currentUserMessage: normalizedMessage,
+      currentReply: reply,
+      whatsappGroupLinkSentNowOrEarlier: whatsappLinkSentNowOrEarlier,
+    });
  
     // customer_status is purely server-side (order control + self-healing).
     // current_phase can come from the extractor, but self-healing overrides it
@@ -1342,6 +1525,14 @@ app.post("/chat", async (req, res) => {
     const finalCustomerStatusUpdate = selfHealCustomerStatus;
     const finalCurrentPhaseUpdate =
       selfHealCurrentPhase || extraction.current_phase_update;
+ 
+    // Product fields: code-side derivation always wins over the extractor.
+    // We only write a non-empty value (so we never overwrite a previously
+    // correct Airtable value with an empty string).
+    const finalInterestedInProgramUpdate = derivedPurchase.interested_in_program;
+    const finalInterestedInControlUpdate = derivedPurchase.interested_in_control;
+    const finalPurchasedProgramUpdate = derivedPurchase.purchased_program;
+    const finalHasControlUpdate = derivedPurchase.has_control;
  
     console.log(
       JSON.stringify(
@@ -1354,10 +1545,15 @@ app.post("/chat", async (req, res) => {
           last_summary_update_preview: clamp(extraction.last_summary_update, 200),
           customer_status_update_preview: finalCustomerStatusUpdate,
           current_phase_update_preview: finalCurrentPhaseUpdate,
-          interested_in_program_update_preview: extraction.interested_in_program_update,
-          interested_in_control_update_preview: extraction.interested_in_control_update,
-          purchased_program_update_preview: extraction.purchased_program_update,
-          has_control_update_preview: extraction.has_control_update,
+          interested_in_program_update_preview: finalInterestedInProgramUpdate,
+          interested_in_control_update_preview: finalInterestedInControlUpdate,
+          purchased_program_update_preview: finalPurchasedProgramUpdate,
+          has_control_update_preview: finalHasControlUpdate,
+          derived_purchase_validated: derivedPurchase.validated,
+          extractor_purchased_program_raw: extraction.purchased_program_update,
+          extractor_has_control_raw: extraction.has_control_update,
+          extractor_interested_in_program_raw: extraction.interested_in_program_update,
+          extractor_interested_in_control_raw: extraction.interested_in_control_update,
         },
         null,
         2
@@ -1374,10 +1570,10 @@ app.post("/chat", async (req, res) => {
         last_summary_update: extraction.last_summary_update,
         customer_status_update: finalCustomerStatusUpdate,
         current_phase_update: finalCurrentPhaseUpdate,
-        interested_in_program_update: extraction.interested_in_program_update,
-        interested_in_control_update: extraction.interested_in_control_update,
-        purchased_program_update: extraction.purchased_program_update,
-        has_control_update: extraction.has_control_update,
+        interested_in_program_update: finalInterestedInProgramUpdate,
+        interested_in_control_update: finalInterestedInControlUpdate,
+        purchased_program_update: finalPurchasedProgramUpdate,
+        has_control_update: finalHasControlUpdate,
       })
     );
   } catch (error) {
