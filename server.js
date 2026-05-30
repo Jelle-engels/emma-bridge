@@ -359,8 +359,8 @@ function isCustomerStatusValidated(customerStatus, recentMessages) {
 // and interested_in_control from the conversation content.
  
 const ORDER_NUMBER_PATTERN = /\bJP[-_]?[A-Z0-9]+\b/i;
-const PROGRAM_PATTERN = /\b(basic|deluxe|exclusive)\b/i;
-const PROGRAM_PATTERN_GLOBAL = /\b(basic|deluxe|exclusive)\b/gi;
+const PROGRAM_PATTERN = /\b(basic|beauty|deluxe|exclusive)\b/i;
+const PROGRAM_PATTERN_GLOBAL = /\b(basic|beauty|deluxe|exclusive)\b/gi;
 const CONTROL_MENTION_PATTERN = /\bcontrol\b/i;
 const CONTROL_COMBO_PATTERN =
   /(?:\bmet[\s-]*(?:de[\s-]*)?control|\ben[\s-]*(?:de[\s-]*)?control|\binclusief[\s-]*control|\bcontrol[\s-]*erbij|(?:^|\s|\W)\+[\s-]*control)/i;
