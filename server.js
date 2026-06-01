@@ -26,6 +26,19 @@ const NO_REPLY = "__NO_REPLY__";
 const FALLBACK_REPLY =
   "Er ging iets mis met mijn antwoord, kun je je bericht nog een keer sturen";
  
+const WELCOME_MESSAGE =
+  "Hallo, ik ben Emma 😊\n\n" +
+  "Ik ben de AI-assistent van Nutrition Works en ik help dagelijks mensen om hun doelen te bereiken 🤗✨\n\n" +
+  "We hebben al tienduizenden mensen geholpen en ik denk echt dat ik jou ook kan helpen 💚\n\n" +
+  "Om je zo goed mogelijk te helpen, mag je me meteen wat meer vertellen over jouw situatie 🙏\n\n" +
+  "Bijvoorbeeld:\n" +
+  "• je huidige gewicht\n" +
+  "• waar je naartoe wil\n" +
+  "• je leeftijd\n" +
+  "• wat je al geprobeerd hebt\n" +
+  "• waar je nu tegenaan loopt\n\n" +
+  "Hoe meer je deelt, hoe beter ik je kan helpen 🤗";
+ 
 const openai = process.env.OPENAI_API_KEY
   ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
   : null;
@@ -566,6 +579,25 @@ function detectState({
     should_use_coaching_mode: isValidatedCustomer,
     current_phase: isValidatedCustomer ? "coaching" : cleanText(currentPhase),
   };
+}
+ 
+/* --------------------------- NEW USER DETECTION --------------------------- */
+ 
+// A "new user" is detected when the request arrives with completely empty CRM
+// context — no customer_status, no recent_messages, no last_summary. Make
+// already branches its scenario via Airtable's user_exists check, but we also
+// defensively check here so we can return the welcome reply directly and skip
+// the Emma/ElevenLabs call entirely. This prevents Emma from misinterpreting
+// opt-in triggers like "coach-Jelle" as a customer telling her about a
+// previous coach. Source attribution (Airtable Bron field) is handled by
+// Make/Airtable downstream — not by this server.
+function isNewUser({ customerStatus, recentMessages, lastSummary }) {
+  const hasCustomerStatus = Boolean(cleanText(customerStatus));
+  const hasRecentMessages =
+    Array.isArray(recentMessages) && recentMessages.length > 0;
+  const hasLastSummary = Boolean(cleanText(lastSummary));
+ 
+  return !hasCustomerStatus && !hasRecentMessages && !hasLastSummary;
 }
  
 /* ------------------------------ CONTEXT BLOCK ----------------------------- */
@@ -1297,6 +1329,31 @@ app.post("/chat", async (req, res) => {
       2
     )
   );
+ 
+  // NEW USER FAST PATH: when context is fully empty (no customer_status,
+  // no history, no summary) we send the hardcoded welcome reply directly.
+  // Emma is intentionally NOT invoked here — that prevents her from
+  // misinterpreting opt-in triggers like "coach-Jelle" as a customer telling
+  // her about a previous coach. Source attribution (Airtable Bron) is handled
+  // entirely by Make/Airtable downstream from the original message body.
+  if (
+    isNewUser({
+      customerStatus: normalizedCustomerStatus,
+      recentMessages: normalizedRecentMessages,
+      lastSummary: normalizedLastSummary,
+    })
+  ) {
+    diag("NEW_USER_WELCOME", {
+      first_message_preview: clamp(normalizedMessage, 120),
+    });
+    return sendDiagResponse(
+      "new_user_welcome",
+      buildResponse({
+        send_reply: true,
+        reply: WELCOME_MESSAGE,
+      })
+    );
+  }
  
   if (!agentId) {
     console.error("CONFIG ERROR: ELEVENLABS_AGENT_ID ontbreekt");
