@@ -26,19 +26,6 @@ const NO_REPLY = "__NO_REPLY__";
 const FALLBACK_REPLY =
   "Er ging iets mis met mijn antwoord, kun je je bericht nog een keer sturen";
  
-const COACH_SOURCE_START_REPLY =
-  "Hallo, ik ben Emma 😊\n\n" +
-  "Ik ben de AI-assistent van Nutrition Works en ik help dagelijks mensen om hun doelen te bereiken 🤗✨\n\n" +
-  "We hebben al tienduizenden mensen geholpen en ik denk echt dat ik jou ook kan helpen 💚\n\n" +
-  "Om je zo goed mogelijk te helpen, mag je me meteen wat meer vertellen over jouw situatie 🙏\n\n" +
-  "Bijvoorbeeld:\n" +
-  "• je huidige gewicht\n" +
-  "• waar je naartoe wil\n" +
-  "• je leeftijd\n" +
-  "• wat je al geprobeerd hebt\n" +
-  "• waar je nu tegenaan loopt\n\n" +
-  "Hoe meer je deelt, hoe beter ik je kan helpen 🤗";
- 
 const openai = process.env.OPENAI_API_KEY
   ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
   : null;
@@ -111,6 +98,7 @@ function normalizeBinaryFlag(value) {
 function normalizeProgramName(value) {
   const v = cleanText(value).toLowerCase();
   if (v === "basic") return "Basic";
+  if (v === "beauty") return "Beauty";
   if (v === "deluxe") return "Deluxe";
   if (v === "exclusive") return "Exclusive";
   return "";
@@ -124,9 +112,12 @@ function normalizePhaseName(value) {
     "analyse",
     "advies",
     "commitment",
+    "presentatie",
     "closing",
+    "checkout-bevestiging",
     "checkout",
     "coaching",
+    "na_aankoop",
   ];
   return allowed.includes(v) ? v : "";
 }
@@ -307,18 +298,27 @@ function hasLinkBeenSent(messages, linkPart) {
 }
  
 function hasPriceBeenMentioned(messages) {
+  // Matches any of the known SKU prices (Control, Basic, Beauty, Deluxe,
+  // Exclusive, combos, plus loose upgrade products), in either € notation
+  // or "euro" form, plus generic price phrasings.
+  const priceRegex =
+    /€\s*(?:54|99|108|123|135|194|199|204|223|254|346|358|379|417|477|481|600|602|725)\b|(?:54|99|108|123|135|194|199|204|223|254|346|358|379|417|477|481|600|602|725)\s*euro\b|programma kost|kost in totaal|totaalprijs/i;
+ 
   return messages.some(
-    (msg) =>
-      msg.role === "emma" &&
-      /€\s*123|123\s*euro|programma kost/i.test(msg.message_text)
+    (msg) => msg.role === "emma" && priceRegex.test(msg.message_text)
   );
 }
  
 function hasCheckoutLinkBeenSent(messages) {
+  // Matches any of the real tr.ee checkout URLs. Covers Control, all 4 program
+  // SKUs, all program+Control combos, loose upgrade products (Berry caps,
+  // Fruit/Vegetable caps, Berry+Fruit/Vegetable combos), extra products
+  // (Omega, Complete Bars, Superfood, Luminate, Vegetable Soup), in both
+  // Dutch and Belgian markets.
   return messages.some(
     (msg) =>
       msg.role === "emma" &&
-      /bestellen-nl-control-1x|bestellen-be-control-1x/i.test(msg.message_text)
+      /tr\.ee\/bestellen-(?:nl|be)-/i.test(msg.message_text)
   );
 }
  
@@ -566,22 +566,6 @@ function detectState({
     should_use_coaching_mode: isValidatedCustomer,
     current_phase: isValidatedCustomer ? "coaching" : cleanText(currentPhase),
   };
-}
- 
-/* --------------------------- COACH SOURCE CODE ---------------------------- */
- 
-function isCoachSourceCode(message) {
-  const text = cleanText(message);
-  return /^coach-[a-zÀ-ÿ0-9_-]+$/i.test(text);
-}
- 
-function handleCoachSourceCodeIfNeeded(message) {
-  if (!isCoachSourceCode(message)) return null;
- 
-  return buildResponse({
-    send_reply: true,
-    reply: COACH_SOURCE_START_REPLY,
-  });
 }
  
 /* ------------------------------ CONTEXT BLOCK ----------------------------- */
@@ -842,14 +826,14 @@ async function getStructuredUpdates({
     "- Als er werkelijk niets is veranderd: lege string.",
     "",
     "current_phase_update — De gespreksfase op basis van wat er tot nu toe is besproken.",
-    "- Een van: intake / verdieping / analyse / advies / commitment / closing / checkout / coaching.",
-    "- coaching is alleen wanneer de klant al gevalideerd klant is (customer_status = customer).",
+    "- Een van: intake / verdieping / analyse / advies / commitment / presentatie / closing / checkout-bevestiging / checkout / coaching / na_aankoop.",
+    "- coaching of na_aankoop is alleen wanneer de klant al gevalideerd klant is (customer_status = customer).",
     "- Geef de huidige fase terug zodra die verandert ten opzichte van current_phase.",
     "- Als de fase niet duidelijk verandert: lege string.",
     "",
-    "interested_in_program_update — Welk specifiek programma (Basic, Deluxe of Exclusive) in het gesprek expliciet bij naam wordt genoemd door de klant of door Emma.",
-    "- Geldige waarden: Basic / Deluxe / Exclusive / (lege string).",
-    "- Vul ALLEEN in als de exacte programmanaam (Basic, Deluxe of Exclusive) letterlijk in het gesprek voorkomt.",
+    "interested_in_program_update — Welk specifiek programma (Basic, Beauty, Deluxe of Exclusive) in het gesprek expliciet bij naam wordt genoemd door de klant of door Emma.",
+    "- Geldige waarden: Basic / Beauty / Deluxe / Exclusive / (lege string).",
+    "- Vul ALLEEN in als de exacte programmanaam (Basic, Beauty, Deluxe of Exclusive) letterlijk in het gesprek voorkomt.",
     "- Algemene koopintentie, het bestellen van Control, of interesse in afvallen tellen NIET als programma-interesse.",
     "- Kies nooit een default programma. Als geen programmanaam letterlijk is genoemd: lege string. Verzin nooit een programma.",
     "",
@@ -859,8 +843,8 @@ async function getStructuredUpdates({
     "- Vul \"nee\" alleen als de klant Control expliciet heeft afgewezen.",
     "- Bij geen letterlijke vermelding van Control in het gesprek: lege string.",
     "",
-    "purchased_program_update — Welk specifiek programma (Basic, Deluxe of Exclusive) de klant heeft besteld.",
-    "- Geldige waarden: Basic / Deluxe / Exclusive / (lege string).",
+    "purchased_program_update — Welk specifiek programma (Basic, Beauty, Deluxe of Exclusive) de klant heeft besteld.",
+    "- Geldige waarden: Basic / Beauty / Deluxe / Exclusive / (lege string).",
     "- Vul ALLEEN in als de klant in haar bericht expliciet de naam van het bestelde programma noemt.",
     "- Algemene koopintentie of het bestellen van Control telt NIET als programma-aankoop.",
     "- Bij geen expliciete vermelding van een programmanaam in de aankoop: lege string. Verzin nooit een aankoop.",
@@ -1313,13 +1297,6 @@ app.post("/chat", async (req, res) => {
       2
     )
   );
- 
-  const coachSourceResponse = handleCoachSourceCodeIfNeeded(normalizedMessage);
- 
-  if (coachSourceResponse) {
-    console.log("COACH SOURCE CODE HANDLED SERVER-SIDE");
-    return sendDiagResponse("coach_welcome", coachSourceResponse);
-  }
  
   if (!agentId) {
     console.error("CONFIG ERROR: ELEVENLABS_AGENT_ID ontbreekt");
