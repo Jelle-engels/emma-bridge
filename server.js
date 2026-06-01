@@ -583,21 +583,27 @@ function detectState({
  
 /* --------------------------- NEW USER DETECTION --------------------------- */
  
-// A "new user" is detected when the request arrives with completely empty CRM
-// context — no customer_status, no recent_messages, no last_summary. Make
-// already branches its scenario via Airtable's user_exists check, but we also
-// defensively check here so we can return the welcome reply directly and skip
-// the Emma/ElevenLabs call entirely. This prevents Emma from misinterpreting
-// opt-in triggers like "coach-Jelle" as a customer telling her about a
-// previous coach. Source attribution (Airtable Bron field) is handled by
-// Make/Airtable downstream — not by this server.
-function isNewUser({ customerStatus, recentMessages, lastSummary }) {
-  const hasCustomerStatus = Boolean(cleanText(customerStatus));
+// A "new user" is detected when the request arrives with no prior conversation
+// — no recent_messages and no last_summary. We deliberately do NOT check
+// customer_status, because Make pre-sets it to "lead" for users routed through
+// the user_new track even before this server is called, so it is not a
+// reliable signal of "is this a returning user".
+//
+// recent_messages and last_summary are the true indicators: if both are empty,
+// there has been no prior exchange between Emma and this user, regardless of
+// whatever customer_status Make defaulted to.
+//
+// Returning user with both fields populated → false (Emma takes over).
+// Truly new user → true (we send the hardcoded welcome reply and skip Emma).
+//
+// Source attribution (Airtable Bron field) is handled by Make/Airtable
+// downstream from the original message body — not by this server.
+function isNewUser({ recentMessages, lastSummary }) {
   const hasRecentMessages =
     Array.isArray(recentMessages) && recentMessages.length > 0;
   const hasLastSummary = Boolean(cleanText(lastSummary));
  
-  return !hasCustomerStatus && !hasRecentMessages && !hasLastSummary;
+  return !hasRecentMessages && !hasLastSummary;
 }
  
 /* ------------------------------ CONTEXT BLOCK ----------------------------- */
@@ -1338,13 +1344,13 @@ app.post("/chat", async (req, res) => {
   // entirely by Make/Airtable downstream from the original message body.
   if (
     isNewUser({
-      customerStatus: normalizedCustomerStatus,
       recentMessages: normalizedRecentMessages,
       lastSummary: normalizedLastSummary,
     })
   ) {
     diag("NEW_USER_WELCOME", {
       first_message_preview: clamp(normalizedMessage, 120),
+      customer_status_received: normalizedCustomerStatus,
     });
     return sendDiagResponse(
       "new_user_welcome",
