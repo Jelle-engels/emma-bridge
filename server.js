@@ -357,6 +357,35 @@ function hasAskedOrderNumber(messages) {
   );
 }
  
+function hasAskedTaste(messages) {
+  return messages.some(
+    (msg) =>
+      msg.role === "emma" &&
+      /welke smaak|chocolade.*vanille|vanille.*chocolade|half-half|smaak complete/i.test(
+        msg.message_text
+      )
+  );
+}
+ 
+function hasReceivedCountryAnswer(messages) {
+  return messages.some(
+    (msg) =>
+      msg.role === "user" &&
+      (/\b(nederland|belgi[eë])(?![a-z])/i.test(msg.message_text) ||
+        /(?:^|\s)(nl|be)(?:$|\s|[\.!,?])/i.test(msg.message_text))
+  );
+}
+ 
+function hasReceivedTasteAnswer(messages) {
+  return messages.some(
+    (msg) =>
+      msg.role === "user" &&
+      /\b(chocola(?:de|t)?|vanille|half[-\s]?half|half|mix|gemengd)\b/i.test(
+        msg.message_text
+      )
+  );
+}
+ 
 function isCustomerStatusValidated(customerStatus, recentMessages) {
   return (
     cleanText(customerStatus).toLowerCase() === "customer" ||
@@ -641,6 +670,9 @@ function buildContextBlock({
   const checkoutLinkAlreadySent = hasCheckoutLinkBeenSent(recent_messages);
   const whatsappGroupLinkAlreadySent = hasWhatsappGroupLinkBeenSent(recent_messages);
   const countryAlreadyAsked = hasAskedCountry(recent_messages);
+  const tasteAlreadyAsked = hasAskedTaste(recent_messages);
+  const countryAnswerReceived = hasReceivedCountryAnswer(recent_messages);
+  const tasteAnswerReceived = hasReceivedTasteAnswer(recent_messages);
   const orderNumberAlreadyAsked = hasAskedOrderNumber(recent_messages);
  
   const validatedCustomer = isCustomerStatusValidated(
@@ -657,6 +689,9 @@ function buildContextBlock({
       checkout_link_already_sent: checkoutLinkAlreadySent,
       whatsapp_group_link_already_sent: whatsappGroupLinkAlreadySent,
       country_already_asked: countryAlreadyAsked,
+      taste_already_asked: tasteAlreadyAsked,
+      country_answer_received: countryAnswerReceived,
+      taste_answer_received: tasteAnswerReceived,
       order_number_already_asked: orderNumberAlreadyAsked,
       order_validation_server_side: true,
     },
