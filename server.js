@@ -7,7 +7,14 @@ import { randomUUID } from "crypto";
 dotenv.config();
  
 const app = express();
+// Accept JSON bodies (Make scenarios that already work).
 app.use(express.json({ limit: "1mb" }));
+// Also accept application/x-www-form-urlencoded bodies. ManyChat (via Make)
+// can send messages in this format to avoid JSON escaping issues with
+// special characters in the user's input (quotes, newlines, emojis, etc.).
+// Express automatically decodes URL-encoded values, so by the time the
+// /chat handler reads req.body the message field is clean plain text again.
+app.use(express.urlencoded({ extended: true, limit: "1mb" }));
  
 const PORT = process.env.PORT || 3000;
  
