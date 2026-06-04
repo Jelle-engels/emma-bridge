@@ -393,6 +393,89 @@ function hasReceivedTasteAnswer(messages) {
   );
 }
  
+// Detects whether the user has explicitly answered Emma's "wil je Control
+// erbij?" upsell question in the checkout flow. Looks for affirmative or
+// negative responses around Control, plus standalone yes/no answers that
+// immediately follow Emma's combo question containing "Control".
+function hasReceivedControlAnswer(messages) {
+  // Find the most recent Emma message that asks about Control.
+  // Matches several common phrasings of the upsell question:
+  //   - "Control er gelijk bij doen"
+  //   - "Control erbij doen"
+  //   - "Control er bij"
+  //   - "Control toevoegen"
+  //   - "ook Control"
+  const emmaControlQuestionPattern =
+    /control\s+(?:er\s*(?:gelijk\s+)?bij|toevoegen)|\book\s+control\b/i;
+ 
+  let lastEmmaIndexWithControlAsk = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (
+      msg.role === "emma" &&
+      emmaControlQuestionPattern.test(msg.message_text || "")
+    ) {
+      lastEmmaIndexWithControlAsk = i;
+      break;
+    }
+  }
+ 
+  // Check user messages AFTER Emma's Control question for an answer
+  const userMessagesAfterAsk =
+    lastEmmaIndexWithControlAsk >= 0
+      ? messages.slice(lastEmmaIndexWithControlAsk + 1)
+      : messages;
+ 
+  return userMessagesAfterAsk.some((msg) => {
+    if (msg.role !== "user") return false;
+    const text = (msg.message_text || "").toLowerCase();
+ 
+    // Explicit Control yes/no
+    if (
+      /\b(ja|jazeker|graag|prima|zeker|doe maar|inderdaad|natuurlijk).{0,30}control\b/i.test(
+        text
+      )
+    )
+      return true;
+    if (
+      /\bcontrol.{0,30}(ja|jazeker|graag|prima|zeker|doe maar|inderdaad|natuurlijk)\b/i.test(
+        text
+      )
+    )
+      return true;
+    if (
+      /\b(nee|geen|zonder|liever niet|laat maar).{0,30}control\b/i.test(text)
+    )
+      return true;
+    if (
+      /\bcontrol.{0,30}(nee|geen|zonder|liever niet|laat maar|niet)\b/i.test(
+        text
+      )
+    )
+      return true;
+ 
+    // Standalone yes/no when Emma's last question contained Control
+    if (lastEmmaIndexWithControlAsk >= 0) {
+      // Standalone affirmative answers (single or short combinations)
+      if (
+        /^\s*(?:ja|jazeker|graag|prima|doe\s+maar|inderdaad|natuurlijk|zeker|oke|ok)(?:\s+(?:graag|zeker|prima|doe\s+maar|natuurlijk))?\s*[\.!]?\s*$/i.test(
+          text
+        )
+      )
+        return true;
+      // Standalone negative answers (single or short combinations)
+      if (
+        /^\s*(?:nee|nope|geen|niks)(?:\s+(?:dank\s+je|bedankt|laat\s+maar|hoor|joh))?\s*[\.!]?\s*$/i.test(
+          text
+        )
+      )
+        return true;
+    }
+ 
+    return false;
+  });
+}
+ 
 function isCustomerStatusValidated(customerStatus, recentMessages) {
   return (
     cleanText(customerStatus).toLowerCase() === "customer" ||
@@ -413,6 +496,52 @@ const PROGRAM_PATTERN_GLOBAL = /\b(basic|beauty|deluxe|exclusive)\b/gi;
 const CONTROL_MENTION_PATTERN = /\bcontrol\b/i;
 const CONTROL_COMBO_PATTERN =
   /(?:\bmet[\s-]*(?:de[\s-]*)?control|\ben[\s-]*(?:de[\s-]*)?control|\binclusief[\s-]*control|\bcontrol[\s-]*erbij|(?:^|\s|\W)\+[\s-]*control)/i;
+ 
+// Parses a tr.ee checkout URL and extracts the SKU components:
+// program (Basic/Beauty/Deluxe/Exclusive or empty for Control-only) and
+// whether Control is included. The URL contains the canonical truth about
+// what the customer was actually directed to buy, which is more reliable
+// than parsing Emma's natural-language confirmation text.
+function parseCheckoutLinkSKU(url) {
+  if (!url) return null;
+ 
+  const programMatch = url.match(
+    /tr\.ee\/bestellen-(?:nl|be)-(basic|beauty|deluxe|exclusive)(?:-(?:choc|van|mix))?(-control)?/i
+  );
+  if (programMatch) {
+    const lower = programMatch[1].toLowerCase();
+    const program = lower.charAt(0).toUpperCase() + lower.slice(1);
+    const hasControl = Boolean(programMatch[2]);
+    return { program, hasControl };
+  }
+ 
+  if (/tr\.ee\/bestellen-(?:nl|be)-control(?:\b|\/|\?|$)/i.test(url)) {
+    return { program: "", hasControl: true };
+  }
+ 
+  return null;
+}
+ 
+// Walks backward through Emma's messages to find the most recent tr.ee
+// checkout URL she sent. Prefers the current reply if it contains a link.
+function findLastEmmaCheckoutLink(messages, currentReply) {
+  const urlRegex = /(https?:\/\/tr\.ee\/bestellen-[a-z0-9-]+)/i;
+ 
+  if (currentReply) {
+    const match = cleanText(currentReply).match(urlRegex);
+    if (match) return match[1];
+  }
+ 
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg.role === "emma" && msg.message_text) {
+      const match = cleanText(msg.message_text).match(urlRegex);
+      if (match) return match[1];
+    }
+  }
+ 
+  return "";
+}
  
 function userMessagesContainOrderNumber(messages, currentUserMessage) {
   if (currentUserMessage && ORDER_NUMBER_PATTERN.test(cleanText(currentUserMessage))) {
@@ -456,9 +585,19 @@ function findEmmaConfirmationMessage(messages, currentReply) {
 }
  
 function extractPurchasedProgram(messages, currentReply) {
-  // Only look inside Emma's CONFIRMATION message (the one with the WhatsApp
-  // link). If she names a program there, that's what was purchased.
-  // If she names no program, the customer bought Control standalone.
+  // Primary source: the last checkout URL Emma sent. The URL is the canonical
+  // truth about what the customer was directed to purchase, and is reliable
+  // regardless of what Emma writes in her post-order confirmation message.
+  const lastUrl = findLastEmmaCheckoutLink(messages, currentReply);
+  const fromUrl = parseCheckoutLinkSKU(lastUrl);
+  if (fromUrl) {
+    return fromUrl.program;
+  }
+ 
+  // Fallback: parse Emma's post-order confirmation message (the one with the
+  // WhatsApp group link). Used when no checkout URL was sent earlier in the
+  // conversation, e.g. the customer arrived with an order number they got
+  // through a different channel.
   const confirmationText = findEmmaConfirmationMessage(messages, currentReply);
   return findProgramInText(confirmationText);
 }
@@ -481,11 +620,18 @@ function extractInterestedInProgram(messages, currentUserMessage, currentReply) 
 }
  
 function deriveHasControl(messages, currentReply, programName) {
-  // Default rule:
-  // - If no program was bought (pure Control purchase) -> true
-  // - If a program was bought -> only true when Emma's CONFIRMATION message
-  //   contains an explicit combo phrase ("met control", "+ control",
-  //   "en control", "inclusief control", ...). Otherwise -> false.
+  // Primary source: the last checkout URL Emma sent. If the URL ends with
+  // "-control" the customer was directed to a combo SKU; if it's a plain
+  // control URL (tr.ee/bestellen-{land}-control) the customer bought
+  // standalone Control. The URL is the canonical truth.
+  const lastUrl = findLastEmmaCheckoutLink(messages, currentReply);
+  const fromUrl = parseCheckoutLinkSKU(lastUrl);
+  if (fromUrl) {
+    return fromUrl.hasControl ? "true" : "false";
+  }
+ 
+  // Fallback (no checkout URL was sent): use the legacy text-based detection
+  // on Emma's confirmation message.
   if (!programName) return "true";
  
   const confirmationText = findEmmaConfirmationMessage(messages, currentReply);
@@ -680,6 +826,7 @@ function buildContextBlock({
   const tasteAlreadyAsked = hasAskedTaste(recent_messages);
   const countryAnswerReceived = hasReceivedCountryAnswer(recent_messages);
   const tasteAnswerReceived = hasReceivedTasteAnswer(recent_messages);
+  const controlAnswerReceived = hasReceivedControlAnswer(recent_messages);
   const orderNumberAlreadyAsked = hasAskedOrderNumber(recent_messages);
  
   const validatedCustomer = isCustomerStatusValidated(
@@ -699,6 +846,7 @@ function buildContextBlock({
       taste_already_asked: tasteAlreadyAsked,
       country_answer_received: countryAnswerReceived,
       taste_answer_received: tasteAnswerReceived,
+      control_answer_received: controlAnswerReceived,
       order_number_already_asked: orderNumberAlreadyAsked,
       order_validation_server_side: true,
     },
