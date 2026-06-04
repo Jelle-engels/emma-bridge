@@ -456,9 +456,11 @@ function hasReceivedControlAnswer(messages) {
  
     // Standalone yes/no when Emma's last question contained Control
     if (lastEmmaIndexWithControlAsk >= 0) {
-      // Standalone affirmative answers (single or short combinations)
+      // Standalone affirmative answers (single or short combinations).
+      // The "doe\s*maa?r[ts]?" pattern matches "doe maar", "doemaar",
+      // "doe maart" (common typo with extra t), "doe mar", etc.
       if (
-        /^\s*(?:ja|jazeker|graag|prima|doe\s+maar|inderdaad|natuurlijk|zeker|oke|ok)(?:\s+(?:graag|zeker|prima|doe\s+maar|natuurlijk))?\s*[\.!]?\s*$/i.test(
+        /^\s*(?:ja|jazeker|graag|prima|doe\s*maa?r[ts]?|inderdaad|natuurlijk|zeker|oke|ok|jep|yes|sure)(?:\s+(?:graag|zeker|prima|doe\s*maa?r[ts]?|natuurlijk))?\s*[\.!]?\s*$/i.test(
           text
         )
       )
