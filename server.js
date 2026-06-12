@@ -1726,8 +1726,20 @@ app.post("/chat", async (req, res) => {
       whatsappLinkInCurrentReply ||
       hasWhatsappGroupLinkBeenSent(normalizedRecentMessages);
  
+    // A user is considered a validated customer as soon as they have shared
+    // a valid order number, regardless of whether Emma has sent the WhatsApp
+    // group link yet. This is more robust than tying customer_status to
+    // Emma's reply behavior, because Emma might forget to send the link or
+    // phrase her confirmation differently in upsell scenarios. The presence
+    // of a valid JP-pattern order number in the user's messages is the
+    // single source of truth: order number = customer = coaching mode.
+    const userHasOrderNumber = userMessagesContainOrderNumber(
+      normalizedRecentMessages,
+      normalizedMessage
+    );
+ 
     const validatedNow =
-      alreadyValidated || whatsappLinkInCurrentReply;
+      alreadyValidated || whatsappLinkInCurrentReply || userHasOrderNumber;
  
     const selfHealCustomerStatus =
       validatedNow &&
