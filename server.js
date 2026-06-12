@@ -3,9 +3,9 @@ import WebSocket from "ws";
 import OpenAI from "openai";
 import dotenv from "dotenv";
 import { randomUUID } from "crypto";
- 
+
 dotenv.config();
- 
+
 const app = express();
 // Accept JSON bodies (Make scenarios that already work).
 app.use(express.json({ limit: "1mb" }));
@@ -15,24 +15,24 @@ app.use(express.json({ limit: "1mb" }));
 // Express automatically decodes URL-encoded values, so by the time the
 // /chat handler reads req.body the message field is clean plain text again.
 app.use(express.urlencoded({ extended: true, limit: "1mb" }));
- 
+
 const PORT = process.env.PORT || 3000;
- 
+
 const ELEVEN_TIMEOUT_MS = Number(process.env.ELEVEN_TIMEOUT_MS || 20000);
 const OPENAI_TIMEOUT_MS = Number(process.env.OPENAI_TIMEOUT_MS || 12000);
- 
+
 const MAX_CONTEXT_MESSAGES = Number(process.env.MAX_CONTEXT_MESSAGES || 12);
 const MAX_MESSAGE_CHARS = Number(process.env.MAX_MESSAGE_CHARS || 500);
 const MAX_SUMMARY_CHARS = Number(process.env.MAX_SUMMARY_CHARS || 900);
 const MAX_GOAL_CHARS = Number(process.env.MAX_GOAL_CHARS || 300);
 const MAX_OBJECTIONS_CHARS = Number(process.env.MAX_OBJECTIONS_CHARS || 400);
 const MAX_SHORT_FIELD_CHARS = Number(process.env.MAX_SHORT_FIELD_CHARS || 30);
- 
+
 const NO_REPLY = "__NO_REPLY__";
- 
+
 const FALLBACK_REPLY =
   "Er ging iets mis met mijn antwoord, kun je je bericht nog een keer sturen";
- 
+
 const WELCOME_MESSAGE =
   "Hallo, ik ben Emma 😊\n\n" +
   "Ik ben de AI-assistent van Nutrition Works en ik help dagelijks mensen om hun doelen te bereiken 🤗✨\n\n" +
@@ -45,21 +45,21 @@ const WELCOME_MESSAGE =
   "• wat je al geprobeerd hebt\n" +
   "• waar je nu tegenaan loopt\n\n" +
   "Hoe meer je deelt, hoe beter ik je kan helpen 🤗";
- 
+
 const openai = process.env.OPENAI_API_KEY
   ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
   : null;
- 
+
 /* ----------------------------- BASIC HELPERS ----------------------------- */
- 
+
 function cleanText(value) {
   if (value === null || value === undefined) return "";
   return String(value).replace(/\s+/g, " ").trim();
 }
- 
+
 function removePromptLeakTerms(value) {
   if (value === null || value === undefined) return "";
- 
+
   return String(value)
     .replace(/\bneutrale afsluiting\b/gi, "")
     .replace(/\bkorte erkenning\b/gi, "")
@@ -80,10 +80,10 @@ function removePromptLeakTerms(value) {
     .replace(/\blatest_user_message\b/gi, "")
     .replace(/\brecent_conversation_history\b/gi, "");
 }
- 
+
 function cleanReplyText(value) {
   if (value === null || value === undefined) return "";
- 
+
   return removePromptLeakTerms(value)
     .replace(/\r\n/g, "\n")
     .replace(/\r/g, "\n")
@@ -93,13 +93,13 @@ function cleanReplyText(value) {
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
- 
+
 function clamp(value, max = 500) {
   const text = cleanText(value);
   if (text.length <= max) return text;
   return `${text.slice(0, max).trim()}...`;
 }
- 
+
 function normalizeComparableText(value) {
   return cleanText(value)
     .toLowerCase()
@@ -107,14 +107,14 @@ function normalizeComparableText(value) {
     .replace(/\s+/g, " ")
     .trim();
 }
- 
+
 function normalizeBinaryFlag(value) {
   const v = cleanText(value).toLowerCase();
   if (v === "ja" || v === "yes" || v === "wel" || v === "true") return "ja";
   if (v === "nee" || v === "no" || v === "niet" || v === "false") return "nee";
   return "";
 }
- 
+
 function normalizeProgramName(value) {
   const v = cleanText(value).toLowerCase();
   if (v === "basic") return "Basic";
@@ -123,7 +123,7 @@ function normalizeProgramName(value) {
   if (v === "exclusive") return "Exclusive";
   return "";
 }
- 
+
 function normalizePhaseName(value) {
   const v = cleanText(value).toLowerCase();
   const allowed = [
@@ -141,21 +141,21 @@ function normalizePhaseName(value) {
   ];
   return allowed.includes(v) ? v : "";
 }
- 
+
 function uniqueBy(items, keyFn) {
   const seen = new Set();
   const out = [];
- 
+
   for (const item of items) {
     const key = keyFn(item);
     if (!key || seen.has(key)) continue;
     seen.add(key);
     out.push(item);
   }
- 
+
   return out;
 }
- 
+
 function buildResponse({
   reply,
   goal_update = "",
@@ -170,7 +170,7 @@ function buildResponse({
   send_reply,
 }) {
   const rawReply = reply === NO_REPLY ? NO_REPLY : cleanReplyText(reply);
- 
+
   return {
     send_reply:
       typeof send_reply === "boolean" ? send_reply : rawReply !== "" && rawReply !== NO_REPLY,
@@ -186,32 +186,32 @@ function buildResponse({
     has_control_update: cleanText(has_control_update),
   };
 }
- 
+
 /* -------------------------- MESSAGE NORMALIZATION ------------------------- */
- 
+
 function normalizeRole(role) {
   const r = cleanText(role).toLowerCase();
- 
+
   if (["emma", "assistant", "ai", "agent", "bot"].includes(r)) return "emma";
- 
+
   if (["user", "customer", "klant", "client", "lead", "persoon"].includes(r)) {
     return "user";
   }
- 
+
   return r || "unknown";
 }
- 
+
 function parseTimestamp(value) {
   const raw = cleanText(value);
   if (!raw) return null;
- 
+
   const t = Date.parse(raw);
   return Number.isFinite(t) ? t : null;
 }
- 
+
 function normalizeRecentMessages(value) {
   if (!Array.isArray(value)) return [];
- 
+
   return value
     .map((item, index) => {
       const role = normalizeRole(item?.role || item?.sender || item?.from);
@@ -221,7 +221,7 @@ function normalizeRecentMessages(value) {
       const timestamp = cleanText(
         item?.timestamp || item?.created_at || item?.date || item?.time
       );
- 
+
       return {
         role,
         message_text,
@@ -232,7 +232,7 @@ function normalizeRecentMessages(value) {
     })
     .filter((item) => item.role || item.message_text || item.timestamp);
 }
- 
+
 function sortMessagesChronologically(messages) {
   return [...messages].sort((a, b) => {
     if (a._time !== null && b._time !== null) return a._time - b._time;
@@ -241,47 +241,47 @@ function sortMessagesChronologically(messages) {
     return a._index - b._index;
   });
 }
- 
+
 function removeCurrentUserMessageFromHistory(messages, currentMessage) {
   const current = normalizeComparableText(currentMessage);
   if (!current) return messages;
- 
+
   let removed = false;
- 
+
   return [...messages]
     .reverse()
     .filter((msg) => {
       if (removed) return true;
- 
+
       const sameRole = msg.role === "user";
       const sameText = normalizeComparableText(msg.message_text) === current;
- 
+
       if (sameRole && sameText) {
         removed = true;
         return false;
       }
- 
+
       return true;
     })
     .reverse();
 }
- 
+
 function sanitizeAndPrepareRecentMessages(recentMessages, currentMessage) {
   const normalized = normalizeRecentMessages(recentMessages);
   const sorted = sortMessagesChronologically(normalized);
- 
+
   const deduped = uniqueBy(sorted, (msg) => {
     const role = msg.role || "unknown";
     const text = normalizeComparableText(msg.message_text);
     const time = msg.timestamp || "";
     return `${role}|${text}|${time}`;
   });
- 
+
   const withoutCurrentMessage = removeCurrentUserMessageFromHistory(
     deduped,
     currentMessage
   );
- 
+
   return withoutCurrentMessage
     .filter((msg) => msg.message_text)
     .slice(-MAX_CONTEXT_MESSAGES)
@@ -291,44 +291,44 @@ function sanitizeAndPrepareRecentMessages(recentMessages, currentMessage) {
       timestamp: msg.timestamp || "",
     }));
 }
- 
+
 function getLastEmmaMessages(messages, limit = 3) {
   return messages
     .filter((msg) => msg.role === "emma" && msg.message_text)
     .slice(-limit)
     .map((msg) => msg.message_text);
 }
- 
+
 function getLastUserMessages(messages, limit = 3) {
   return messages
     .filter((msg) => msg.role === "user" && msg.message_text)
     .slice(-limit)
     .map((msg) => msg.message_text);
 }
- 
+
 function hasLinkBeenSent(messages, linkPart) {
   const needle = cleanText(linkPart).toLowerCase();
   if (!needle) return false;
- 
+
   return messages.some(
     (msg) =>
       msg.role === "emma" &&
       cleanText(msg.message_text).toLowerCase().includes(needle)
   );
 }
- 
+
 function hasPriceBeenMentioned(messages) {
   // Matches any of the known SKU prices (Control, Basic, Beauty, Deluxe,
   // Exclusive, combos, plus loose upgrade products), in either € notation
   // or "euro" form, plus generic price phrasings.
   const priceRegex =
     /€\s*(?:54|99|108|123|135|194|199|204|223|254|346|358|379|417|477|481|600|602|725)\b|(?:54|99|108|123|135|194|199|204|223|254|346|358|379|417|477|481|600|602|725)\s*euro\b|programma kost|kost in totaal|totaalprijs/i;
- 
+
   return messages.some(
     (msg) => msg.role === "emma" && priceRegex.test(msg.message_text)
   );
 }
- 
+
 function hasCheckoutLinkBeenSent(messages) {
   // Matches any of the real tr.ee checkout URLs. Covers Control, all 4 program
   // SKUs, all program+Control combos, loose upgrade products (Berry caps,
@@ -341,7 +341,7 @@ function hasCheckoutLinkBeenSent(messages) {
       /tr\.ee\/bestellen-(?:nl|be)-/i.test(msg.message_text)
   );
 }
- 
+
 function hasWhatsappGroupLinkBeenSent(messages) {
   return messages.some(
     (msg) =>
@@ -349,7 +349,7 @@ function hasWhatsappGroupLinkBeenSent(messages) {
       /chat\.whatsapp\.com/i.test(msg.message_text)
   );
 }
- 
+
 function hasAskedCountry(messages) {
   return messages.some(
     (msg) =>
@@ -357,13 +357,13 @@ function hasAskedCountry(messages) {
       /nederland of belgi[eë]|welk land|in welk land/i.test(msg.message_text)
   );
 }
- 
+
 function hasAskedOrderNumber(messages) {
   return messages.some(
     (msg) => msg.role === "emma" && /ordernummer/i.test(msg.message_text)
   );
 }
- 
+
 function hasAskedTaste(messages) {
   return messages.some(
     (msg) =>
@@ -373,7 +373,7 @@ function hasAskedTaste(messages) {
       )
   );
 }
- 
+
 function hasReceivedCountryAnswer(messages) {
   return messages.some(
     (msg) =>
@@ -382,7 +382,7 @@ function hasReceivedCountryAnswer(messages) {
         /(?:^|\s)(nl|be)(?:$|\s|[\.!,?])/i.test(msg.message_text))
   );
 }
- 
+
 function hasReceivedTasteAnswer(messages) {
   return messages.some(
     (msg) =>
@@ -392,7 +392,7 @@ function hasReceivedTasteAnswer(messages) {
       )
   );
 }
- 
+
 // Detects whether the user has explicitly answered Emma's "wil je Control
 // erbij?" upsell question in the checkout flow. Looks for affirmative or
 // negative responses around Control, plus standalone yes/no answers that
@@ -407,7 +407,7 @@ function hasReceivedControlAnswer(messages) {
   //   - "ook Control"
   const emmaControlQuestionPattern =
     /control\s+(?:er\s*(?:gelijk\s+)?bij|toevoegen)|\book\s+control\b/i;
- 
+
   let lastEmmaIndexWithControlAsk = -1;
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
@@ -419,17 +419,17 @@ function hasReceivedControlAnswer(messages) {
       break;
     }
   }
- 
+
   // Check user messages AFTER Emma's Control question for an answer
   const userMessagesAfterAsk =
     lastEmmaIndexWithControlAsk >= 0
       ? messages.slice(lastEmmaIndexWithControlAsk + 1)
       : messages;
- 
+
   return userMessagesAfterAsk.some((msg) => {
     if (msg.role !== "user") return false;
     const text = (msg.message_text || "").toLowerCase();
- 
+
     // Explicit Control yes/no
     if (
       /\b(ja|jazeker|graag|prima|zeker|doe maar|inderdaad|natuurlijk).{0,30}control\b/i.test(
@@ -453,7 +453,7 @@ function hasReceivedControlAnswer(messages) {
       )
     )
       return true;
- 
+
     // Standalone yes/no when Emma's last question contained Control
     if (lastEmmaIndexWithControlAsk >= 0) {
       // Standalone affirmative answers (single or short combinations).
@@ -473,32 +473,32 @@ function hasReceivedControlAnswer(messages) {
       )
         return true;
     }
- 
+
     return false;
   });
 }
- 
+
 function isCustomerStatusValidated(customerStatus, recentMessages) {
   return (
     cleanText(customerStatus).toLowerCase() === "customer" ||
     hasWhatsappGroupLinkBeenSent(recentMessages)
   );
 }
- 
+
 /* ---------------------- PRODUCT FIELD DERIVATION ------------------------- */
 // Internal product detection (deterministic, code-side).
 // Triggers when a valid order number has been shared AND a WhatsApp group
 // link has been sent — same gate as customer_status validation.
 // Once triggered, derives purchased_program, has_control, interested_in_program
 // and interested_in_control from the conversation content.
- 
+
 const ORDER_NUMBER_PATTERN = /\bJP[-_]?[A-Z0-9]+\b/i;
 const PROGRAM_PATTERN = /\b(basic|beauty|deluxe|exclusive)\b/i;
 const PROGRAM_PATTERN_GLOBAL = /\b(basic|beauty|deluxe|exclusive)\b/gi;
 const CONTROL_MENTION_PATTERN = /\bcontrol\b/i;
 const CONTROL_COMBO_PATTERN =
   /(?:\bmet[\s-]*(?:de[\s-]*)?control|\ben[\s-]*(?:de[\s-]*)?control|\binclusief[\s-]*control|\bcontrol[\s-]*erbij|(?:^|\s|\W)\+[\s-]*control)/i;
- 
+
 // Parses a tr.ee checkout URL and extracts the SKU components:
 // program (Basic/Beauty/Deluxe/Exclusive or empty for Control-only) and
 // whether Control is included. The URL contains the canonical truth about
@@ -506,7 +506,7 @@ const CONTROL_COMBO_PATTERN =
 // than parsing Emma's natural-language confirmation text.
 function parseCheckoutLinkSKU(url) {
   if (!url) return null;
- 
+
   const programMatch = url.match(
     /tr\.ee\/bestellen-(?:nl|be)-(basic|beauty|deluxe|exclusive)(?:-(?:choc|van|mix))?(-control)?/i
   );
@@ -516,24 +516,24 @@ function parseCheckoutLinkSKU(url) {
     const hasControl = Boolean(programMatch[2]);
     return { program, hasControl };
   }
- 
+
   if (/tr\.ee\/bestellen-(?:nl|be)-control(?:\b|\/|\?|$)/i.test(url)) {
     return { program: "", hasControl: true };
   }
- 
+
   return null;
 }
- 
+
 // Walks backward through Emma's messages to find the most recent tr.ee
 // checkout URL she sent. Prefers the current reply if it contains a link.
 function findLastEmmaCheckoutLink(messages, currentReply) {
   const urlRegex = /(https?:\/\/tr\.ee\/bestellen-[a-z0-9-]+)/i;
- 
+
   if (currentReply) {
     const match = cleanText(currentReply).match(urlRegex);
     if (match) return match[1];
   }
- 
+
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
     if (msg.role === "emma" && msg.message_text) {
@@ -541,22 +541,22 @@ function findLastEmmaCheckoutLink(messages, currentReply) {
       if (match) return match[1];
     }
   }
- 
+
   return "";
 }
- 
+
 function userMessagesContainOrderNumber(messages, currentUserMessage) {
   if (currentUserMessage && ORDER_NUMBER_PATTERN.test(cleanText(currentUserMessage))) {
     return true;
   }
- 
+
   return messages.some(
     (msg) =>
       msg.role === "user" &&
       ORDER_NUMBER_PATTERN.test(cleanText(msg.message_text))
   );
 }
- 
+
 function findProgramInText(text) {
   if (!text) return "";
   const matches = text.match(PROGRAM_PATTERN_GLOBAL);
@@ -565,14 +565,14 @@ function findProgramInText(text) {
   const lower = lastMatch.toLowerCase();
   return lower.charAt(0).toUpperCase() + lower.slice(1);
 }
- 
+
 function findEmmaConfirmationMessage(messages, currentReply) {
   // The "confirmation" is the most recent Emma message that contains the
   // WhatsApp group link. Prefer the current reply if it contains the link.
   if (currentReply && /chat\.whatsapp\.com/i.test(cleanText(currentReply))) {
     return cleanText(currentReply);
   }
- 
+
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
     if (
@@ -582,10 +582,10 @@ function findEmmaConfirmationMessage(messages, currentReply) {
       return cleanText(msg.message_text);
     }
   }
- 
+
   return "";
 }
- 
+
 function extractPurchasedProgram(messages, currentReply) {
   // Primary source: the last checkout URL Emma sent. The URL is the canonical
   // truth about what the customer was directed to purchase, and is reliable
@@ -595,7 +595,7 @@ function extractPurchasedProgram(messages, currentReply) {
   if (fromUrl) {
     return fromUrl.program;
   }
- 
+
   // Fallback: parse Emma's post-order confirmation message (the one with the
   // WhatsApp group link). Used when no checkout URL was sent earlier in the
   // conversation, e.g. the customer arrived with an order number they got
@@ -603,12 +603,12 @@ function extractPurchasedProgram(messages, currentReply) {
   const confirmationText = findEmmaConfirmationMessage(messages, currentReply);
   return findProgramInText(confirmationText);
 }
- 
+
 function extractInterestedInProgram(messages, currentUserMessage, currentReply) {
   // Interest in a program can be expressed anywhere in the conversation by
   // either Emma (offer) or the user (request). Take the LAST mention.
   let lastMatch = "";
- 
+
   for (const msg of messages) {
     const found = findProgramInText(cleanText(msg.message_text));
     if (found) lastMatch = found;
@@ -617,11 +617,15 @@ function extractInterestedInProgram(messages, currentUserMessage, currentReply) 
   if (userFound) lastMatch = userFound;
   const replyFound = findProgramInText(cleanText(currentReply));
   if (replyFound) lastMatch = replyFound;
- 
+
   return lastMatch;
 }
- 
+
 function deriveHasControl(messages, currentReply, programName) {
+  // Returns "ja" / "nee" for consistency with the interested_in_control field
+  // (both fields use the same Dutch boolean style in Airtable, instead of the
+  // English "true"/"false" which created select-option mismatches).
+  //
   // Primary source: the last checkout URL Emma sent. If the URL ends with
   // "-control" the customer was directed to a combo SKU; if it's a plain
   // control URL (tr.ee/bestellen-{land}-control) the customer bought
@@ -629,19 +633,19 @@ function deriveHasControl(messages, currentReply, programName) {
   const lastUrl = findLastEmmaCheckoutLink(messages, currentReply);
   const fromUrl = parseCheckoutLinkSKU(lastUrl);
   if (fromUrl) {
-    return fromUrl.hasControl ? "true" : "false";
+    return fromUrl.hasControl ? "ja" : "nee";
   }
- 
+
   // Fallback (no checkout URL was sent): use the legacy text-based detection
   // on Emma's confirmation message.
-  if (!programName) return "true";
- 
+  if (!programName) return "ja";
+
   const confirmationText = findEmmaConfirmationMessage(messages, currentReply);
-  if (!confirmationText) return "false";
- 
-  return CONTROL_COMBO_PATTERN.test(confirmationText) ? "true" : "false";
+  if (!confirmationText) return "nee";
+
+  return CONTROL_COMBO_PATTERN.test(confirmationText) ? "ja" : "nee";
 }
- 
+
 function deriveInterestedInControl(messages, currentUserMessage, currentReply) {
   // Customers come in for Control, so "ja" is the safe default once Control
   // has been mentioned anywhere in the conversation by user or Emma.
@@ -651,11 +655,11 @@ function deriveInterestedInControl(messages, currentUserMessage, currentReply) {
   }
   if (currentUserMessage) allTexts.push(cleanText(currentUserMessage));
   if (currentReply) allTexts.push(cleanText(currentReply));
- 
+
   const joined = allTexts.join(" ");
   return CONTROL_MENTION_PATTERN.test(joined) ? "ja" : "";
 }
- 
+
 function derivePurchaseFields({
   recentMessages,
   currentUserMessage,
@@ -667,9 +671,9 @@ function derivePurchaseFields({
     recentMessages,
     currentUserMessage
   );
- 
+
   const validated = orderNumberPresent && whatsappGroupLinkSentNowOrEarlier;
- 
+
   // interested_in_program / interested_in_control can be derived independently
   // of the purchase trigger (a customer can be "interested" before buying).
   const interestedInProgram = extractInterestedInProgram(
@@ -682,7 +686,7 @@ function derivePurchaseFields({
     currentUserMessage,
     currentReply
   );
- 
+
   if (!validated) {
     return {
       validated: false,
@@ -692,7 +696,7 @@ function derivePurchaseFields({
       interested_in_control: interestedInControlSignal,
     };
   }
- 
+
   // Validated purchase -> derive purchased_program from Emma's confirmation
   // message only (the message that contains the WhatsApp group link).
   const purchasedProgram = extractPurchasedProgram(recentMessages, currentReply);
@@ -701,7 +705,7 @@ function derivePurchaseFields({
     currentReply,
     purchasedProgram
   );
- 
+
   return {
     validated: true,
     purchased_program: purchasedProgram,
@@ -710,7 +714,7 @@ function derivePurchaseFields({
     interested_in_control: interestedInControlSignal || "ja",
   };
 }
- 
+
 function detectState({
   currentMessage,
   recentMessages,
@@ -721,37 +725,37 @@ function detectState({
   const hasPreviousEmmaMessage = recentMessages.some(
     (msg) => msg.role === "emma"
   );
- 
+
   const isExistingConversation =
     hasPreviousEmmaMessage || Boolean(cleanText(lastSummary));
- 
+
   const latest = cleanText(currentMessage).toLowerCase();
- 
+
   const hasMedicalTrigger =
     /\b(medicatie|medicijnen|zwanger|borstvoeding|diabetes|hart|lever|nieren|darmziekte|eetstoornis|arts|apotheker|veilig bij|mag dit met)\b/i.test(
       latest
     );
- 
+
   const hasPurchaseClaim =
     /\b(besteld|order|ordernummer|betaald|gekocht|whatsapp.?groep|groep|toegang)\b/i.test(
       latest
     );
- 
+
   const hasExplicitBuyingIntent =
     /\b(bestellen|starten|ik wil starten|hoe bestel|link|kopen|aanschaffen|doorgaan)\b/i.test(
       latest
     );
- 
+
   const lowIntent =
     /^(ok|oke|ja|nee|weet niet|misschien|kan|vertel maar|hoe bedoel je|prima|goed|klinkt goed)\.?$/i.test(
       latest
     );
- 
+
   const isValidatedCustomer = isCustomerStatusValidated(
     customerStatus,
     recentMessages
   );
- 
+
   return {
     is_existing_conversation: isExistingConversation,
     has_previous_emma_message: hasPreviousEmmaMessage,
@@ -764,9 +768,9 @@ function detectState({
     current_phase: isValidatedCustomer ? "coaching" : cleanText(currentPhase),
   };
 }
- 
+
 /* --------------------------- NEW USER DETECTION --------------------------- */
- 
+
 // A "new user" is detected when the request arrives with no prior conversation
 // — no recent_messages and no last_summary. We deliberately do NOT check
 // customer_status, because Make pre-sets it to "lead" for users routed through
@@ -786,12 +790,12 @@ function isNewUser({ recentMessages, lastSummary }) {
   const hasRecentMessages =
     Array.isArray(recentMessages) && recentMessages.length > 0;
   const hasLastSummary = Boolean(cleanText(lastSummary));
- 
+
   return !hasRecentMessages && !hasLastSummary;
 }
- 
+
 /* ------------------------------ CONTEXT BLOCK ----------------------------- */
- 
+
 function buildContextBlock({
   customer_status,
   current_phase,
@@ -812,15 +816,15 @@ function buildContextBlock({
     currentPhase: current_phase,
     customerStatus: customer_status,
   });
- 
+
   const lastEmmaMessages = getLastEmmaMessages(recent_messages, 3);
   const lastUserMessages = getLastUserMessages(recent_messages, 3);
- 
+
   const testimonialAlreadySent = hasLinkBeenSent(
     recent_messages,
     "youtube.com/@Nutrition-Works"
   );
- 
+
   const priceAlreadyMentioned = hasPriceBeenMentioned(recent_messages);
   const checkoutLinkAlreadySent = hasCheckoutLinkBeenSent(recent_messages);
   const whatsappGroupLinkAlreadySent = hasWhatsappGroupLinkBeenSent(recent_messages);
@@ -830,12 +834,12 @@ function buildContextBlock({
   const tasteAnswerReceived = hasReceivedTasteAnswer(recent_messages);
   const controlAnswerReceived = hasReceivedControlAnswer(recent_messages);
   const orderNumberAlreadyAsked = hasAskedOrderNumber(recent_messages);
- 
+
   const validatedCustomer = isCustomerStatusValidated(
     customer_status,
     recent_messages
   );
- 
+
   const context = {
     agent_name: "Emma",
     runtime_state: {
@@ -889,7 +893,7 @@ function buildContextBlock({
       ],
     },
   };
- 
+
   return [
     "RUNTIME CONTEXT VOOR EMMA",
     "Gebruik deze context als hoogste gespreksspecifieke input naast de system prompt.",
@@ -898,25 +902,25 @@ function buildContextBlock({
     JSON.stringify(context, null, 2),
   ].join("\n");
 }
- 
+
 /* ----------------------------- JSON UTILITIES ----------------------------- */
- 
+
 function safeJsonParse(value) {
   if (!value || typeof value !== "string") return null;
- 
+
   const trimmed = value.trim();
- 
+
   try {
     return JSON.parse(trimmed);
   } catch {}
- 
+
   const fencedMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
   if (fencedMatch?.[1]) {
     try {
       return JSON.parse(fencedMatch[1]);
     } catch {}
   }
- 
+
   const firstBrace = trimmed.indexOf("{");
   const lastBrace = trimmed.lastIndexOf("}");
   if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
@@ -924,19 +928,19 @@ function safeJsonParse(value) {
       return JSON.parse(trimmed.slice(firstBrace, lastBrace + 1));
     } catch {}
   }
- 
+
   return null;
 }
- 
+
 function extractOutputText(response) {
   if (cleanText(response?.output_text)) return cleanText(response.output_text);
- 
+
   if (Array.isArray(response?.output)) {
     const textParts = [];
- 
+
     for (const item of response.output) {
       if (!Array.isArray(item?.content)) continue;
- 
+
       for (const contentItem of item.content) {
         if (
           contentItem?.type === "output_text" &&
@@ -946,15 +950,15 @@ function extractOutputText(response) {
         }
       }
     }
- 
+
     return cleanText(textParts.join("\n"));
   }
- 
+
   return "";
 }
- 
+
 /* -------------------------- OPENAI CRM EXTRACTION ------------------------- */
- 
+
 async function getStructuredUpdates({
   message,
   customerStatus,
@@ -987,7 +991,7 @@ async function getStructuredUpdates({
       )
     );
   };
- 
+
   const emptyResult = {
     goal_update: "",
     objections_update: "",
@@ -998,12 +1002,12 @@ async function getStructuredUpdates({
     purchased_program_update: "",
     has_control_update: "",
   };
- 
+
   if (!openai) {
     console.error("OPENAI CONFIG ERROR: OPENAI_API_KEY ontbreekt");
     return emptyResult;
   }
- 
+
   const schema = {
     type: "object",
     additionalProperties: false,
@@ -1028,7 +1032,7 @@ async function getStructuredUpdates({
       "has_control_update",
     ],
   };
- 
+
   const systemPrompt = [
     "Je bent een strikte CRM-extractor voor een WhatsApp salesgesprek voor Nutrition Works.",
     "Je taak is NIET om te antwoorden op de gebruiker.",
@@ -1087,7 +1091,7 @@ async function getStructuredUpdates({
     "",
     "Belangrijk: voor elk veld geldt — als er niets is veranderd, retourneer een lege string.",
   ].join("\n");
- 
+
   const userPayload = {
     latest_user_message: clamp(message, 1000),
     current_customer_status: cleanText(customerStatus),
@@ -1105,17 +1109,17 @@ async function getStructuredUpdates({
       timestamp: msg.timestamp || "",
     })),
   };
- 
+
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), OPENAI_TIMEOUT_MS);
- 
+
   const openaiStartMs = Date.now();
   diag("OPENAI_REQUEST_START", {
     model: process.env.OPENAI_EXTRACTION_MODEL || "gpt-4o-mini",
     payload_size_bytes: JSON.stringify(userPayload).length,
     system_prompt_size_bytes: systemPrompt.length,
   });
- 
+
   try {
     const response = await openai.responses.create(
       {
@@ -1142,21 +1146,21 @@ async function getStructuredUpdates({
       },
       { signal: controller.signal }
     );
- 
+
     const rawText = extractOutputText(response);
     const parsed = safeJsonParse(rawText);
- 
+
     diag("OPENAI_REQUEST_COMPLETE", {
       duration_ms: Date.now() - openaiStartMs,
       raw_text_size_bytes: typeof rawText === "string" ? rawText.length : 0,
       parsed_ok: Boolean(parsed && typeof parsed === "object"),
     });
- 
+
     if (!parsed || typeof parsed !== "object") {
       console.error("OPENAI EXTRACTION ERROR: ongeldige JSON output", rawText);
       return emptyResult;
     }
- 
+
     return {
       goal_update: cleanText(parsed.goal_update),
       objections_update: cleanText(parsed.objections_update),
@@ -1178,9 +1182,9 @@ async function getStructuredUpdates({
     clearTimeout(timer);
   }
 }
- 
+
 /* ----------------------------- ELEVENLABS CHAT ---------------------------- */
- 
+
 async function getElevenReply({
   userId,
   message,
@@ -1215,30 +1219,30 @@ async function getElevenReply({
       )
     );
   };
- 
+
   return await new Promise((resolve) => {
     const wsUrl = `wss://api.elevenlabs.io/v1/convai/conversation?agent_id=${encodeURIComponent(
       agentId
     )}`;
- 
+
     let finalReply = "";
     let firstPartLogged = false;
     let settled = false;
     let timeout = null;
     let ws = null;
     const wsStartMs = Date.now();
- 
+
     diag("ELEVENLABS_WS_CONNECT_ATTEMPT", { ws_url: wsUrl });
- 
+
     const settle = (reply) => {
       if (settled) return;
       settled = true;
       resolve(cleanReplyText(reply) || FALLBACK_REPLY);
     };
- 
+
     try {
       ws = new WebSocket(wsUrl);
- 
+
       timeout = setTimeout(() => {
         diag("ELEVENLABS_WS_TIMEOUT", {
           ws_duration_ms: Date.now() - wsStartMs,
@@ -1250,12 +1254,12 @@ async function getElevenReply({
         } catch {}
         settle(finalReply || FALLBACK_REPLY);
       }, ELEVEN_TIMEOUT_MS);
- 
+
       ws.on("open", () => {
         diag("ELEVENLABS_WS_OPEN", {
           ws_open_after_ms: Date.now() - wsStartMs,
         });
- 
+
         const contextBlock = buildContextBlock({
           customer_status: customerStatus,
           current_phase: currentPhase,
@@ -1269,12 +1273,12 @@ async function getElevenReply({
           recent_messages: recentMessages,
           latest_user_message: message,
         });
- 
+
         diag("ELEVENLABS_WS_CONTEXT_PREPARED", {
           context_block_size_bytes: contextBlock.length,
           message_length: typeof message === "string" ? message.length : 0,
         });
- 
+
         ws.send(
           JSON.stringify({
             type: "conversation_initiation_client_data",
@@ -1284,37 +1288,37 @@ async function getElevenReply({
             user_id: userId,
           })
         );
- 
+
         ws.send(
           JSON.stringify({
             type: "contextual_update",
             text: contextBlock,
           })
         );
- 
+
         ws.send(
           JSON.stringify({
             type: "user_message",
             text: message,
           })
         );
- 
+
         diag("ELEVENLABS_WS_MESSAGES_SENT");
       });
- 
+
       ws.on("message", (raw) => {
         let data = null;
- 
+
         try {
           data = JSON.parse(raw.toString());
         } catch {
           return;
         }
- 
+
         if (data.type === "agent_chat_response_part") {
           const partType = data.text_response_part?.type;
           const partText = data.text_response_part?.text || "";
- 
+
           if (partType === "start" || partType === "delta") {
             if (!firstPartLogged) {
               firstPartLogged = true;
@@ -1326,10 +1330,10 @@ async function getElevenReply({
             finalReply += partText;
           }
         }
- 
+
         if (data.type === "agent_response") {
           clearTimeout(timeout);
- 
+
           diag("ELEVENLABS_WS_AGENT_RESPONSE", {
             ws_duration_ms: Date.now() - wsStartMs,
             reply_length: typeof data.agent_response_event?.agent_response === "string"
@@ -1337,20 +1341,20 @@ async function getElevenReply({
               : 0,
             streamed_reply_length: finalReply.length,
           });
- 
+
           try {
             ws.close();
           } catch {}
- 
+
           const reply =
             cleanReplyText(data.agent_response_event?.agent_response) ||
             cleanReplyText(finalReply) ||
             FALLBACK_REPLY;
- 
+
           settle(reply);
         }
       });
- 
+
       ws.on("error", (err) => {
         diag("ELEVENLABS_WS_ERROR", {
           ws_duration_ms: Date.now() - wsStartMs,
@@ -1360,7 +1364,7 @@ async function getElevenReply({
         clearTimeout(timeout);
         settle(finalReply || FALLBACK_REPLY);
       });
- 
+
       ws.on("close", () => {
         diag("ELEVENLABS_WS_CLOSE", {
           ws_duration_ms: Date.now() - wsStartMs,
@@ -1381,13 +1385,13 @@ async function getElevenReply({
     }
   });
 }
- 
+
 /* -------------------------------- ROUTES -------------------------------- */
- 
+
 app.get("/health", (_req, res) => {
   return res.json({ ok: true });
 });
- 
+
 app.post("/chat", async (req, res) => {
   // Diagnostic logging setup: every request gets a unique ID and a start timestamp
   // so we can reconstruct exactly what happened, in what order, and how long each
@@ -1402,7 +1406,7 @@ app.post("/chat", async (req, res) => {
       return -1;
     }
   })();
- 
+
   const diag = (event, extra = {}) => {
     const now = Date.now();
     console.log(
@@ -1420,13 +1424,13 @@ app.post("/chat", async (req, res) => {
       )
     );
   };
- 
+
   diag("REQUEST_START", {
     request_body_size_bytes: requestBodySize,
     has_body: Boolean(req.body),
     remote_addr: req.ip,
   });
- 
+
   const {
     user_id,
     message,
@@ -1441,9 +1445,9 @@ app.post("/chat", async (req, res) => {
     has_control = "",
     recent_messages = [],
   } = req.body ?? {};
- 
+
   const agentId = cleanText(process.env.ELEVENLABS_AGENT_ID);
- 
+
   const normalizedUserId = cleanText(user_id);
   const normalizedMessage = cleanText(message);
   const normalizedCustomerStatus = cleanText(customer_status);
@@ -1455,7 +1459,7 @@ app.post("/chat", async (req, res) => {
   const normalizedInterestedInControl = clamp(interested_in_control, MAX_SHORT_FIELD_CHARS);
   const normalizedPurchasedProgram = clamp(purchased_program, MAX_SHORT_FIELD_CHARS);
   const normalizedHasControl = clamp(has_control, MAX_SHORT_FIELD_CHARS);
- 
+
   diag("REQUEST_PARSED", {
     user_id: normalizedUserId,
     message_length: normalizedMessage.length,
@@ -1463,7 +1467,7 @@ app.post("/chat", async (req, res) => {
     current_phase: normalizedCurrentPhase,
     recent_messages_count: Array.isArray(recent_messages) ? recent_messages.length : 0,
   });
- 
+
   const sendDiagResponse = (label, responseObject) => {
     let responseSize = -1;
     try {
@@ -1480,7 +1484,7 @@ app.post("/chat", async (req, res) => {
     });
     return res.json(responseObject);
   };
- 
+
   console.log("CHAT HIT");
   console.log(
     JSON.stringify(
@@ -1497,22 +1501,22 @@ app.post("/chat", async (req, res) => {
       2
     )
   );
- 
+
   if (!normalizedUserId) {
     console.error("REQUEST ERROR: user_id ontbreekt");
     return sendDiagResponse("fallback_reply", buildResponse({ send_reply: true, reply: FALLBACK_REPLY }));
   }
- 
+
   if (!normalizedMessage) {
     console.error("REQUEST ERROR: message ontbreekt");
     return sendDiagResponse("fallback_reply", buildResponse({ send_reply: true, reply: FALLBACK_REPLY }));
   }
- 
+
   const normalizedRecentMessages = sanitizeAndPrepareRecentMessages(
     recent_messages,
     normalizedMessage
   );
- 
+
   console.log(
     JSON.stringify(
       {
@@ -1527,7 +1531,7 @@ app.post("/chat", async (req, res) => {
       2
     )
   );
- 
+
   // NEW USER FAST PATH: when context is fully empty (no customer_status,
   // no history, no summary) we send the hardcoded welcome reply directly.
   // Emma is intentionally NOT invoked here — that prevents her from
@@ -1552,25 +1556,25 @@ app.post("/chat", async (req, res) => {
       })
     );
   }
- 
+
   if (!agentId) {
     console.error("CONFIG ERROR: ELEVENLABS_AGENT_ID ontbreekt");
     return sendDiagResponse("fallback_reply", buildResponse({ send_reply: true, reply: FALLBACK_REPLY }));
   }
- 
+
   try {
     const alreadyValidated = isCustomerStatusValidated(
       normalizedCustomerStatus,
       normalizedRecentMessages
     );
- 
+
     diag("ELEVENLABS_DISPATCH", {
       already_validated: alreadyValidated,
       customer_status_passed: alreadyValidated ? "customer" : normalizedCustomerStatus,
       current_phase_passed: alreadyValidated ? "coaching" : normalizedCurrentPhase,
       recent_messages_count: normalizedRecentMessages.length,
     });
- 
+
     // Start both calls in parallel. We only block on ElevenLabs (the customer-facing reply);
     // OpenAI extraction runs alongside and is awaited briefly later with a grace timeout
     // so it cannot push the total response time past ManyChat's webhook timeout.
@@ -1595,7 +1599,7 @@ app.post("/chat", async (req, res) => {
       requestId,
       requestStartMs,
     });
- 
+
     const extractionPromise = getStructuredUpdates({
       message: normalizedMessage,
       customerStatus: alreadyValidated
@@ -1615,12 +1619,12 @@ app.post("/chat", async (req, res) => {
       requestId,
       requestStartMs,
     });
- 
+
     const replyResult = await replyPromise.then(
       (value) => ({ status: "fulfilled", value }),
       (reason) => ({ status: "rejected", reason })
     );
- 
+
     diag("ELEVENLABS_DONE", {
       status: replyResult.status,
       reply_length:
@@ -1632,16 +1636,16 @@ app.post("/chat", async (req, res) => {
           ? String(replyResult.reason?.message || replyResult.reason)
           : null,
     });
- 
+
     let reply =
       replyResult.status === "fulfilled"
         ? cleanReplyText(replyResult.value) || FALLBACK_REPLY
         : FALLBACK_REPLY;
- 
+
     if (replyResult.status === "rejected") {
       console.error("ELEVENLABS PROMISE ERROR:", replyResult.reason);
     }
- 
+
     console.log(
       JSON.stringify(
         {
@@ -1656,9 +1660,9 @@ app.post("/chat", async (req, res) => {
         2
       )
     );
- 
+
     reply = cleanReplyText(reply);
- 
+
     // Give OpenAI a short grace period to finish after ElevenLabs is done.
     // If it hasn't returned by then, give up and send empty updates so the
     // response goes back to Make fast. The OpenAI call keeps running in
@@ -1666,7 +1670,7 @@ app.post("/chat", async (req, res) => {
     const POST_REPLY_EXTRACTION_GRACE_MS = Number(
       process.env.POST_REPLY_EXTRACTION_GRACE_MS || 2000
     );
- 
+
     const extractionRaceStartMs = Date.now();
     const extractionResult = await Promise.race([
       extractionPromise.then(
@@ -1684,7 +1688,7 @@ app.post("/chat", async (req, res) => {
         )
       ),
     ]);
- 
+
     diag("OPENAI_DONE", {
       status: extractionResult.status,
       reason: extractionResult.status === "rejected"
@@ -1693,7 +1697,7 @@ app.post("/chat", async (req, res) => {
       grace_wait_ms: Date.now() - extractionRaceStartMs,
       grace_limit_ms: POST_REPLY_EXTRACTION_GRACE_MS,
     });
- 
+
     const extraction =
       extractionResult.status === "fulfilled"
         ? extractionResult.value
@@ -1707,14 +1711,14 @@ app.post("/chat", async (req, res) => {
             purchased_program_update: "",
             has_control_update: "",
           };
- 
+
     if (extractionResult.status === "rejected") {
       console.error(
         "OPENAI EXTRACTION SKIPPED OR FAILED:",
         extractionResult.reason
       );
     }
- 
+
     // Self-healing: if the conversation history shows this person is already a
     // validated customer (WhatsApp group link was sent earlier) but Airtable
     // still says "lead", push customer_status back to "customer" so the record
@@ -1725,7 +1729,7 @@ app.post("/chat", async (req, res) => {
     const whatsappLinkSentNowOrEarlier =
       whatsappLinkInCurrentReply ||
       hasWhatsappGroupLinkBeenSent(normalizedRecentMessages);
- 
+
     // A user is considered a validated customer as soon as they have shared
     // a valid order number, regardless of whether Emma has sent the WhatsApp
     // group link yet. This is more robust than tying customer_status to
@@ -1737,22 +1741,22 @@ app.post("/chat", async (req, res) => {
       normalizedRecentMessages,
       normalizedMessage
     );
- 
+
     const validatedNow =
       alreadyValidated || whatsappLinkInCurrentReply || userHasOrderNumber;
- 
+
     const selfHealCustomerStatus =
       validatedNow &&
       normalizedCustomerStatus.toLowerCase() !== "customer"
         ? "customer"
         : "";
- 
+
     const selfHealCurrentPhase =
       validatedNow &&
       normalizedCurrentPhase.toLowerCase() !== "coaching"
         ? "coaching"
         : "";
- 
+
     // Server-side derivation of product fields (deterministic, replaces the
     // extractor output for purchased_program, has_control, interested_in_program
     // and interested_in_control).
@@ -1762,14 +1766,14 @@ app.post("/chat", async (req, res) => {
       currentReply: reply,
       whatsappGroupLinkSentNowOrEarlier: whatsappLinkSentNowOrEarlier,
     });
- 
+
     // customer_status is purely server-side (order control + self-healing).
     // current_phase can come from the extractor, but self-healing overrides it
     // to "coaching" once the customer is validated.
     const finalCustomerStatusUpdate = selfHealCustomerStatus;
     const finalCurrentPhaseUpdate =
       selfHealCurrentPhase || extraction.current_phase_update;
- 
+
     // Product fields: code-side derivation always wins over the extractor.
     // We only write a non-empty value (so we never overwrite a previously
     // correct Airtable value with an empty string).
@@ -1777,7 +1781,7 @@ app.post("/chat", async (req, res) => {
     const finalInterestedInControlUpdate = derivedPurchase.interested_in_control;
     const finalPurchasedProgramUpdate = derivedPurchase.purchased_program;
     const finalHasControlUpdate = derivedPurchase.has_control;
- 
+
     console.log(
       JSON.stringify(
         {
@@ -1803,7 +1807,7 @@ app.post("/chat", async (req, res) => {
         2
       )
     );
- 
+
     return sendDiagResponse(
       "normal_flow",
       buildResponse({
@@ -1828,7 +1832,7 @@ app.post("/chat", async (req, res) => {
     return sendDiagResponse("server_error_fallback", buildResponse({ send_reply: true, reply: FALLBACK_REPLY }));
   }
 });
- 
+
 app.listen(PORT, () => {
   console.log(`Server draait op poort ${PORT}`);
 });
