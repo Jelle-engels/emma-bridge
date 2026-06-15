@@ -1052,12 +1052,14 @@ async function getStructuredUpdates({
     "- Max 400 tekens.",
     "- Als er werkelijk niets is veranderd ten opzichte van current_objections: lege string.",
     "",
-    "last_summary_update — Een narratieve samenvatting van het hele gesprek tot nu toe, in beknopte alinea-vorm.",
-    "- Bevat: doel, situatie, sleutelemoties, eerdere pogingen, koopintentie, gespreksfase, en (na aankoop) coaching-context.",
-    "- Geef de complete bijgewerkte samenvatting terug, herformuleer waar nodig, integreer nieuwe info.",
-    "- Bedoeld als langetermijngeheugen — moet bruikbaar zijn ook als terugkerende klant maanden later iets vraagt.",
-    "- Max 900 tekens.",
-    "- Als er werkelijk niets is veranderd: lege string.",
+    "last_summary_update — Een korte, lopende synthese van wat we tot nu toe weten over de klant.",
+    "- Dit is GEEN herhaling van latest_user_message. Het is een lopende werk-samenvatting van het hele gesprek tot dusver.",
+    "- Schrijf altijd iets zodra er één feit is om vast te leggen (naam, leeftijd, doel, situatie, twijfel, fase). Begin klein en bouw op.",
+    "- Integreer bestaande info uit current_last_summary met nieuwe info uit het laatste bericht. Herformuleer waar nodig.",
+    "- Eén tot drie zinnen vroeg in het gesprek is prima. Langer wordt het vanzelf naarmate er meer bekend wordt.",
+    "- Bedoeld om volgende turns context te geven over wie de klant is, wat ze wil, en waar we staan in het gesprek.",
+    "- Max 500 tekens.",
+    "- Alleen lege string als er werkelijk niets te onthouden valt (bijv. één enkel 'hoi' en verder niets).",
     "",
     "current_phase_update — De gespreksfase op basis van wat er tot nu toe is besproken.",
     "- Een van: intake / verdieping / analyse / advies / commitment / presentatie / closing / checkout-bevestiging / checkout / coaching / na_aankoop.",
@@ -1668,7 +1670,7 @@ app.post("/chat", async (req, res) => {
     // response goes back to Make fast. The OpenAI call keeps running in
     // the background; its result for this turn is simply discarded.
     const POST_REPLY_EXTRACTION_GRACE_MS = Number(
-      process.env.POST_REPLY_EXTRACTION_GRACE_MS || 2000
+      process.env.POST_REPLY_EXTRACTION_GRACE_MS || 3000
     );
 
     const extractionRaceStartMs = Date.now();
