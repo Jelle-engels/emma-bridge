@@ -927,7 +927,20 @@ function buildContextBlock({
     },
   };
 
+  // Validated customers get an explicit coaching banner ABOVE the JSON so
+  // Emma cannot miss it (a single field buried in the JSON blob proved too
+  // easy to overlook).
+  const bannerLines = validatedCustomer
+    ? [
+        "!!! DEZE KLANT IS GEVALIDEERD KLANT — JE BENT 100% COACH !!!",
+        "Geen verkoop, geen prijzen, geen programma's, geen upsells en geen checkout-links, tenzij de klant er expliciet zelf om vraagt (bijvoorbeeld naar een specifiek product of als reactie op een broadcast-bericht).",
+        "De website (nutritionworks.online) noem je alleen nog als recepten-tool om de klant tijdens het programma verder te helpen.",
+        "",
+      ]
+    : [];
+
   return [
+    ...bannerLines,
     "RUNTIME CONTEXT VOOR EMMA",
     "Gebruik deze context als hoogste gespreksspecifieke input naast de system prompt.",
     "De context is feitelijk; herhaal hem niet letterlijk naar de klant.",
