@@ -21,7 +21,8 @@ const PORT = process.env.PORT || 3000;
 const ELEVEN_TIMEOUT_MS = Number(process.env.ELEVEN_TIMEOUT_MS || 20000);
 const OPENAI_TIMEOUT_MS = Number(process.env.OPENAI_TIMEOUT_MS || 12000);
 
-const MAX_CONTEXT_MESSAGES = Number(process.env.MAX_CONTEXT_MESSAGES || 12);
+const MAX_CONTEXT_MESSAGES = Number(process.env.MAX_CONTEXT_MESSAGES || 30);
+const EXTRACTOR_CONTEXT_MESSAGES = Number(process.env.EXTRACTOR_CONTEXT_MESSAGES || 20);
 const MAX_MESSAGE_CHARS = Number(process.env.MAX_MESSAGE_CHARS || 500);
 const MAX_SUMMARY_CHARS = Number(process.env.MAX_SUMMARY_CHARS || 900);
 const MAX_GOAL_CHARS = Number(process.env.MAX_GOAL_CHARS || 300);
@@ -323,7 +324,6 @@ function hasPriceBeenMentioned(messages) {
   // or "euro" form, plus generic price phrasings.
   const priceRegex =
     /€\s*(?:54|99|108|123|135|194|199|204|223|254|346|358|379|417|477|481|600|602|725)\b|(?:54|99|108|123|135|194|199|204|223|254|346|358|379|417|477|481|600|602|725)\s*euro\b|programma kost|kost in totaal|totaalprijs/i;
-
   return messages.some(
     (msg) => msg.role === "emma" && priceRegex.test(msg.message_text)
   );
@@ -407,7 +407,6 @@ function hasReceivedControlAnswer(messages) {
   //   - "ook Control"
   const emmaControlQuestionPattern =
     /control\s+(?:er\s*(?:gelijk\s+)?bij|toevoegen)|\book\s+control\b/i;
-
   let lastEmmaIndexWithControlAsk = -1;
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
@@ -492,7 +491,10 @@ function isCustomerStatusValidated(customerStatus, recentMessages) {
 // Once triggered, derives purchased_program, has_control, interested_in_program
 // and interested_in_control from the conversation content.
 
-const ORDER_NUMBER_PATTERN = /\bJP[-_]?[A-Z0-9]+\b/i;
+// Juice Plus order numbers always start with "JP04", followed by a
+// customer-specific code. "JP04" alone is not enough: require at least
+// three extra characters after the prefix.
+const ORDER_NUMBER_PATTERN = /\bJP04[-_]?[A-Z0-9]{3,}\b/i;
 const PROGRAM_PATTERN = /\b(basic|beauty|deluxe|exclusive)\b/i;
 const PROGRAM_PATTERN_GLOBAL = /\b(basic|beauty|deluxe|exclusive)\b/gi;
 const CONTROL_MENTION_PATTERN = /\bcontrol\b/i;
@@ -572,7 +574,6 @@ function findEmmaConfirmationMessage(messages, currentReply) {
   if (currentReply && /chat\.whatsapp\.com/i.test(cleanText(currentReply))) {
     return cleanText(currentReply);
   }
-
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
     if (
@@ -740,7 +741,6 @@ function detectState({
     /\b(besteld|order|ordernummer|betaald|gekocht|whatsapp.?groep|groep|toegang)\b/i.test(
       latest
     );
-
   const hasExplicitBuyingIntent =
     /\b(bestellen|starten|ik wil starten|hoe bestel|link|kopen|aanschaffen|doorgaan)\b/i.test(
       latest
@@ -824,7 +824,14 @@ function buildContextBlock({
     recent_messages,
     "youtube.com/@Nutrition-Works"
   );
-
+  const websiteLinkAlreadySent = hasLinkBeenSent(
+    recent_messages,
+    "nutritionworks.online"
+  );
+  const facebookGroupLinkAlreadySent = hasLinkBeenSent(
+    recent_messages,
+    "facebook.com/groups/HealthyLifestylePlanNL"
+  );
   const priceAlreadyMentioned = hasPriceBeenMentioned(recent_messages);
   const checkoutLinkAlreadySent = hasCheckoutLinkBeenSent(recent_messages);
   const whatsappGroupLinkAlreadySent = hasWhatsappGroupLinkBeenSent(recent_messages);
@@ -845,6 +852,8 @@ function buildContextBlock({
     runtime_state: {
       ...state,
       testimonial_already_sent: testimonialAlreadySent,
+      website_link_already_sent: websiteLinkAlreadySent,
+      facebook_group_link_already_sent: facebookGroupLinkAlreadySent,
       price_already_mentioned: priceAlreadyMentioned,
       checkout_link_already_sent: checkoutLinkAlreadySent,
       whatsapp_group_link_already_sent: whatsappGroupLinkAlreadySent,
@@ -883,11 +892,14 @@ function buildContextBlock({
         "Als iets al bekend is uit goal, objections, last_summary of recent_conversation_history: vraag er niet opnieuw naar.",
         "Als het gesprek bestaand is: stel jezelf niet opnieuw voor en gebruik geen startbericht.",
         "Als testimonial_already_sent true is: stuur de testimonial-link niet opnieuw, tenzij de klant er expliciet om vraagt.",
+        "Als website_link_already_sent true is: stuur de website-link en het freebies-blok NOOIT opnieuw, tenzij de klant er expliciet om vraagt. Geef bij twijfel kort persoonlijk advies in eigen woorden, zonder link.",
+        "Als facebook_group_link_already_sent true is: deel de Facebook-groep link NOOIT opnieuw, tenzij de klant er expliciet om vraagt.",
+        "Uitleggen betekent uitleggen in eigen woorden. Een link sturen is geen uitleg; stuur nooit een eerder gestuurde link opnieuw als vervanging van uitleg.",
         "Als price_already_mentioned true is: noem de prijs niet opnieuw, tenzij de klant ernaar vraagt.",
         "Als country_already_asked true is: vraag niet opnieuw naar Nederland of België, tenzij het antwoord nog ontbreekt en het direct nodig is voor checkout.",
         "Als checkout_link_already_sent true is: stuur geen nieuwe checkout-link, tenzij de klant er expliciet opnieuw om vraagt.",
         "Als whatsapp_group_link_already_sent true is: behandel de klant als gevalideerde klant en ga over naar coachingsmodus.",
-        "In coachingsmodus: geen salesflow, geen prijs, geen checkout, geen nieuwe ordernummer-vraag, tenzij de klant expliciet opnieuw naar de WhatsApp-groep of toegang vraagt.",
+        "In coachingsmodus: 100% coaching. Geen salesflow, geen prijs, geen checkout, geen upsell en geen productaanbevelingen uit jezelf. Verkoop alleen wanneer de klant er expliciet zelf om vraagt (bijvoorbeeld naar een specifiek product of als reactie op een broadcast-bericht). De WhatsApp-groep link alleen opnieuw delen als de klant er expliciet om vraagt.",
         "Ordervalidatie wordt server-side uitgevoerd. Emma mag nooit zelf een ordernummer goedkeuren of de WhatsApp-link zelfstandig delen.",
         "Gebruik nooit interne prompttermen zoals neutrale afsluiting, medische trigger, salesflow, runtime_state of repetition_guard in klantantwoorden.",
       ],
@@ -1105,7 +1117,7 @@ async function getStructuredUpdates({
     current_interested_in_control: clamp(currentInterestedInControl, MAX_SHORT_FIELD_CHARS),
     current_purchased_program: clamp(currentPurchasedProgram, MAX_SHORT_FIELD_CHARS),
     current_has_control: clamp(currentHasControl, MAX_SHORT_FIELD_CHARS),
-    recent_messages: recentMessages.slice(-8).map((msg) => ({
+    recent_messages: recentMessages.slice(-EXTRACTOR_CONTEXT_MESSAGES).map((msg) => ({
       role: msg.role || "unknown",
       message_text: clamp(msg.message_text, 250),
       timestamp: msg.timestamp || "",
@@ -1297,7 +1309,6 @@ async function getElevenReply({
             text: contextBlock,
           })
         );
-
         ws.send(
           JSON.stringify({
             type: "user_message",
