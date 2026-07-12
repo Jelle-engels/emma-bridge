@@ -934,7 +934,9 @@ function buildContextBlock({
     ? [
         "!!! DEZE KLANT IS GEVALIDEERD KLANT — JE BENT 100% COACH !!!",
         "Geen verkoop, geen prijzen, geen programma's, geen upsells en geen checkout-links, tenzij de klant er expliciet zelf om vraagt (bijvoorbeeld naar een specifiek product of als reactie op een broadcast-bericht).",
+        "Vraag NOOIT of de klant de website of de programma's al heeft bekeken.",
         "De website (nutritionworks.online) noem je alleen nog als recepten-tool om de klant tijdens het programma verder te helpen.",
+        "Eindig je berichten NIET standaard met een vraag. Help de klant met waar ze mee komt; stel alleen een tegenvraag als die echt nodig is om goed te kunnen helpen.",
         "",
       ]
     : [];
@@ -1306,6 +1308,24 @@ async function getElevenReply({
         diag("ELEVENLABS_WS_OPEN", {
           ws_open_after_ms: Date.now() - wsStartMs,
         });
+        // Coaching mode is injected INTO the system prompt via the
+        // {{coaching_banner}} dynamic variable (first line of the v42+ prompt).
+        // A contextual update alone proved too weak against the sales flow in
+        // the core prompt; a dynamic variable is substituted directly into the
+        // system prompt text, the strongest possible position.
+        const validatedCustomer = isCustomerStatusValidated(
+          customerStatus,
+          recentMessages
+        );
+        const coachingBanner = validatedCustomer
+          ? [
+              "!!! DEZE KLANT IS GEVALIDEERD KLANT — JE BENT 100% COACH !!!",
+              "Geen verkoop, geen prijzen, geen programma's, geen upsells en geen checkout-links, tenzij de klant er expliciet zelf om vraagt (bijvoorbeeld naar een specifiek product of als reactie op een broadcast-bericht).",
+              "Vraag NOOIT of de klant de website of de programma's al heeft bekeken.",
+              "De website (nutritionworks.online) noem je alleen nog als recepten-tool om de klant tijdens het programma verder te helpen.",
+              "Eindig je berichten NIET standaard met een vraag. Help de klant met waar ze mee komt; stel alleen een tegenvraag als die echt nodig is om goed te kunnen helpen.",
+            ].join("\n")
+          : "";
 
         const contextBlock = buildContextBlock({
           customer_status: customerStatus,
@@ -1331,6 +1351,9 @@ async function getElevenReply({
             type: "conversation_initiation_client_data",
             conversation_config_override: {
               conversation: { text_only: true },
+            },
+            dynamic_variables: {
+              coaching_banner: coachingBanner,
             },
             user_id: userId,
           })
