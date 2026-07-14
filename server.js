@@ -327,10 +327,14 @@ function normalizeLanguage(value) {
 }
 
 function detectLanguageFromPhone(userId) {
-  const digits = cleanText(userId).replace(/[^0-9]/g, "");
-  if (!digits) return "";
+  const value = cleanText(userId).replace(/^\+/, "");
+  // Only trust the country prefix when the id actually looks like a phone
+  // number in international format: digits only, 10-15 characters. WhatsApp
+  // BSUIDs (username rollout, 2026) can contain digits too and must never be
+  // read as a country code.
+  if (!/^[0-9]{10,15}$/.test(value)) return "";
   for (const len of [3, 2, 1]) {
-    const prefix = digits.slice(0, len);
+    const prefix = value.slice(0, len);
     if (PHONE_PREFIX_LANGUAGE[prefix]) return PHONE_PREFIX_LANGUAGE[prefix];
   }
   return "";
