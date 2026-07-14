@@ -336,6 +336,57 @@ function detectLanguageFromPhone(userId) {
   return "";
 }
 
+// Explicit language requests ("can we speak English?", "auf Deutsch bitte").
+// Deterministic patterns, one per supported language. Unlike statistical text
+// detection these work on short sentences and at ANY point in the
+// conversation: an explicit request always wins and re-locks the language.
+const EXPLICIT_LANGUAGE_REQUEST_PATTERNS = [
+  {
+    language: "en",
+    pattern:
+      /\b(in english|speak english|english,? please|switch to english|continue in english|i don.?t speak dutch|i do not speak dutch|do you speak english)\b/i,
+  },
+  {
+    language: "nl",
+    pattern:
+      /\b(in het nederlands|nederlands,? graag|spreek je nederlands|verder in het nederlands)\b/i,
+  },
+  {
+    language: "fr",
+    pattern:
+      /\b(en fran[cç]ais|fran[cç]ais,? s.?il vous pla[iî]t|je ne parle pas n[eé]erlandais|parlez.?vous fran[cç]ais|continuer en fran[cç]ais)\b/i,
+  },
+  {
+    language: "de",
+    pattern:
+      /\b(auf deutsch|deutsch,? bitte|ich spreche kein niederl[aä]ndisch|sprechen sie deutsch|sprichst du deutsch|weiter auf deutsch)\b/i,
+  },
+  {
+    language: "it",
+    pattern:
+      /\b(in italiano|italiano,? per favore|non parlo olandese|parli italiano|continuare in italiano)\b/i,
+  },
+  {
+    language: "es",
+    pattern:
+      /\b(en espa[nñ]ol|espa[nñ]ol,? por favor|no hablo (holand[eé]s|neerland[eé]s)|hablas espa[nñ]ol|continuar en espa[nñ]ol)\b/i,
+  },
+  {
+    language: "pl",
+    pattern:
+      /\b(po polsku|nie m[oó]wi[eę] po (holendersku|niderlandzku)|m[oó]wisz po polsku)\b/i,
+  },
+];
+
+function detectExplicitLanguageRequest(text) {
+  const value = cleanText(text);
+  if (!value) return "";
+  for (const { language, pattern } of EXPLICIT_LANGUAGE_REQUEST_PATTERNS) {
+    if (pattern.test(value)) return language;
+  }
+  return "";
+}
+
 // Returns one of SUPPORTED_LANGUAGES, "other" (confidently detected but not a
 // supported language), or "" (too short / undetermined).
 function detectLanguageFromText(text) {
@@ -1718,10 +1769,14 @@ app.post("/chat", async (req, res) => {
   let conversationLanguage = storedLanguage;
   let languageUpdate = "";
   if (!conversationLanguage) {
+    const explicitRequest = detectExplicitLanguageRequest(normalizedMessage);
     const fromPhone = detectLanguageFromPhone(normalizedUserId);
     const fromText = detectLanguageFromText(normalizedMessage);
     conversationLanguage =
-      fromPhone || (fromText === "other" ? "en" : fromText) || "nl";
+      explicitRequest ||
+      fromPhone ||
+      (fromText === "other" ? "en" : fromText) ||
+      "nl";
     languageUpdate = conversationLanguage;
   }
 
@@ -1782,21 +1837,29 @@ app.post("/chat", async (req, res) => {
     normalizedMessage
   );
 
-  // One early language correction: while the conversation is still young, the
-  // customer's own writing overrides the initial guess (e.g. a French-speaking
-  // Belgian who got the Dutch default). After that the language is locked and
-  // never changes again.
-  if (
-    storedLanguage &&
-    normalizedRecentMessages.length <= EARLY_LANGUAGE_SWITCH_MAX_MESSAGES
-  ) {
-    const fromText = detectLanguageFromText(normalizedMessage);
-    if (
-      SUPPORTED_LANGUAGES.includes(fromText) &&
-      fromText !== conversationLanguage
+  // Language switching for known customers, two mechanisms:
+  // 1. An EXPLICIT request ("can we speak English?", "auf Deutsch bitte")
+  //    switches at ANY point in the conversation and re-locks.
+  // 2. While the conversation is still young, the customer's own writing
+  //    overrides the initial guess (e.g. a French-speaking Belgian who got
+  //    the Dutch default). After the early window this statistical detection
+  //    is disabled — only an explicit request can still switch.
+  if (storedLanguage) {
+    const explicitRequest = detectExplicitLanguageRequest(normalizedMessage);
+    if (explicitRequest && explicitRequest !== conversationLanguage) {
+      conversationLanguage = explicitRequest;
+      languageUpdate = explicitRequest;
+    } else if (
+      normalizedRecentMessages.length <= EARLY_LANGUAGE_SWITCH_MAX_MESSAGES
     ) {
-      conversationLanguage = fromText;
-      languageUpdate = fromText;
+      const fromText = detectLanguageFromText(normalizedMessage);
+      if (
+        SUPPORTED_LANGUAGES.includes(fromText) &&
+        fromText !== conversationLanguage
+      ) {
+        conversationLanguage = fromText;
+        languageUpdate = fromText;
+      }
     }
   }
 
