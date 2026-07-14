@@ -3,6 +3,7 @@ import WebSocket from "ws";
 import OpenAI from "openai";
 import dotenv from "dotenv";
 import { randomUUID } from "crypto";
+import { franc } from "franc-min";
 
 dotenv.config();
 
@@ -24,6 +25,10 @@ const OPENAI_TIMEOUT_MS = Number(process.env.OPENAI_TIMEOUT_MS || 12000);
 const MAX_CONTEXT_MESSAGES = Number(process.env.MAX_CONTEXT_MESSAGES || 30);
 const EXTRACTOR_CONTEXT_MESSAGES = Number(process.env.EXTRACTOR_CONTEXT_MESSAGES || 20);
 const RETURNING_BREAK_HOURS = Number(process.env.RETURNING_BREAK_HOURS || 8);
+const EARLY_LANGUAGE_SWITCH_MAX_MESSAGES = Number(
+  process.env.EARLY_LANGUAGE_SWITCH_MAX_MESSAGES || 4
+);
+const LANGUAGE_TEXT_MIN_CHARS = Number(process.env.LANGUAGE_TEXT_MIN_CHARS || 15);
 const MAX_MESSAGE_CHARS = Number(process.env.MAX_MESSAGE_CHARS || 500);
 const MAX_SUMMARY_CHARS = Number(process.env.MAX_SUMMARY_CHARS || 900);
 const MAX_GOAL_CHARS = Number(process.env.MAX_GOAL_CHARS || 300);
@@ -47,6 +52,85 @@ const WELCOME_MESSAGE =
   "• wat je al geprobeerd hebt\n" +
   "• waar je nu tegenaan loopt\n\n" +
   "Hoe meer je deelt, hoe beter ik je kan helpen 🤗";
+
+// One hardcoded welcome message per supported language. This message never
+// touches the LLM, so the most-seen message is guaranteed correct in every
+// language. The Dutch text above is the reference version.
+const WELCOME_MESSAGES = {
+  nl: WELCOME_MESSAGE,
+  en:
+    "Hi, I'm Emma \u{1F60A}\n\n" +
+    "I'm the AI assistant at Nutrition Works and every day I help people reach their goals \u{1F917}\u2728\n\n" +
+    "We've already helped tens of thousands of people and I truly believe I can help you too \u{1F49A}\n\n" +
+    "To help you as well as possible, feel free to tell me a bit more about your situation right away \u{1F64F}\n\n" +
+    "For example:\n" +
+    "\u2022 your current weight\n" +
+    "\u2022 where you want to go\n" +
+    "\u2022 your age\n" +
+    "\u2022 what you've already tried\n" +
+    "\u2022 what you're struggling with right now\n\n" +
+    "The more you share, the better I can help you \u{1F917}",
+  fr:
+    "Bonjour, je suis Emma \u{1F60A}\n\n" +
+    "Je suis l'assistante IA de Nutrition Works et j'aide chaque jour des personnes \u00e0 atteindre leurs objectifs \u{1F917}\u2728\n\n" +
+    "Nous avons d\u00e9j\u00e0 aid\u00e9 des dizaines de milliers de personnes et je pense sinc\u00e8rement pouvoir t'aider toi aussi \u{1F49A}\n\n" +
+    "Pour t'aider au mieux, n'h\u00e9site pas \u00e0 m'en dire un peu plus sur ta situation \u{1F64F}\n\n" +
+    "Par exemple :\n" +
+    "\u2022 ton poids actuel\n" +
+    "\u2022 ton objectif\n" +
+    "\u2022 ton \u00e2ge\n" +
+    "\u2022 ce que tu as d\u00e9j\u00e0 essay\u00e9\n" +
+    "\u2022 ce qui te bloque en ce moment\n\n" +
+    "Plus tu partages, mieux je peux t'aider \u{1F917}",
+  de:
+    "Hallo, ich bin Emma \u{1F60A}\n\n" +
+    "Ich bin die KI-Assistentin von Nutrition Works und helfe jeden Tag Menschen dabei, ihre Ziele zu erreichen \u{1F917}\u2728\n\n" +
+    "Wir haben schon zehntausenden Menschen geholfen und ich glaube wirklich, dass ich auch dir helfen kann \u{1F49A}\n\n" +
+    "Um dir so gut wie m\u00f6glich zu helfen, erz\u00e4hl mir gern direkt etwas mehr \u00fcber deine Situation \u{1F64F}\n\n" +
+    "Zum Beispiel:\n" +
+    "\u2022 dein aktuelles Gewicht\n" +
+    "\u2022 wo du hinm\u00f6chtest\n" +
+    "\u2022 dein Alter\n" +
+    "\u2022 was du schon ausprobiert hast\n" +
+    "\u2022 womit du gerade k\u00e4mpfst\n\n" +
+    "Je mehr du teilst, desto besser kann ich dir helfen \u{1F917}",
+  it:
+    "Ciao, sono Emma \u{1F60A}\n\n" +
+    "Sono l'assistente IA di Nutrition Works e ogni giorno aiuto le persone a raggiungere i loro obiettivi \u{1F917}\u2728\n\n" +
+    "Abbiamo gi\u00e0 aiutato decine di migliaia di persone e credo davvero di poter aiutare anche te \u{1F49A}\n\n" +
+    "Per aiutarti al meglio, raccontami subito qualcosa in pi\u00f9 sulla tua situazione \u{1F64F}\n\n" +
+    "Per esempio:\n" +
+    "\u2022 il tuo peso attuale\n" +
+    "\u2022 dove vuoi arrivare\n" +
+    "\u2022 la tua et\u00e0\n" +
+    "\u2022 cosa hai gi\u00e0 provato\n" +
+    "\u2022 cosa ti blocca in questo momento\n\n" +
+    "Pi\u00f9 condividi, meglio posso aiutarti \u{1F917}",
+  es:
+    "Hola, soy Emma \u{1F60A}\n\n" +
+    "Soy la asistente de IA de Nutrition Works y cada d\u00eda ayudo a personas a alcanzar sus objetivos \u{1F917}\u2728\n\n" +
+    "Ya hemos ayudado a decenas de miles de personas y de verdad creo que tambi\u00e9n puedo ayudarte a ti \u{1F49A}\n\n" +
+    "Para ayudarte lo mejor posible, cu\u00e9ntame un poco m\u00e1s sobre tu situaci\u00f3n \u{1F64F}\n\n" +
+    "Por ejemplo:\n" +
+    "\u2022 tu peso actual\n" +
+    "\u2022 ad\u00f3nde quieres llegar\n" +
+    "\u2022 tu edad\n" +
+    "\u2022 qu\u00e9 has probado ya\n" +
+    "\u2022 con qu\u00e9 est\u00e1s luchando ahora\n\n" +
+    "Cuanto m\u00e1s compartas, mejor podr\u00e9 ayudarte \u{1F917}",
+  pl:
+    "Cze\u015b\u0107, jestem Emma \u{1F60A}\n\n" +
+    "Jestem asystentk\u0105 AI w Nutrition Works i codziennie pomagam ludziom osi\u0105ga\u0107 ich cele \u{1F917}\u2728\n\n" +
+    "Pomogli\u015bmy ju\u017c dziesi\u0105tkom tysi\u0119cy os\u00f3b i naprawd\u0119 wierz\u0119, \u017ce Tobie te\u017c mog\u0119 pom\u00f3c \u{1F49A}\n\n" +
+    "\u017beby pom\u00f3c Ci jak najlepiej, opowiedz mi od razu troch\u0119 wi\u0119cej o swojej sytuacji \u{1F64F}\n\n" +
+    "Na przyk\u0142ad:\n" +
+    "\u2022 Twoja obecna waga\n" +
+    "\u2022 dok\u0105d zmierzasz\n" +
+    "\u2022 Tw\u00f3j wiek\n" +
+    "\u2022 czego ju\u017c pr\u00f3bowa\u0142a\u015b\n" +
+    "\u2022 z czym teraz si\u0119 zmagasz\n\n" +
+    "Im wi\u0119cej napiszesz, tym lepiej mog\u0119 Ci pom\u00f3c \u{1F917}",
+};
 
 const openai = process.env.OPENAI_API_KEY
   ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
@@ -169,6 +253,8 @@ function buildResponse({
   interested_in_control_update = "",
   purchased_program_update = "",
   has_control_update = "",
+  language = "",
+  language_update = "",
   send_reply,
 }) {
   const rawReply = reply === NO_REPLY ? NO_REPLY : cleanReplyText(reply);
@@ -186,7 +272,78 @@ function buildResponse({
     interested_in_control_update: cleanText(interested_in_control_update),
     purchased_program_update: cleanText(purchased_program_update),
     has_control_update: cleanText(has_control_update),
+    language: cleanText(language),
+    language_update: cleanText(language_update),
   };
+}
+
+/* ------------------------------- LANGUAGE -------------------------------- */
+
+const SUPPORTED_LANGUAGES = ["nl", "en", "fr", "de", "it", "es", "pl"];
+
+const LANGUAGE_NAMES = {
+  nl: "Nederlands",
+  en: "English",
+  fr: "French",
+  de: "German",
+  it: "Italian",
+  es: "Spanish",
+  pl: "Polish",
+};
+
+// Country calling code -> language. Checked longest-prefix-first so "1"
+// (US/Canada) cannot shadow longer codes. Belgium (32) defaults to Dutch;
+// French-speaking Belgians are fixed by the early text-based switch.
+const PHONE_PREFIX_LANGUAGE = {
+  "31": "nl",
+  "32": "nl",
+  "33": "fr",
+  "49": "de",
+  "43": "de",
+  "41": "de",
+  "39": "it",
+  "34": "es",
+  "48": "pl",
+  "44": "en",
+  "353": "en",
+  "61": "en",
+  "64": "en",
+  "1": "en",
+};
+
+const FRANC_TO_LANGUAGE = {
+  nld: "nl",
+  eng: "en",
+  fra: "fr",
+  deu: "de",
+  ita: "it",
+  spa: "es",
+  pol: "pl",
+};
+
+function normalizeLanguage(value) {
+  const v = cleanText(value).toLowerCase();
+  return SUPPORTED_LANGUAGES.includes(v) ? v : "";
+}
+
+function detectLanguageFromPhone(userId) {
+  const digits = cleanText(userId).replace(/[^0-9]/g, "");
+  if (!digits) return "";
+  for (const len of [3, 2, 1]) {
+    const prefix = digits.slice(0, len);
+    if (PHONE_PREFIX_LANGUAGE[prefix]) return PHONE_PREFIX_LANGUAGE[prefix];
+  }
+  return "";
+}
+
+// Returns one of SUPPORTED_LANGUAGES, "other" (confidently detected but not a
+// supported language), or "" (too short / undetermined).
+function detectLanguageFromText(text) {
+  const value = cleanText(text);
+  if (value.length < LANGUAGE_TEXT_MIN_CHARS) return "";
+  const iso3 = franc(value, { minLength: LANGUAGE_TEXT_MIN_CHARS });
+  if (!iso3 || iso3 === "und") return "";
+  return FRANC_TO_LANGUAGE[iso3] || "other";
 }
 
 /* -------------------------- MESSAGE NORMALIZATION ------------------------- */
@@ -798,6 +955,7 @@ function isNewUser({ recentMessages, lastSummary }) {
 /* ------------------------------ CONTEXT BLOCK ----------------------------- */
 
 function buildContextBlock({
+  conversation_language,
   customer_status,
   current_phase,
   goal,
@@ -884,6 +1042,7 @@ function buildContextBlock({
           ? null
           : Math.max(0, Math.round(hoursSincePreviousMessage * 10) / 10),
       is_returning_after_break: isReturningAfterBreak,
+      conversation_language: cleanText(conversation_language) || "nl",
       order_validation_server_side: true,
     },
     crm_memory: {
@@ -907,6 +1066,7 @@ function buildContextBlock({
       last_user_messages_for_context_only: lastUserMessages,
       rules: [
         "Antwoord alleen op het nieuwste klantbericht.",
+        "Antwoord ALTIJD in de gesprekstaal (conversation_language). Wissel nooit zelf van taal.",
         "Gebruik bekende CRM-data als achtergrond, niet als tekst om opnieuw op te sommen.",
         "Herhaal geen vraag, uitleg, prijs, testimonial-link, checkout-link of ordernummer-instructie die al in de recente Emma-berichten staat.",
         "Als iets al bekend is uit goal, objections, last_summary of recent_conversation_history: vraag er niet opnieuw naar.",
@@ -1085,7 +1245,7 @@ async function getStructuredUpdates({
     "Je bent een strikte CRM-extractor voor een WhatsApp salesgesprek voor Nutrition Works.",
     "Je taak is NIET om te antwoorden op de gebruiker.",
     "Je analyseert het nieuwste gebruikersbericht in de context van het hele gesprek en de bestaande CRM-data.",
-    "Je geeft uitsluitend geldige JSON terug volgens het schema. Gebruik Nederlands.",
+    "Je geeft uitsluitend geldige JSON terug volgens het schema. Schrijf alle veldwaarden in het Nederlands, ook wanneer het gesprek in een andere taal wordt gevoerd.",
     "Verzin niets. Vul nooit iets in dat niet uit het gesprek volgt.",
     "",
     "REGELS PER VELD:",
@@ -1236,6 +1396,7 @@ async function getStructuredUpdates({
 
 async function getElevenReply({
   userId,
+  conversationLanguage,
   message,
   customerStatus,
   currentPhase,
@@ -1326,8 +1487,27 @@ async function getElevenReply({
               "Eindig je berichten NIET standaard met een vraag. Help de klant met waar ze mee komt; stel alleen een tegenvraag als die echt nodig is om goed te kunnen helpen.",
             ].join("\n")
           : "";
+        // Language lock, injected into the system prompt via the
+        // {{language_lock}} dynamic variable (v43+ prompt). For Dutch the
+        // template messages are used verbatim; for every other language Emma
+        // writes native-quality text, never literal translations.
+        const languageName =
+          LANGUAGE_NAMES[conversationLanguage] || "Nederlands";
+        const languageLock =
+          conversationLanguage === "nl" || !conversationLanguage
+            ? [
+                "GESPREKSTAAL: Nederlands.",
+                "Je schrijft ELK bericht uitsluitend in het Nederlands. De vaste voorbeeldberichten in deze prompt gebruik je letterlijk zoals ze er staan. Wissel nooit zelf van taal.",
+              ].join("\n")
+            : [
+                `CONVERSATION LANGUAGE: ${languageName}.`,
+                `You write EVERY message exclusively in ${languageName}, natural and native-speaker quality.`,
+                "Never translate the Dutch template messages literally: they define structure, content, emojis and links only. Write them the way a native speaker would naturally phrase them.",
+                "Never switch languages on your own; the server controls the conversation language.",
+              ].join("\n");
 
         const contextBlock = buildContextBlock({
+          conversation_language: conversationLanguage,
           customer_status: customerStatus,
           current_phase: currentPhase,
           goal,
@@ -1354,6 +1534,7 @@ async function getElevenReply({
             },
             dynamic_variables: {
               coaching_banner: coachingBanner,
+              language_lock: languageLock,
             },
             user_id: userId,
           })
@@ -1512,6 +1693,7 @@ app.post("/chat", async (req, res) => {
     interested_in_control = "",
     purchased_program = "",
     has_control = "",
+    language = "",
     recent_messages = [],
   } = req.body ?? {};
 
@@ -1528,6 +1710,20 @@ app.post("/chat", async (req, res) => {
   const normalizedInterestedInControl = clamp(interested_in_control, MAX_SHORT_FIELD_CHARS);
   const normalizedPurchasedProgram = clamp(purchased_program, MAX_SHORT_FIELD_CHARS);
   const normalizedHasControl = clamp(has_control, MAX_SHORT_FIELD_CHARS);
+
+  // Conversation language: the stored Airtable value wins; otherwise detect
+  // deterministically (phone prefix -> text -> Dutch default). A confidently
+  // detected but unsupported language locks the conversation to English.
+  const storedLanguage = normalizeLanguage(language);
+  let conversationLanguage = storedLanguage;
+  let languageUpdate = "";
+  if (!conversationLanguage) {
+    const fromPhone = detectLanguageFromPhone(normalizedUserId);
+    const fromText = detectLanguageFromText(normalizedMessage);
+    conversationLanguage =
+      fromPhone || (fromText === "other" ? "en" : fromText) || "nl";
+    languageUpdate = conversationLanguage;
+  }
 
   diag("REQUEST_PARSED", {
     user_id: normalizedUserId,
@@ -1573,18 +1769,36 @@ app.post("/chat", async (req, res) => {
 
   if (!normalizedUserId) {
     console.error("REQUEST ERROR: user_id ontbreekt");
-    return sendDiagResponse("fallback_reply", buildResponse({ send_reply: true, reply: FALLBACK_REPLY }));
+    return sendDiagResponse("fallback_reply", buildResponse({ send_reply: true, reply: FALLBACK_REPLY, language: conversationLanguage }));
   }
 
   if (!normalizedMessage) {
     console.error("REQUEST ERROR: message ontbreekt");
-    return sendDiagResponse("fallback_reply", buildResponse({ send_reply: true, reply: FALLBACK_REPLY }));
+    return sendDiagResponse("fallback_reply", buildResponse({ send_reply: true, reply: FALLBACK_REPLY, language: conversationLanguage }));
   }
 
   const normalizedRecentMessages = sanitizeAndPrepareRecentMessages(
     recent_messages,
     normalizedMessage
   );
+
+  // One early language correction: while the conversation is still young, the
+  // customer's own writing overrides the initial guess (e.g. a French-speaking
+  // Belgian who got the Dutch default). After that the language is locked and
+  // never changes again.
+  if (
+    storedLanguage &&
+    normalizedRecentMessages.length <= EARLY_LANGUAGE_SWITCH_MAX_MESSAGES
+  ) {
+    const fromText = detectLanguageFromText(normalizedMessage);
+    if (
+      SUPPORTED_LANGUAGES.includes(fromText) &&
+      fromText !== conversationLanguage
+    ) {
+      conversationLanguage = fromText;
+      languageUpdate = fromText;
+    }
+  }
 
   console.log(
     JSON.stringify(
@@ -1616,19 +1830,22 @@ app.post("/chat", async (req, res) => {
     diag("NEW_USER_WELCOME", {
       first_message_preview: clamp(normalizedMessage, 120),
       customer_status_received: normalizedCustomerStatus,
+      language: conversationLanguage,
     });
     return sendDiagResponse(
       "new_user_welcome",
       buildResponse({
         send_reply: true,
-        reply: WELCOME_MESSAGE,
+        reply: WELCOME_MESSAGES[conversationLanguage] || WELCOME_MESSAGE,
+        language: conversationLanguage,
+        language_update: languageUpdate,
       })
     );
   }
 
   if (!agentId) {
     console.error("CONFIG ERROR: ELEVENLABS_AGENT_ID ontbreekt");
-    return sendDiagResponse("fallback_reply", buildResponse({ send_reply: true, reply: FALLBACK_REPLY }));
+    return sendDiagResponse("fallback_reply", buildResponse({ send_reply: true, reply: FALLBACK_REPLY, language: conversationLanguage }));
   }
 
   try {
@@ -1649,6 +1866,7 @@ app.post("/chat", async (req, res) => {
     // so it cannot push the total response time past ManyChat's webhook timeout.
     const replyPromise = getElevenReply({
       userId: normalizedUserId,
+      conversationLanguage,
       message: normalizedMessage,
       customerStatus: alreadyValidated
         ? "customer"
@@ -1866,6 +2084,8 @@ app.post("/chat", async (req, res) => {
           interested_in_control_update_preview: finalInterestedInControlUpdate,
           purchased_program_update_preview: finalPurchasedProgramUpdate,
           has_control_update_preview: finalHasControlUpdate,
+          language: conversationLanguage,
+          language_update_preview: languageUpdate,
           derived_purchase_validated: derivedPurchase.validated,
           extractor_purchased_program_raw: extraction.purchased_program_update,
           extractor_has_control_raw: extraction.has_control_update,
@@ -1891,6 +2111,8 @@ app.post("/chat", async (req, res) => {
         interested_in_control_update: finalInterestedInControlUpdate,
         purchased_program_update: finalPurchasedProgramUpdate,
         has_control_update: finalHasControlUpdate,
+        language: conversationLanguage,
+        language_update: languageUpdate,
       })
     );
   } catch (error) {
@@ -1898,7 +2120,7 @@ app.post("/chat", async (req, res) => {
       error_message: error?.message || String(error),
     });
     console.error("SERVER ERROR:", error?.message || error);
-    return sendDiagResponse("server_error_fallback", buildResponse({ send_reply: true, reply: FALLBACK_REPLY }));
+    return sendDiagResponse("server_error_fallback", buildResponse({ send_reply: true, reply: FALLBACK_REPLY, language: conversationLanguage }));
   }
 });
 
