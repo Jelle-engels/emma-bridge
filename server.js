@@ -25,9 +25,6 @@ const OPENAI_TIMEOUT_MS = Number(process.env.OPENAI_TIMEOUT_MS || 12000);
 const MAX_CONTEXT_MESSAGES = Number(process.env.MAX_CONTEXT_MESSAGES || 30);
 const EXTRACTOR_CONTEXT_MESSAGES = Number(process.env.EXTRACTOR_CONTEXT_MESSAGES || 20);
 const RETURNING_BREAK_HOURS = Number(process.env.RETURNING_BREAK_HOURS || 8);
-const EARLY_LANGUAGE_SWITCH_MAX_MESSAGES = Number(
-  process.env.EARLY_LANGUAGE_SWITCH_MAX_MESSAGES || 4
-);
 const LANGUAGE_TEXT_MIN_CHARS = Number(process.env.LANGUAGE_TEXT_MIN_CHARS || 15);
 const MAX_MESSAGE_CHARS = Number(process.env.MAX_MESSAGE_CHARS || 500);
 const MAX_SUMMARY_CHARS = Number(process.env.MAX_SUMMARY_CHARS || 900);
@@ -400,6 +397,7 @@ function detectLanguageFromText(text) {
   if (!iso3 || iso3 === "und") return "";
   return FRANC_TO_LANGUAGE[iso3] || "other";
 }
+
 
 /* -------------------------- MESSAGE NORMALIZATION ------------------------- */
 
@@ -1841,29 +1839,16 @@ app.post("/chat", async (req, res) => {
     normalizedMessage
   );
 
-  // Language switching for known customers, two mechanisms:
-  // 1. An EXPLICIT request ("can we speak English?", "auf Deutsch bitte")
-  //    switches at ANY point in the conversation and re-locks.
-  // 2. While the conversation is still young, the customer's own writing
-  //    overrides the initial guess (e.g. a French-speaking Belgian who got
-  //    the Dutch default). After the early window this statistical detection
-  //    is disabled — only an explicit request can still switch.
+  // Language switching for known customers: ONLY an explicit request
+  // ("can we speak English?", "auf Deutsch bitte") switches the language,
+  // at any point in the conversation, and re-locks it. There is deliberately
+  // no statistical switching — writing style alone never changes the
+  // conversation language.
   if (storedLanguage) {
     const explicitRequest = detectExplicitLanguageRequest(normalizedMessage);
     if (explicitRequest && explicitRequest !== conversationLanguage) {
       conversationLanguage = explicitRequest;
       languageUpdate = explicitRequest;
-    } else if (
-      normalizedRecentMessages.length <= EARLY_LANGUAGE_SWITCH_MAX_MESSAGES
-    ) {
-      const fromText = detectLanguageFromText(normalizedMessage);
-      if (
-        SUPPORTED_LANGUAGES.includes(fromText) &&
-        fromText !== conversationLanguage
-      ) {
-        conversationLanguage = fromText;
-        languageUpdate = fromText;
-      }
     }
   }
 
