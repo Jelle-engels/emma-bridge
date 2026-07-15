@@ -24,7 +24,6 @@ const OPENAI_TIMEOUT_MS = Number(process.env.OPENAI_TIMEOUT_MS || 12000);
 
 const MAX_CONTEXT_MESSAGES = Number(process.env.MAX_CONTEXT_MESSAGES || 30);
 const EXTRACTOR_CONTEXT_MESSAGES = Number(process.env.EXTRACTOR_CONTEXT_MESSAGES || 20);
-const RETURNING_BREAK_HOURS = Number(process.env.RETURNING_BREAK_HOURS || 8);
 const LANGUAGE_TEXT_MIN_CHARS = Number(process.env.LANGUAGE_TEXT_MIN_CHARS || 15);
 const MAX_MESSAGE_CHARS = Number(process.env.MAX_MESSAGE_CHARS || 500);
 const MAX_SUMMARY_CHARS = Number(process.env.MAX_SUMMARY_CHARS || 900);
@@ -1059,21 +1058,6 @@ function buildContextBlock({
     recent_messages
   );
 
-  // Deterministic time-gap detection. Emma never sees raw timestamps;
-  // the server computes the gap since the previous message and only
-  // flags a customer as "returning" after RETURNING_BREAK_HOURS.
-  let hoursSincePreviousMessage = null;
-  for (let i = recent_messages.length - 1; i >= 0; i--) {
-    const t = parseTimestamp(recent_messages[i].timestamp);
-    if (t !== null) {
-      hoursSincePreviousMessage = (Date.now() - t) / 3600000;
-      break;
-    }
-  }
-  const isReturningAfterBreak =
-    hoursSincePreviousMessage !== null &&
-    hoursSincePreviousMessage >= RETURNING_BREAK_HOURS;
-
   const context = {
     agent_name: "Emma",
     runtime_state: {
@@ -1090,11 +1074,6 @@ function buildContextBlock({
       taste_answer_received: tasteAnswerReceived,
       control_answer_received: controlAnswerReceived,
       order_number_already_asked: orderNumberAlreadyAsked,
-      hours_since_previous_message:
-        hoursSincePreviousMessage === null
-          ? null
-          : Math.max(0, Math.round(hoursSincePreviousMessage * 10) / 10),
-      is_returning_after_break: isReturningAfterBreak,
       conversation_language: cleanText(conversation_language) || "nl",
       order_validation_server_side: true,
     },
@@ -1124,7 +1103,7 @@ function buildContextBlock({
         "Herhaal geen vraag, uitleg, prijs, testimonial-link, checkout-link of ordernummer-instructie die al in de recente Emma-berichten staat.",
         "Als iets al bekend is uit goal, objections, last_summary of recent_conversation_history: vraag er niet opnieuw naar.",
         "Als het gesprek bestaand is: stel jezelf niet opnieuw voor en gebruik geen startbericht.",
-        "Trek nooit zelf conclusies over verstreken tijd of over een klant die terug is. Alleen als is_returning_after_break true is mag je iemand kort welkom terug heten; anders ga je gewoon verder met het gesprek alsof het nooit gestopt is.",
+        "Zeg NOOIT welkom terug, goed dat je er weer bent of iets vergelijkbaars, en maak nooit opmerkingen over verstreken tijd. Begin altijd direct met je antwoord, alsof het gesprek gewoon doorloopt.",
         "Als testimonial_already_sent true is: stuur de testimonial-link niet opnieuw, tenzij de klant er expliciet om vraagt.",
         "Als website_link_already_sent true is: stuur de website-link en het freebies-blok NOOIT opnieuw, tenzij de klant er expliciet om vraagt. Geef bij twijfel kort persoonlijk advies in eigen woorden, zonder link.",
         "Als facebook_group_link_already_sent true is: deel de Facebook-groep link NOOIT opnieuw, tenzij de klant er expliciet om vraagt.",
@@ -1536,8 +1515,10 @@ async function getElevenReply({
               "!!! DEZE KLANT IS GEVALIDEERD KLANT — JE BENT 100% COACH !!!",
               "Geen verkoop, geen prijzen, geen programma's, geen upsells en geen checkout-links, tenzij de klant er expliciet zelf om vraagt (bijvoorbeeld naar een specifiek product of als reactie op een broadcast-bericht).",
               "Vraag NOOIT of de klant de website of de programma's al heeft bekeken.",
-              "De website (nutritionworks.online) noem je alleen nog als recepten-tool om de klant tijdens het programma verder te helpen.",
-              "Eindig je berichten NIET standaard met een vraag. Help de klant met waar ze mee komt; stel alleen een tegenvraag als die echt nodig is om goed te kunnen helpen.",
+              'Zeg NOOIT "welkom terug", "goed dat je er weer bent", "goed om je weer te horen" of iets vergelijkbaars. Begin ALTIJD direct met je antwoord.',
+              "Beantwoord ALLEEN het bericht van dit moment. Haal NIET zelf eerdere onderwerpen, doelen of gesprekken aan — de CRM-context is achtergrondkennis, geen gespreksstof.",
+              "Stel GEEN vragen en houd het gesprek niet gaande vanuit jouw kant. Antwoord, help en rond af. Alleen een korte verduidelijkingsvraag als je de vraag van de klant anders echt niet kunt beantwoorden.",
+              "De receptenpagina op nutritionworks.online noem je ALLEEN wanneer de klant zelf om recepten, maaltijd-ideeën of inspiratie vraagt. Nooit uit jezelf.",
             ].join("\n")
           : "";
         // Language lock, injected into the system prompt via the
@@ -1575,7 +1556,7 @@ async function getElevenReply({
         const guardLines = [];
         if (guardWebsiteSent) {
           guardLines.push(
-            'De website-link en het freebies-blok zijn AL gestuurd. Stuur ze NIET opnieuw uit jezelf — verwijs in woorden naar "de pagina die ik je stuurde". Alleen opnieuw sturen als de klant er expliciet om vraagt (bijvoorbeeld link kwijt), en dan alleen de kale link zonder freebies-blok. In coaching-modus mag de link wel gedeeld worden als recepten-tool.'
+            'De website-link en het freebies-blok zijn AL gestuurd. Stuur ze NIET opnieuw uit jezelf — verwijs in woorden naar "de pagina die ik je stuurde". Alleen opnieuw sturen als de klant er expliciet om vraagt (bijvoorbeeld link kwijt), en dan alleen de kale link zonder freebies-blok. In coaching-modus mag de link alleen gedeeld worden als recepten-tool wanneer de klant zelf om recepten of inspiratie vraagt.'
           );
         }
         if (guardFacebookSent) {
