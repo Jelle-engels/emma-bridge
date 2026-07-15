@@ -1558,6 +1558,45 @@ async function getElevenReply({
                 "Never translate the Dutch template messages literally: they define structure, content, emojis and links only. Write them the way a native speaker would naturally phrase them.",
                 "Never switch languages on your own; the server controls the conversation language.",
               ].join("\n");
+        // Per-turn hard guards, injected into the system prompt via the
+        // {{turn_guards}} dynamic variable. Flags inside the JSON context
+        // proved too weak (Emma re-pasted the website block after a side
+        // question); guards at the top of the system prompt stick.
+        const guardWebsiteSent = hasLinkBeenSent(
+          recentMessages,
+          "nutritionworks.online"
+        );
+        const guardFacebookSent = hasLinkBeenSent(
+          recentMessages,
+          "facebook.com/groups/HealthyLifestylePlanNL"
+        );
+        const guardCheckoutSent = hasCheckoutLinkBeenSent(recentMessages);
+        const guardPriceMentioned = hasPriceBeenMentioned(recentMessages);
+        const guardLines = [];
+        if (guardWebsiteSent) {
+          guardLines.push(
+            'De website-link en het freebies-blok zijn AL gestuurd. Stuur ze NIET opnieuw uit jezelf — verwijs in woorden naar "de pagina die ik je stuurde". Alleen opnieuw sturen als de klant er expliciet om vraagt (bijvoorbeeld link kwijt), en dan alleen de kale link zonder freebies-blok. In coaching-modus mag de link wel gedeeld worden als recepten-tool.'
+          );
+        }
+        if (guardFacebookSent) {
+          guardLines.push(
+            "De Facebook-groep link is AL gedeeld. NIET opnieuw sturen, tenzij de klant er expliciet om vraagt."
+          );
+        }
+        if (guardCheckoutSent) {
+          guardLines.push(
+            "Er is AL een checkout-link gestuurd. Geen nieuwe checkout-link, tenzij de klant er expliciet om vraagt of een andere keuze maakt."
+          );
+        }
+        if (guardPriceMentioned) {
+          guardLines.push(
+            "De prijs is AL genoemd. Niet herhalen, tenzij de klant ernaar vraagt."
+          );
+        }
+        const turnGuards =
+          guardLines.length > 0
+            ? ["HARDE REGELS VOOR DEZE BEURT:", ...guardLines].join("\n")
+            : "";
 
         const contextBlock = buildContextBlock({
           conversation_language: conversationLanguage,
@@ -1577,6 +1616,7 @@ async function getElevenReply({
         diag("ELEVENLABS_WS_CONTEXT_PREPARED", {
           context_block_size_bytes: contextBlock.length,
           message_length: typeof message === "string" ? message.length : 0,
+          turn_guards_active: guardLines.length,
         });
 
         ws.send(
@@ -1588,6 +1628,7 @@ async function getElevenReply({
             dynamic_variables: {
               coaching_banner: coachingBanner,
               language_lock: languageLock,
+              turn_guards: turnGuards,
             },
             user_id: userId,
           })
