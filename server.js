@@ -176,6 +176,71 @@ function cleanReplyText(value) {
     .trim();
 }
 
+// Deterministic removal of forbidden phrases the prompt alone could not
+// suppress reliably: "welcome back" openers and "are you still there?"
+// chasers. Applied to every reply.
+function stripForbiddenReplyPhrases(value) {
+  const text = cleanReplyText(value);
+  if (!text) return text;
+  // Emojis often end a sentence without punctuation, so they count as
+  // sentence boundaries in these patterns.
+  const B = "\\n.!?\\u{2600}-\\u{27BF}\\u{1F300}-\\u{1FAFF}";
+  const E = "[.!?\\u2026\\u{2600}-\\u{27BF}\\u{1F300}-\\u{1FAFF}]*";
+  let out = text
+    // "Welkom terug!", "Welkom terug 💚 ..." — strip the phrase/sentence
+    .replace(new RegExp(`(^|\\n)\\s*welkom terug[^${B}]*${E}\\s*`, "giu"), "$1")
+    // "Goed/Fijn/Leuk dat je er weer bent", "Goed om je weer te horen", etc.
+    .replace(
+      new RegExp(
+        `(^|[\\n.!?\\u2026]\\s*)(goed|fijn|leuk|mooi)\\s+(dat|om)\\s+je\\s+(er\\s+)?weer[^${B}]*${E}\\s*`,
+        "giu"
+      ),
+      "$1"
+    )
+    // Any sentence containing "ben je er nog"
+    .replace(new RegExp(`[^${B}]*ben je er nog[^${B}]*\\??\\s*`, "giu"), "");
+  out = cleanReplyText(out);
+  return out || text;
+}
+
+// Coaching mode: strip trailing question sentences so Emma cannot keep the
+// conversation going from her side. Exceptions: a reply that is entirely one
+// clarifying question, and checkout-flow content (a validated customer who
+// explicitly asks to buy still gets the country/taste/Control questions).
+function stripTrailingCoachingQuestions(value) {
+  const text = cleanReplyText(value);
+  if (!text) return text;
+  if (
+    /tr\.ee\/bestellen-|nederland of belgi|welke smaak|chocolade|vanille|half[-\s]?half|\bcontrol\b|ordernummer/i.test(
+      text
+    )
+  ) {
+    return text;
+  }
+  const sentenceSplit = (p) =>
+    (p.match(/[^.!?\n]+[.!?…]*[^\w\n.!?]*/gu) || [p]).map((s) => s.trim()).filter(Boolean);
+  const paragraphs = text.split("\n\n").map((p) => p.trim()).filter(Boolean);
+  const totalSentences = () =>
+    paragraphs.reduce((n, p) => n + sentenceSplit(p).length, 0);
+  let changed = true;
+  while (changed && paragraphs.length > 0 && totalSentences() > 1) {
+    changed = false;
+    const sentences = sentenceSplit(paragraphs[paragraphs.length - 1]);
+    const last = sentences[sentences.length - 1] || "";
+    if (/\?[^\w\n]*$/u.test(last)) {
+      sentences.pop();
+      if (sentences.length > 0) {
+        paragraphs[paragraphs.length - 1] = sentences.join(" ");
+      } else {
+        paragraphs.pop();
+      }
+      changed = true;
+    }
+  }
+  const out = cleanReplyText(paragraphs.join("\n\n"));
+  return out || text;
+}
+
 function clamp(value, max = 500) {
   const text = cleanText(value);
   if (text.length <= max) return text;
@@ -1104,6 +1169,7 @@ function buildContextBlock({
         "Als iets al bekend is uit goal, objections, last_summary of recent_conversation_history: vraag er niet opnieuw naar.",
         "Als het gesprek bestaand is: stel jezelf niet opnieuw voor en gebruik geen startbericht.",
         "Zeg NOOIT welkom terug, goed dat je er weer bent of iets vergelijkbaars, en maak nooit opmerkingen over verstreken tijd. Begin altijd direct met je antwoord, alsof het gesprek gewoon doorloopt.",
+        "Vraag NOOIT of de klant er nog is en jaag nooit op (geen Ben je er nog, Lukt het, Heb je al gekeken). Een emoji of kort bericht is een gewoon bericht: reageer er kort en warm op. Follow-ups gebeuren handmatig, nooit door jou.",
         "Als testimonial_already_sent true is: stuur de testimonial-link niet opnieuw, tenzij de klant er expliciet om vraagt.",
         "Als website_link_already_sent true is: stuur de website-link en het freebies-blok NOOIT opnieuw, tenzij de klant er expliciet om vraagt. Geef bij twijfel kort persoonlijk advies in eigen woorden, zonder link.",
         "Als facebook_group_link_already_sent true is: deel de Facebook-groep link NOOIT opnieuw, tenzij de klant er expliciet om vraagt.",
@@ -2022,7 +2088,7 @@ app.post("/chat", async (req, res) => {
       )
     );
 
-    reply = cleanReplyText(reply);
+    reply = stripForbiddenReplyPhrases(cleanReplyText(reply));
 
     // Give OpenAI a short grace period to finish after ElevenLabs is done.
     // If it hasn't returned by then, give up and send empty updates so the
@@ -2105,6 +2171,11 @@ app.post("/chat", async (req, res) => {
 
     const validatedNow =
       alreadyValidated || whatsappLinkInCurrentReply || userHasOrderNumber;
+    // Coaching mode: deterministically remove trailing questions (the prompt
+    // rule alone proved insufficient in production).
+    if (validatedNow) {
+      reply = stripTrailingCoachingQuestions(reply);
+    }
 
     const selfHealCustomerStatus =
       validatedNow &&
