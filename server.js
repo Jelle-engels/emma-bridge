@@ -241,6 +241,26 @@ function stripTrailingCoachingQuestions(value) {
   return out || text;
 }
 
+// Removes a repeated Stap 4 website/freebies block from a reply. Only
+// called when the website link was already sent earlier AND the customer's
+// current message does not explicitly ask for it.
+function stripRepeatedWebsiteBlock(value) {
+  const text = cleanReplyText(value);
+  if (!text || !/nutritionworks\.online/i.test(text)) return text;
+  const paragraphs = text.split("\n\n").filter((p) => {
+    if (/nutritionworks\.online/i.test(p)) return false;
+    if (/op deze pagina vind je/i.test(p)) return false;
+    if (/volledig gratis/i.test(p)) return false;
+    if (/kijk welk programma je aanspreekt/i.test(p)) return false;
+    if ((p.match(/\u{2705}/gu) || []).length >= 2) return false;
+    return true;
+  });
+  const out = cleanReplyText(paragraphs.join("\n\n"));
+  return (
+    out || "Alles over de programma's staat op de pagina die ik je eerder stuurde \u{1F49A}"
+  );
+}
+
 function clamp(value, max = 500) {
   const text = cleanText(value);
   if (text.length <= max) return text;
@@ -741,7 +761,7 @@ function hasReceivedControlAnswer(messages) {
         return true;
       // Standalone negative answers (single or short combinations)
       if (
-        /^\s*(?:nee|nope|geen|niks)(?:\s+(?:dank\s+je|bedankt|laat\s+maar|hoor|joh))?\s*[\.!]?\s*$/i.test(
+        /^\s*(?:nee|nope|geen|niks)(?:,?\s*(?:dank\s*je(?:\s*wel)?|bedankt|laat\s+maar|hoor|joh))?\s*[\.!]?\s*$/i.test(
           text
         )
       )
@@ -1640,6 +1660,21 @@ async function getElevenReply({
             "De prijs is AL genoemd. Niet herhalen, tenzij de klant ernaar vraagt."
           );
         }
+        if (hasReceivedCountryAnswer(recentMessages)) {
+          guardLines.push(
+            "Het land is AL door de klant gegeven — vraag er NOOIT meer naar. Pak het antwoord uit de gespreksgeschiedenis."
+          );
+        }
+        if (hasReceivedTasteAnswer(recentMessages)) {
+          guardLines.push(
+            "De smaak is AL door de klant gegeven — vraag er NOOIT meer naar. Pak het antwoord uit de gespreksgeschiedenis."
+          );
+        }
+        if (hasReceivedControlAnswer(recentMessages)) {
+          guardLines.push(
+            "De Control-vraag is AL beantwoord — vraag er NOOIT meer naar. Zijn product, land en smaak bekend: stuur NU direct de juiste checkout-link (sectie 5.3)."
+          );
+        }
         const turnGuards =
           guardLines.length > 0
             ? ["HARDE REGELS VOOR DEZE BEURT:", ...guardLines].join("\n")
@@ -2089,6 +2124,17 @@ app.post("/chat", async (req, res) => {
     );
 
     reply = stripForbiddenReplyPhrases(cleanReplyText(reply));
+    // Backstop: the Stap 4 website/freebies block is sent once. If it was
+    // already sent and the customer did not explicitly ask for it (or for
+    // recipes/inspiration), a repeated block is removed from the reply.
+    if (
+      hasLinkBeenSent(normalizedRecentMessages, "nutritionworks.online") &&
+      !/\b(website|site|link|pagina|recept|recepten|inspiratie|kwijt|nogmaals|opnieuw|stuur)\b/i.test(
+        normalizedMessage
+      )
+    ) {
+      reply = stripRepeatedWebsiteBlock(reply);
+    }
 
     // Give OpenAI a short grace period to finish after ElevenLabs is done.
     // If it hasn't returned by then, give up and send empty updates so the
