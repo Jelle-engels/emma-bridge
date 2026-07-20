@@ -176,6 +176,20 @@ function cleanReplyText(value) {
     .trim();
 }
 
+// The website exists in three variants that must be tracked independently:
+// the plain site (Stap 4), the testimonials page (Stap 3) and the program
+// explanation page (decision help). All three contain "nutritionworks.online",
+// so plain-substring matching would let one block the others.
+const PLAIN_WEBSITE_LINK_PATTERN = /nutritionworks\.online(?!\/?#)/i;
+const TESTIMONIALS_LINK_PATTERN = /nutritionworks\.online\/?#testimonials/i;
+const PROGRAMMA_INFO_LINK_PATTERN = /nutritionworks\.online\/?#programma-info/i;
+
+function hasPatternBeenSent(messages, pattern) {
+  return messages.some(
+    (msg) => msg.role === "emma" && pattern.test(cleanText(msg.message_text))
+  );
+}
+
 // Deterministic removal of forbidden phrases the prompt alone could not
 // suppress reliably: "welcome back" openers and "are you still there?"
 // chasers. Applied to every reply.
@@ -246,9 +260,12 @@ function stripTrailingCoachingQuestions(value) {
 // current message does not explicitly ask for it.
 function stripRepeatedWebsiteBlock(value) {
   const text = cleanReplyText(value);
-  if (!text || !/nutritionworks\.online/i.test(text)) return text;
+  if (!text || !PLAIN_WEBSITE_LINK_PATTERN.test(text)) return text;
   const paragraphs = text.split("\n\n").filter((p) => {
-    if (/nutritionworks\.online/i.test(p)) return false;
+    if (TESTIMONIALS_LINK_PATTERN.test(p) || PROGRAMMA_INFO_LINK_PATTERN.test(p)) {
+      return true;
+    }
+    if (PLAIN_WEBSITE_LINK_PATTERN.test(p)) return false;
     if (/op deze pagina vind je/i.test(p)) return false;
     if (/volledig gratis/i.test(p)) return false;
     if (/kijk welk programma je aanspreekt/i.test(p)) return false;
@@ -472,6 +489,31 @@ function detectExplicitLanguageRequest(text) {
   return "";
 }
 
+// Country calling code -> customer country for PRICING. The checkout links
+// are universal; this only determines which price table row Emma quotes.
+// Unknown prefix / BSUID -> "UK" (business decision: UK prices as fallback).
+const PHONE_PREFIX_COUNTRY = {
+  "31": "NL",
+  "32": "BE",
+  "33": "FR",
+  "34": "ES",
+  "39": "IT",
+  "44": "UK",
+  "48": "PL",
+  "49": "DE",
+  "351": "PT",
+};
+
+function detectCountryFromPhone(userId) {
+  const value = cleanText(userId).replace(/^\+/, "");
+  if (!/^[0-9]{10,15}$/.test(value)) return "";
+  for (const len of [3, 2, 1]) {
+    const prefix = value.slice(0, len);
+    if (PHONE_PREFIX_COUNTRY[prefix]) return PHONE_PREFIX_COUNTRY[prefix];
+  }
+  return "";
+}
+
 // Returns one of SUPPORTED_LANGUAGES, "other" (confidently detected but not a
 // supported language), or "" (too short / undetermined).
 function detectLanguageFromText(text) {
@@ -618,7 +660,7 @@ function hasPriceBeenMentioned(messages) {
   // Exclusive, combos, plus loose upgrade products), in either € notation
   // or "euro" form, plus generic price phrasings.
   const priceRegex =
-    /€\s*(?:54|99|108|123|135|194|199|204|223|254|346|358|379|417|477|481|600|602|725)\b|(?:54|99|108|123|135|194|199|204|223|254|346|358|379|417|477|481|600|602|725)\s*euro\b|programma kost|kost in totaal|totaalprijs/i;
+    /€\s*\d|£\s*\d|\d\s*zł|\d+\s*euro\b|programma kost|kost in totaal|totaalprijs/i;
   return messages.some(
     (msg) => msg.role === "emma" && priceRegex.test(msg.message_text)
   );
@@ -633,7 +675,9 @@ function hasCheckoutLinkBeenSent(messages) {
   return messages.some(
     (msg) =>
       msg.role === "emma" &&
-      /tr\.ee\/bestellen-(?:nl|be)-/i.test(msg.message_text)
+      /tr\.ee\/(?:bestellen-(?:nl|be)-|(?:basic|beauty|deluxe|exclusive)-(?:van|choc|mix)|control1x)/i.test(
+        msg.message_text
+      )
   );
 }
 
@@ -642,14 +686,6 @@ function hasWhatsappGroupLinkBeenSent(messages) {
     (msg) =>
       msg.role === "emma" &&
       /chat\.whatsapp\.com/i.test(msg.message_text)
-  );
-}
-
-function hasAskedCountry(messages) {
-  return messages.some(
-    (msg) =>
-      msg.role === "emma" &&
-      /nederland of belgi[eë]|welk land|in welk land/i.test(msg.message_text)
   );
 }
 
@@ -666,15 +702,6 @@ function hasAskedTaste(messages) {
       /welke smaak|chocolade.*vanille|vanille.*chocolade|half-half|smaak complete/i.test(
         msg.message_text
       )
-  );
-}
-
-function hasReceivedCountryAnswer(messages) {
-  return messages.some(
-    (msg) =>
-      msg.role === "user" &&
-      (/\b(nederland|belgi[eë])(?![a-z])/i.test(msg.message_text) ||
-        /(?:^|\s)(nl|be)(?:$|\s|[\.!,?])/i.test(msg.message_text))
   );
 }
 
@@ -804,6 +831,21 @@ const CONTROL_COMBO_PATTERN =
 function parseCheckoutLinkSKU(url) {
   if (!url) return null;
 
+  // Universal links (2026): tr.ee/Basic-Van, tr.ee/Deluxe-Mix-Control, ...
+  const universalMatch = url.match(
+    /tr\.ee\/(basic|beauty|deluxe|exclusive)-(?:van|choc|mix)(-control)?/i
+  );
+  if (universalMatch) {
+    const lower = universalMatch[1].toLowerCase();
+    const program = lower.charAt(0).toUpperCase() + lower.slice(1);
+    const hasControl = Boolean(universalMatch[2]);
+    return { program, hasControl };
+  }
+  if (/tr\.ee\/control1x(?:\b|\/|\?|$)/i.test(url)) {
+    return { program: "", hasControl: true };
+  }
+
+  // Legacy country links, kept so running conversations still validate.
   const programMatch = url.match(
     /tr\.ee\/bestellen-(?:nl|be)-(basic|beauty|deluxe|exclusive)(?:-(?:choc|van|mix))?(-control)?/i
   );
@@ -813,7 +855,6 @@ function parseCheckoutLinkSKU(url) {
     const hasControl = Boolean(programMatch[2]);
     return { program, hasControl };
   }
-
   if (/tr\.ee\/bestellen-(?:nl|be)-control(?:\b|\/|\?|$)/i.test(url)) {
     return { program: "", hasControl: true };
   }
@@ -824,7 +865,8 @@ function parseCheckoutLinkSKU(url) {
 // Walks backward through Emma's messages to find the most recent tr.ee
 // checkout URL she sent. Prefers the current reply if it contains a link.
 function findLastEmmaCheckoutLink(messages, currentReply) {
-  const urlRegex = /(https?:\/\/tr\.ee\/bestellen-[a-z0-9-]+)/i;
+  const urlRegex =
+    /(https?:\/\/tr\.ee\/(?:bestellen-[a-z0-9-]+|(?:basic|beauty|deluxe|exclusive)-(?:van|choc|mix)(?:-control)?|control1x))/i;
 
   if (currentReply) {
     const match = cleanText(currentReply).match(urlRegex);
@@ -1093,6 +1135,7 @@ function isNewUser({ recentMessages, lastSummary }) {
 
 function buildContextBlock({
   conversation_language,
+  customer_country,
   customer_status,
   current_phase,
   goal,
@@ -1120,20 +1163,22 @@ function buildContextBlock({
     recent_messages,
     "youtube.com/@Nutrition-Works"
   );
-  const websiteLinkAlreadySent = hasLinkBeenSent(
+  const websiteLinkAlreadySent = hasPatternBeenSent(
     recent_messages,
-    "nutritionworks.online"
+    PLAIN_WEBSITE_LINK_PATTERN
   );
-  const facebookGroupLinkAlreadySent = hasLinkBeenSent(
+  const testimonialsLinkAlreadySent = hasPatternBeenSent(
     recent_messages,
-    "facebook.com/groups/HealthyLifestylePlanNL"
+    TESTIMONIALS_LINK_PATTERN
+  );
+  const programmaInfoLinkAlreadySent = hasPatternBeenSent(
+    recent_messages,
+    PROGRAMMA_INFO_LINK_PATTERN
   );
   const priceAlreadyMentioned = hasPriceBeenMentioned(recent_messages);
   const checkoutLinkAlreadySent = hasCheckoutLinkBeenSent(recent_messages);
   const whatsappGroupLinkAlreadySent = hasWhatsappGroupLinkBeenSent(recent_messages);
-  const countryAlreadyAsked = hasAskedCountry(recent_messages);
   const tasteAlreadyAsked = hasAskedTaste(recent_messages);
-  const countryAnswerReceived = hasReceivedCountryAnswer(recent_messages);
   const tasteAnswerReceived = hasReceivedTasteAnswer(recent_messages);
   const controlAnswerReceived = hasReceivedControlAnswer(recent_messages);
   const orderNumberAlreadyAsked = hasAskedOrderNumber(recent_messages);
@@ -1149,17 +1194,17 @@ function buildContextBlock({
       ...state,
       testimonial_already_sent: testimonialAlreadySent,
       website_link_already_sent: websiteLinkAlreadySent,
-      facebook_group_link_already_sent: facebookGroupLinkAlreadySent,
+      testimonials_link_already_sent: testimonialsLinkAlreadySent,
+      programma_info_link_already_sent: programmaInfoLinkAlreadySent,
       price_already_mentioned: priceAlreadyMentioned,
       checkout_link_already_sent: checkoutLinkAlreadySent,
       whatsapp_group_link_already_sent: whatsappGroupLinkAlreadySent,
-      country_already_asked: countryAlreadyAsked,
       taste_already_asked: tasteAlreadyAsked,
-      country_answer_received: countryAnswerReceived,
       taste_answer_received: tasteAnswerReceived,
       control_answer_received: controlAnswerReceived,
       order_number_already_asked: orderNumberAlreadyAsked,
       conversation_language: cleanText(conversation_language) || "nl",
+      customer_country: cleanText(customer_country) || "UK",
       order_validation_server_side: true,
     },
     crm_memory: {
@@ -1192,10 +1237,11 @@ function buildContextBlock({
         "Vraag NOOIT of de klant er nog is en jaag nooit op (geen Ben je er nog, Lukt het, Heb je al gekeken). Een emoji of kort bericht is een gewoon bericht: reageer er kort en warm op. Follow-ups gebeuren handmatig, nooit door jou.",
         "Als testimonial_already_sent true is: stuur de testimonial-link niet opnieuw, tenzij de klant er expliciet om vraagt.",
         "Als website_link_already_sent true is: stuur de website-link en het freebies-blok NOOIT opnieuw, tenzij de klant er expliciet om vraagt. Geef bij twijfel kort persoonlijk advies in eigen woorden, zonder link.",
-        "Als facebook_group_link_already_sent true is: deel de Facebook-groep link NOOIT opnieuw, tenzij de klant er expliciet om vraagt.",
+        "Als testimonials_link_already_sent true is: stuur de testimonials-link NIET opnieuw, tenzij de klant er expliciet om vraagt — verwijs in woorden naar de resultatenpagina.",
+        "Als programma_info_link_already_sent true is: stuur de programma-uitleg link NIET opnieuw, tenzij de klant er expliciet om vraagt.",
         "Uitleggen betekent uitleggen in eigen woorden. Een link sturen is geen uitleg; stuur nooit een eerder gestuurde link opnieuw als vervanging van uitleg.",
         "Als price_already_mentioned true is: noem de prijs niet opnieuw, tenzij de klant ernaar vraagt.",
-        "Als country_already_asked true is: vraag niet opnieuw naar Nederland of België, tenzij het antwoord nog ontbreekt en het direct nodig is voor checkout.",
+        "Vraag NOOIT naar het land van de klant. De checkout-links zijn universeel en openen automatisch in het juiste land met de juiste prijzen.",
         "Als checkout_link_already_sent true is: stuur geen nieuwe checkout-link, tenzij de klant er expliciet opnieuw om vraagt.",
         "Als whatsapp_group_link_already_sent true is: behandel de klant als gevalideerde klant en ga over naar coachingsmodus.",
         "In coachingsmodus: 100% coaching. Geen salesflow, geen prijs, geen checkout, geen upsell en geen productaanbevelingen uit jezelf. Verkoop alleen wanneer de klant er expliciet zelf om vraagt (bijvoorbeeld naar een specifiek product of als reactie op een broadcast-bericht). De WhatsApp-groep link alleen opnieuw delen als de klant er expliciet om vraagt.",
@@ -1515,6 +1561,7 @@ async function getStructuredUpdates({
 async function getElevenReply({
   userId,
   conversationLanguage,
+  customerCountry,
   message,
   customerStatus,
   currentPhase,
@@ -1625,17 +1672,26 @@ async function getElevenReply({
                 "Never translate the Dutch template messages literally: they define structure, content, emojis and links only. Write them the way a native speaker would naturally phrase them.",
                 "Never switch languages on your own; the server controls the conversation language.",
               ].join("\n");
+        const countryLine =
+          conversationLanguage === "nl" || !conversationLanguage
+            ? `KLANTLAND: ${customerCountry || "UK"} — gebruik ALTIJD de prijzen van dit land (tabel 4.1b).`
+            : `CUSTOMER COUNTRY: ${customerCountry || "UK"} — ALWAYS use this country's prices (table 4.1b).`;
+        const languageLockFull = `${languageLock}\n${countryLine}`;
         // Per-turn hard guards, injected into the system prompt via the
         // {{turn_guards}} dynamic variable. Flags inside the JSON context
         // proved too weak (Emma re-pasted the website block after a side
         // question); guards at the top of the system prompt stick.
-        const guardWebsiteSent = hasLinkBeenSent(
+        const guardWebsiteSent = hasPatternBeenSent(
           recentMessages,
-          "nutritionworks.online"
+          PLAIN_WEBSITE_LINK_PATTERN
         );
-        const guardFacebookSent = hasLinkBeenSent(
+        const guardTestimonialsSent = hasPatternBeenSent(
           recentMessages,
-          "facebook.com/groups/HealthyLifestylePlanNL"
+          TESTIMONIALS_LINK_PATTERN
+        );
+        const guardProgrammaInfoSent = hasPatternBeenSent(
+          recentMessages,
+          PROGRAMMA_INFO_LINK_PATTERN
         );
         const guardCheckoutSent = hasCheckoutLinkBeenSent(recentMessages);
         const guardPriceMentioned = hasPriceBeenMentioned(recentMessages);
@@ -1645,9 +1701,14 @@ async function getElevenReply({
             'De website-link en het freebies-blok zijn AL gestuurd. Stuur ze NIET opnieuw uit jezelf — verwijs in woorden naar "de pagina die ik je stuurde". Alleen opnieuw sturen als de klant er expliciet om vraagt (bijvoorbeeld link kwijt), en dan alleen de kale link zonder freebies-blok. In coaching-modus mag de link alleen gedeeld worden als recepten-tool wanneer de klant zelf om recepten of inspiratie vraagt.'
           );
         }
-        if (guardFacebookSent) {
+        if (guardTestimonialsSent) {
           guardLines.push(
-            "De Facebook-groep link is AL gedeeld. NIET opnieuw sturen, tenzij de klant er expliciet om vraagt."
+            "De testimonials-link is AL gedeeld. NIET opnieuw sturen, tenzij de klant er expliciet om vraagt — verwijs in woorden naar de resultatenpagina."
+          );
+        }
+        if (guardProgrammaInfoSent) {
+          guardLines.push(
+            "De programma-uitleg link is AL gedeeld. NIET opnieuw sturen, tenzij de klant er expliciet om vraagt."
           );
         }
         if (guardCheckoutSent) {
@@ -1660,11 +1721,6 @@ async function getElevenReply({
             "De prijs is AL genoemd. Niet herhalen, tenzij de klant ernaar vraagt."
           );
         }
-        if (hasReceivedCountryAnswer(recentMessages)) {
-          guardLines.push(
-            "Het land is AL door de klant gegeven — vraag er NOOIT meer naar. Pak het antwoord uit de gespreksgeschiedenis."
-          );
-        }
         if (hasReceivedTasteAnswer(recentMessages)) {
           guardLines.push(
             "De smaak is AL door de klant gegeven — vraag er NOOIT meer naar. Pak het antwoord uit de gespreksgeschiedenis."
@@ -1672,7 +1728,12 @@ async function getElevenReply({
         }
         if (hasReceivedControlAnswer(recentMessages)) {
           guardLines.push(
-            "De Control-vraag is AL beantwoord — vraag er NOOIT meer naar. Zijn product, land en smaak bekend: stuur NU direct de juiste checkout-link (sectie 5.3)."
+            "De Control-vraag is AL beantwoord — vraag er NOOIT meer naar. Zijn product en smaak bekend: stuur NU direct de juiste checkout-link (sectie 5.3)."
+          );
+        }
+        if ((customerCountry || "").toUpperCase() === "PT") {
+          guardLines.push(
+            "Deze klant zit in Portugal: Control is daar NIET beschikbaar. Sla de Control-upsell volledig over en verkoop nooit Control aan deze klant."
           );
         }
         const turnGuards =
@@ -1682,6 +1743,7 @@ async function getElevenReply({
 
         const contextBlock = buildContextBlock({
           conversation_language: conversationLanguage,
+          customer_country: customerCountry,
           customer_status: customerStatus,
           current_phase: currentPhase,
           goal,
@@ -1709,7 +1771,7 @@ async function getElevenReply({
             },
             dynamic_variables: {
               coaching_banner: coachingBanner,
-              language_lock: languageLock,
+              language_lock: languageLockFull,
               turn_guards: turnGuards,
             },
             user_id: userId,
@@ -1905,6 +1967,10 @@ app.post("/chat", async (req, res) => {
     languageUpdate = conversationLanguage;
   }
 
+  // Customer country for pricing. The checkout links themselves are universal;
+  // this only selects the price-table row. Unknown prefix/BSUID -> UK.
+  const customerCountry = detectCountryFromPhone(normalizedUserId) || "UK";
+
   diag("REQUEST_PARSED", {
     user_id: normalizedUserId,
     message_length: normalizedMessage.length,
@@ -2042,6 +2108,7 @@ app.post("/chat", async (req, res) => {
     const replyPromise = getElevenReply({
       userId: normalizedUserId,
       conversationLanguage,
+      customerCountry,
       message: normalizedMessage,
       customerStatus: alreadyValidated
         ? "customer"
@@ -2128,7 +2195,7 @@ app.post("/chat", async (req, res) => {
     // already sent and the customer did not explicitly ask for it (or for
     // recipes/inspiration), a repeated block is removed from the reply.
     if (
-      hasLinkBeenSent(normalizedRecentMessages, "nutritionworks.online") &&
+      hasPatternBeenSent(normalizedRecentMessages, PLAIN_WEBSITE_LINK_PATTERN) &&
       !/\b(website|site|link|pagina|recept|recepten|inspiratie|kwijt|nogmaals|opnieuw|stuur)\b/i.test(
         normalizedMessage
       )
