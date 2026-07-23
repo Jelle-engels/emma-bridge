@@ -720,6 +720,51 @@ function hasReceivedTasteAnswer(messages) {
   );
 }
 
+function isTasteOnlyCheckoutAnswer(text) {
+  const normalized = cleanText(text).toLowerCase();
+  if (!normalized) return false;
+
+  // Only intercept short answers whose actual content is the taste choice.
+  // Longer messages or questions about Control remain available to Emma so she
+  // can answer them naturally before asking for the final yes/no choice.
+  return /^\s*(?:graag\s+)?(?:chocola(?:de|t)?|vanille|half[-\s]?half|half|mix|gemengd)(?:\s+graag)?[.!]?\s*$/i.test(
+    normalized
+  );
+}
+
+function controlFollowUpForLanguage(language, tasteText) {
+  const taste = cleanText(tasteText).toLowerCase();
+  const labels = {
+    nl: { chocolate: "chocolade", vanilla: "vanille", mix: "half-half" },
+    en: { chocolate: "chocolate", vanilla: "vanilla", mix: "half-and-half" },
+    fr: { chocolate: "chocolat", vanilla: "vanille", mix: "moitié-moitié" },
+    de: { chocolate: "Schokolade", vanilla: "Vanille", mix: "halb-halb" },
+    it: { chocolate: "cioccolato", vanilla: "vaniglia", mix: "metà e metà" },
+    es: { chocolate: "chocolate", vanilla: "vainilla", mix: "mitad y mitad" },
+    pl: { chocolate: "czekolada", vanilla: "wanilia", mix: "pół na pół" },
+  };
+
+  const key = /chocola/.test(taste)
+    ? "chocolate"
+    : /half|mix|gemengd/.test(taste)
+      ? "mix"
+      : "vanilla";
+  const lang = labels[language] ? language : "en";
+  const label = labels[lang][key];
+
+  const messages = {
+    nl: `Helder, ${label} genoteerd 🍦\n\nWil je Control erbij doen? 💚`,
+    en: `Got it, ${label} noted 🍦\n\nWould you like to add Control? 💚`,
+    fr: `Parfait, ${label} noté 🍦\n\nSouhaites-tu ajouter Control ? 💚`,
+    de: `Alles klar, ${label} ist notiert 🍦\n\nMöchtest du Control dazu nehmen? 💚`,
+    it: `Perfetto, ${label} segnato 🍦\n\nVuoi aggiungere Control? 💚`,
+    es: `Perfecto, ${label} anotado 🍦\n\n¿Quieres añadir Control? 💚`,
+    pl: `Jasne, zapisuję ${label} 🍦\n\nCzy chcesz dodać Control? 💚`,
+  };
+
+  return messages[lang];
+}
+
 // Detects whether the user has explicitly answered Emma's "wil je Control
 // erbij?" upsell question in the checkout flow. Looks for affirmative or
 // negative responses around Control, plus standalone yes/no answers that
@@ -1776,6 +1821,14 @@ async function getElevenReply({
           guardLines.push(
             "De Control-vraag is AL beantwoord — vraag er NOOIT meer naar. Zijn product en smaak bekend: stuur NU direct de juiste checkout-link (sectie 5.3)."
           );
+        } else if (
+          hasAskedTaste(recentMessages) &&
+          hasReceivedTasteAnswer(recentMessages) &&
+          (customerCountry || "").toUpperCase() !== "PT"
+        ) {
+          guardLines.push(
+            "De smaak is bekend, maar de Control-vraag is nog NIET beantwoord. Stuur GEEN checkout-link en neem Control niet aan. Vraag uitsluitend kort: 'Wil je Control erbij doen?' Pas na een duidelijk ja of nee mag de checkout-link worden gestuurd."
+          );
         }
         if ((customerCountry || "").toUpperCase() === "PT") {
           guardLines.push(
@@ -2237,6 +2290,40 @@ app.post("/chat", async (req, res) => {
     );
 
     reply = stripForbiddenReplyPhrases(cleanReplyText(reply));
+
+    // Deterministic checkout backstop: when Emma asked for both taste and
+    // Control and the customer replies with only a taste, Control is still an
+    // open choice. Never infer Control from earlier generic interest or a prior
+    // "ja", and never send a combo checkout-link until the customer explicitly
+    // answers the Control question.
+    const tasteKnownForCheckout = hasReceivedTasteAnswer([
+      ...normalizedRecentMessages,
+      { role: "user", message_text: normalizedMessage },
+    ]);
+    const controlAnsweredForCheckout = hasReceivedControlAnswer([
+      ...normalizedRecentMessages,
+      { role: "user", message_text: normalizedMessage },
+    ]);
+    const tasteWasAskedForCheckout = hasAskedTaste(normalizedRecentMessages);
+    const checkoutAlreadySentForCheckout = hasCheckoutLinkBeenSent(
+      normalizedRecentMessages
+    );
+
+    if (
+      !alreadyValidated &&
+      (customerCountry || "").toUpperCase() !== "PT" &&
+      tasteWasAskedForCheckout &&
+      tasteKnownForCheckout &&
+      !controlAnsweredForCheckout &&
+      !checkoutAlreadySentForCheckout &&
+      isTasteOnlyCheckoutAnswer(normalizedMessage)
+    ) {
+      reply = controlFollowUpForLanguage(
+        conversationLanguage,
+        normalizedMessage
+      );
+    }
+
     // Backstop: the Stap 4 website/freebies block is sent once. If it was
     // already sent and the customer did not explicitly ask for it (or for
     // recipes/inspiration), a repeated block is removed from the reply.
