@@ -169,6 +169,11 @@ function cleanReplyText(value) {
   return removePromptLeakTerms(value)
     .replace(/\r\n/g, "\n")
     .replace(/\r/g, "\n")
+    // Remove AI-tell dashes. " — " / " – " between words become a comma;
+    // a dash glued to text becomes nothing; a leading "- " bullet is kept.
+    .replace(/\s+[\u2014\u2013]\s+/g, ", ")
+    .replace(/(\S)[\u2014\u2013](\S)/g, "$1 $2")
+    .replace(/[\u2014\u2013]/g, "")
     .replace(/[ \t]+\n/g, "\n")
     .replace(/\n[ \t]+/g, "\n")
     .replace(/[ \t]{2,}/g, " ")
