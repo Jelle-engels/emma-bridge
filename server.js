@@ -947,19 +947,20 @@ function extractPurchasedProgram(messages, currentReply) {
   return findProgramInText(confirmationText);
 }
 
-function extractInterestedInProgram(messages, currentUserMessage, currentReply) {
-  // Interest in a program can be expressed anywhere in the conversation by
-  // either Emma (offer) or the user (request). Take the LAST mention.
+function extractInterestedInProgram(messages, currentUserMessage) {
+  // Program interest is based only on the customer's own statements or
+  // choices. A program suggested by Emma must never be stored as customer
+  // interest. Take the customer's LAST explicit program mention.
   let lastMatch = "";
 
   for (const msg of messages) {
+    if (msg.role !== "user") continue;
     const found = findProgramInText(cleanText(msg.message_text));
     if (found) lastMatch = found;
   }
+
   const userFound = findProgramInText(cleanText(currentUserMessage));
   if (userFound) lastMatch = userFound;
-  const replyFound = findProgramInText(cleanText(currentReply));
-  if (replyFound) lastMatch = replyFound;
 
   return lastMatch;
 }
@@ -989,18 +990,58 @@ function deriveHasControl(messages, currentReply, programName) {
   return CONTROL_COMBO_PATTERN.test(confirmationText) ? "ja" : "nee";
 }
 
-function deriveInterestedInControl(messages, currentUserMessage, currentReply) {
-  // Customers come in for Control, so "ja" is the safe default once Control
-  // has been mentioned anywhere in the conversation by user or Emma.
-  const allTexts = [];
-  for (const msg of messages) {
-    if (msg.message_text) allTexts.push(cleanText(msg.message_text));
-  }
-  if (currentUserMessage) allTexts.push(cleanText(currentUserMessage));
-  if (currentReply) allTexts.push(cleanText(currentReply));
+function deriveInterestedInControl(messages, currentUserMessage) {
+  // Store Control interest only when the customer shows demonstrably positive
+  // interest. Emma mentioning or explaining Control is never sufficient.
+  // Negative answers are deliberately returned as an empty update so they can
+  // never be stored as positive interest.
+  const positiveWithControl =
+    /(?:\b(?:ja|jazeker|graag|prima|zeker|doe\s*maa?r[ts]?|inderdaad|natuurlijk|oke|ok|yes|sure)\b.{0,40}\bcontrol\b|\bcontrol\b.{0,40}\b(?:ja|jazeker|graag|prima|zeker|doe\s*maa?r[ts]?|inderdaad|natuurlijk|oke|ok|yes|sure|erbij|toevoegen|nemen|wil|bestellen)\b)/i;
+  const negativeWithControl =
+    /(?:\b(?:nee|geen|zonder|liever\s+niet|laat\s+maar)\b.{0,40}\bcontrol\b|\bcontrol\b.{0,40}\b(?:nee|niet|geen|zonder|liever\s+niet|laat\s+maar)\b)/i;
+  const standalonePositive =
+    /^\s*(?:ja|jazeker|graag|prima|doe\s*maa?r[ts]?|inderdaad|natuurlijk|zeker|oke|ok|jep|yes|sure)(?:\s+(?:graag|zeker|prima|doe\s*maa?r[ts]?|natuurlijk))?\s*[.!]?\s*$/i;
+  const standaloneNegative =
+    /^\s*(?:nee|nope|geen|niks)(?:,?\s*(?:dank\s*je(?:\s*wel)?|bedankt|laat\s+maar|hoor|joh))?\s*[.!]?\s*$/i;
 
-  const joined = allTexts.join(" ");
-  return CONTROL_MENTION_PATTERN.test(joined) ? "ja" : "";
+  let lastEmmaControlAsk = -1;
+  const emmaControlQuestionPattern =
+    /control\s+(?:er\s*(?:gelijk\s+)?bij|toevoegen)|\book\s+control\b/i;
+
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg.role === "emma" && emmaControlQuestionPattern.test(cleanText(msg.message_text))) {
+      lastEmmaControlAsk = i;
+      break;
+    }
+  }
+
+  const customerTexts = [];
+  for (let i = 0; i < messages.length; i++) {
+    if (messages[i].role === "user") {
+      customerTexts.push({ index: i, text: cleanText(messages[i].message_text) });
+    }
+  }
+  if (currentUserMessage) {
+    customerTexts.push({ index: messages.length, text: cleanText(currentUserMessage) });
+  }
+
+  for (let i = customerTexts.length - 1; i >= 0; i--) {
+    const { index, text } = customerTexts[i];
+    if (!text) continue;
+
+    if (negativeWithControl.test(text)) return "";
+    if (positiveWithControl.test(text)) return "ja";
+
+    // A simple "ja" counts when it answers the latest still-open Control
+    // question. Intervening Emma explanations do not close that question.
+    if (lastEmmaControlAsk >= 0 && index > lastEmmaControlAsk) {
+      if (standaloneNegative.test(text)) return "";
+      if (standalonePositive.test(text)) return "ja";
+    }
+  }
+
+  return "";
 }
 
 function derivePurchaseFields({
@@ -1009,25 +1050,25 @@ function derivePurchaseFields({
   currentReply,
   whatsappGroupLinkSentNowOrEarlier,
 }) {
-  // Hard gate: order number from user AND WhatsApp group link sent.
+  // Hard gate: a valid JP04 order number from the user AND a checkout link
+  // sent by Emma. The checkout URL is the canonical purchased SKU.
   const orderNumberPresent = userMessagesContainOrderNumber(
     recentMessages,
     currentUserMessage
   );
 
-  const validated = orderNumberPresent && whatsappGroupLinkSentNowOrEarlier;
+  const checkoutLink = findLastEmmaCheckoutLink(recentMessages, currentReply);
+  const validated = orderNumberPresent && Boolean(checkoutLink);
 
   // interested_in_program / interested_in_control can be derived independently
   // of the purchase trigger (a customer can be "interested" before buying).
   const interestedInProgram = extractInterestedInProgram(
     recentMessages,
-    currentUserMessage,
-    currentReply
+    currentUserMessage
   );
   const interestedInControlSignal = deriveInterestedInControl(
     recentMessages,
-    currentUserMessage,
-    currentReply
+    currentUserMessage
   );
 
   if (!validated) {
@@ -1054,7 +1095,7 @@ function derivePurchaseFields({
     purchased_program: purchasedProgram,
     has_control: hasControl,
     interested_in_program: interestedInProgram,
-    interested_in_control: interestedInControlSignal || "ja",
+    interested_in_control: interestedInControlSignal,
   };
 }
 
@@ -1075,7 +1116,7 @@ function detectState({
   const latest = cleanText(currentMessage).toLowerCase();
 
   const hasMedicalTrigger =
-    /\b(medicatie|medicijnen|zwanger|borstvoeding|diabetes|hart|lever|nieren|darmziekte|eetstoornis|arts|apotheker|veilig bij|mag dit met)\b/i.test(
+    /\b(zwanger|zwangerschap|borstvoeding|actieve?\s+chemo|chemo(?:therapie)?|eetstoornis|anorexia|boulimia|binge[-\s]?eating)\b/i.test(
       latest
     );
 
@@ -1209,7 +1250,7 @@ function buildContextBlock({
       control_answer_received: controlAnswerReceived,
       order_number_already_asked: orderNumberAlreadyAsked,
       conversation_language: cleanText(conversation_language) || "nl",
-      customer_country: cleanText(customer_country) || "UK",
+      customer_country: cleanText(customer_country) || "UNKNOWN",
       order_validation_server_side: true,
     },
     crm_memory: {
@@ -1444,17 +1485,17 @@ async function getStructuredUpdates({
     "- Geef de huidige fase terug zodra die verandert ten opzichte van current_phase.",
     "- Als de fase niet duidelijk verandert: lege string.",
     "",
-    "interested_in_program_update — Welk specifiek programma (Basic, Beauty, Deluxe of Exclusive) in het gesprek expliciet bij naam wordt genoemd door de klant of door Emma.",
+    "interested_in_program_update — Welk specifiek programma (Basic, Beauty, Deluxe of Exclusive) de klant zelf expliciet noemt of kiest.",
     "- Geldige waarden: Basic / Beauty / Deluxe / Exclusive / (lege string).",
-    "- Vul ALLEEN in als de exacte programmanaam (Basic, Beauty, Deluxe of Exclusive) letterlijk in het gesprek voorkomt.",
+    "- Vul ALLEEN in als de klant zelf de exacte programmanaam (Basic, Beauty, Deluxe of Exclusive) noemt of kiest.",
     "- Algemene koopintentie, het bestellen van Control, of interesse in afvallen tellen NIET als programma-interesse.",
     "- Kies nooit een default programma. Als geen programmanaam letterlijk is genoemd: lege string. Verzin nooit een programma.",
     "",
-    "interested_in_control_update — Of de klant interesse toont in Control of dat Control expliciet is besproken in het gesprek.",
-    "- Geldige waarden: ja / nee / (lege string).",
-    "- Vul \"ja\" alleen in als het woord 'Control' letterlijk in het gesprek voorkomt (door de klant of door Emma) en daaruit interesse blijkt.",
-    "- Vul \"nee\" alleen als de klant Control expliciet heeft afgewezen.",
-    "- Bij geen letterlijke vermelding van Control in het gesprek: lege string.",
+    "interested_in_control_update — Of de klant aantoonbaar positieve interesse toont in Control.",
+    "- Geldige waarden: ja / (lege string).",
+    "- Vul \"ja\" alleen in bij een positieve uitspraak of keuze van de klant, inclusief een kort contextueel antwoord zoals 'ja' op een openstaande Control-vraag.",
+    "- Een vermelding of suggestie van Emma is nooit voldoende.",
+    "- Negatieve antwoorden zoals 'nee', 'geen Control' en 'laat maar' geven altijd een lege string.",
     "",
     "purchased_program_update — Welk specifiek programma (Basic, Beauty, Deluxe of Exclusive) de klant heeft besteld.",
     "- Geldige waarden: Basic / Beauty / Deluxe / Exclusive / (lege string).",
@@ -1679,8 +1720,8 @@ async function getElevenReply({
               ].join("\n");
         const countryLine =
           conversationLanguage === "nl" || !conversationLanguage
-            ? `KLANTLAND: ${customerCountry || "UK"} — gebruik ALTIJD de prijzen van dit land (tabel 4.1b).`
-            : `CUSTOMER COUNTRY: ${customerCountry || "UK"} — ALWAYS use this country's prices (table 4.1b).`;
+            ? `KLANTLAND: ${customerCountry || "UNKNOWN"} — gebruik ALTIJD de prijzen van dit land (tabel 4.1b). Bij UNKNOWN gebruik je de prijzen in ponden, zonder het land als UK te behandelen.`
+            : `CUSTOMER COUNTRY: ${customerCountry || "UNKNOWN"} — ALWAYS use this country's prices (table 4.1b). For UNKNOWN use pound prices without treating the country as UK.`;
         const languageLockFull = `${languageLock}\n${countryLine}`;
         // Per-turn hard guards, injected into the system prompt via the
         // {{turn_guards}} dynamic variable. Flags inside the JSON context
@@ -1974,7 +2015,7 @@ app.post("/chat", async (req, res) => {
 
   // Customer country for pricing. The checkout links themselves are universal;
   // this only selects the price-table row. Unknown prefix/BSUID -> UK.
-  const customerCountry = detectCountryFromPhone(normalizedUserId) || "UK";
+  const customerCountry = detectCountryFromPhone(normalizedUserId) || "UNKNOWN";
 
   diag("REQUEST_PARSED", {
     user_id: normalizedUserId,
