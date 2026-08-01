@@ -38,16 +38,11 @@ const FALLBACK_REPLY =
 
 const WELCOME_MESSAGE =
   "Hallo, ik ben Emma 😊\n\n" +
-  "Ik ben de AI-assistent van Nutrition Works en ik help dagelijks mensen om hun doelen te bereiken 🤗✨\n\n" +
-  "We hebben al tienduizenden mensen geholpen en ik denk echt dat ik jou ook kan helpen 💚\n\n" +
-  "Om je zo goed mogelijk te helpen, mag je me meteen wat meer vertellen over jouw situatie 🙏\n\n" +
-  "Bijvoorbeeld:\n" +
-  "• je huidige gewicht\n" +
-  "• waar je naartoe wil\n" +
-  "• je leeftijd\n" +
-  "• wat je al geprobeerd hebt\n" +
-  "• waar je nu tegenaan loopt\n\n" +
-  "Hoe meer je deelt, hoe beter ik je kan helpen 🤗";
+  "Ik help dagelijks mensen om hun gezondheidsdoelen te bereiken en ik denk graag met je mee 🤗\n\n" +
+  "We hebben al tienduizenden mensen geholpen en ik denk dat ik jou ook goed kan helpen 💚\n\n" +
+  "Vertel eens, waar zou jij het allerliefst verandering in willen zien? 💚\n\n" +
+  "Je mag zo uitgebreid of juist zo kort antwoorden als je wilt. Alles is goed 🤗\n\n" +
+  "Vertel bijvoorbeeld iets over je doel, waar je tegenaan loopt of wat je al geprobeerd hebt.";
 
 // One hardcoded welcome message per supported language. This message never
 // touches the LLM, so the most-seen message is guaranteed correct in every
@@ -56,76 +51,46 @@ const WELCOME_MESSAGES = {
   nl: WELCOME_MESSAGE,
   en:
     "Hi, I'm Emma \u{1F60A}\n\n" +
-    "I'm the AI assistant at Nutrition Works and every day I help people reach their goals \u{1F917}\u2728\n\n" +
-    "We've already helped tens of thousands of people and I truly believe I can help you too \u{1F49A}\n\n" +
-    "To help you as well as possible, feel free to tell me a bit more about your situation right away \u{1F64F}\n\n" +
-    "For example:\n" +
-    "\u2022 your current weight\n" +
-    "\u2022 where you want to go\n" +
-    "\u2022 your age\n" +
-    "\u2022 what you've already tried\n" +
-    "\u2022 what you're struggling with right now\n\n" +
-    "The more you share, the better I can help you \u{1F917}",
+    "Every day I help people work toward their health goals, and I'm happy to think things through with you \u{1F917}\n\n" +
+    "We've already helped tens of thousands of people, and I believe I can help you too \u{1F49A}\n\n" +
+    "Tell me, what would you most like to see change? \u{1F49A}\n\n" +
+    "You can answer in as much or as little detail as you like. Anything is fine \u{1F917}\n\n" +
+    "For example, tell me about your goal, what you're struggling with, or what you've already tried.",
   fr:
     "Bonjour, je suis Emma \u{1F60A}\n\n" +
-    "Je suis l'assistante IA de Nutrition Works et j'aide chaque jour des personnes \u00e0 atteindre leurs objectifs \u{1F917}\u2728\n\n" +
-    "Nous avons d\u00e9j\u00e0 aid\u00e9 des dizaines de milliers de personnes et je pense sinc\u00e8rement pouvoir t'aider toi aussi \u{1F49A}\n\n" +
-    "Pour t'aider au mieux, n'h\u00e9site pas \u00e0 m'en dire un peu plus sur ta situation \u{1F64F}\n\n" +
-    "Par exemple :\n" +
-    "\u2022 ton poids actuel\n" +
-    "\u2022 ton objectif\n" +
-    "\u2022 ton \u00e2ge\n" +
-    "\u2022 ce que tu as d\u00e9j\u00e0 essay\u00e9\n" +
-    "\u2022 ce qui te bloque en ce moment\n\n" +
-    "Plus tu partages, mieux je peux t'aider \u{1F917}",
+    "J'aide chaque jour des personnes \u00e0 atteindre leurs objectifs de sant\u00e9 et je suis l\u00e0 pour r\u00e9fl\u00e9chir avec toi \u{1F917}\n\n" +
+    "Nous avons d\u00e9j\u00e0 aid\u00e9 des dizaines de milliers de personnes et je pense pouvoir bien t'aider toi aussi \u{1F49A}\n\n" +
+    "Dis-moi, qu'aimerais-tu le plus voir changer ? \u{1F49A}\n\n" +
+    "Tu peux r\u00e9pondre aussi bri\u00e8vement ou aussi pr\u00e9cis\u00e9ment que tu le souhaites. Tout est bon \u{1F917}\n\n" +
+    "Tu peux par exemple parler de ton objectif, de ce qui te bloque ou de ce que tu as d\u00e9j\u00e0 essay\u00e9.",
   de:
     "Hallo, ich bin Emma \u{1F60A}\n\n" +
-    "Ich bin die KI-Assistentin von Nutrition Works und helfe jeden Tag Menschen dabei, ihre Ziele zu erreichen \u{1F917}\u2728\n\n" +
-    "Wir haben schon zehntausenden Menschen geholfen und ich glaube wirklich, dass ich auch dir helfen kann \u{1F49A}\n\n" +
-    "Um dir so gut wie m\u00f6glich zu helfen, erz\u00e4hl mir gern direkt etwas mehr \u00fcber deine Situation \u{1F64F}\n\n" +
-    "Zum Beispiel:\n" +
-    "\u2022 dein aktuelles Gewicht\n" +
-    "\u2022 wo du hinm\u00f6chtest\n" +
-    "\u2022 dein Alter\n" +
-    "\u2022 was du schon ausprobiert hast\n" +
-    "\u2022 womit du gerade k\u00e4mpfst\n\n" +
-    "Je mehr du teilst, desto besser kann ich dir helfen \u{1F917}",
+    "Ich helfe jeden Tag Menschen dabei, ihre Gesundheitsziele zu erreichen, und denke gern gemeinsam mit dir nach \u{1F917}\n\n" +
+    "Wir haben bereits Zehntausenden Menschen geholfen und ich glaube, dass ich auch dir gut helfen kann \u{1F49A}\n\n" +
+    "Erz\u00e4hl mal, was w\u00fcrdest du am allerliebsten ver\u00e4ndern? \u{1F49A}\n\n" +
+    "Du kannst so ausf\u00fchrlich oder so kurz antworten, wie du m\u00f6chtest. Alles ist in Ordnung \u{1F917}\n\n" +
+    "Erz\u00e4hl zum Beispiel etwas \u00fcber dein Ziel, woran du gerade scheiterst oder was du schon ausprobiert hast.",
   it:
     "Ciao, sono Emma \u{1F60A}\n\n" +
-    "Sono l'assistente IA di Nutrition Works e ogni giorno aiuto le persone a raggiungere i loro obiettivi \u{1F917}\u2728\n\n" +
-    "Abbiamo gi\u00e0 aiutato decine di migliaia di persone e credo davvero di poter aiutare anche te \u{1F49A}\n\n" +
-    "Per aiutarti al meglio, raccontami subito qualcosa in pi\u00f9 sulla tua situazione \u{1F64F}\n\n" +
-    "Per esempio:\n" +
-    "\u2022 il tuo peso attuale\n" +
-    "\u2022 dove vuoi arrivare\n" +
-    "\u2022 la tua et\u00e0\n" +
-    "\u2022 cosa hai gi\u00e0 provato\n" +
-    "\u2022 cosa ti blocca in questo momento\n\n" +
-    "Pi\u00f9 condividi, meglio posso aiutarti \u{1F917}",
+    "Ogni giorno aiuto le persone a raggiungere i loro obiettivi di salute e mi fa piacere ragionare insieme a te \u{1F917}\n\n" +
+    "Abbiamo gi\u00e0 aiutato decine di migliaia di persone e penso di poter aiutare bene anche te \u{1F49A}\n\n" +
+    "Dimmi, quale cambiamento vorresti vedere pi\u00f9 di ogni altra cosa? \u{1F49A}\n\n" +
+    "Puoi rispondere in modo dettagliato oppure molto breve. Va bene tutto \u{1F917}\n\n" +
+    "Per esempio, puoi raccontarmi il tuo obiettivo, ci\u00f2 che ti sta bloccando o cosa hai gi\u00e0 provato.",
   es:
     "Hola, soy Emma \u{1F60A}\n\n" +
-    "Soy la asistente de IA de Nutrition Works y cada d\u00eda ayudo a personas a alcanzar sus objetivos \u{1F917}\u2728\n\n" +
-    "Ya hemos ayudado a decenas de miles de personas y de verdad creo que tambi\u00e9n puedo ayudarte a ti \u{1F49A}\n\n" +
-    "Para ayudarte lo mejor posible, cu\u00e9ntame un poco m\u00e1s sobre tu situaci\u00f3n \u{1F64F}\n\n" +
-    "Por ejemplo:\n" +
-    "\u2022 tu peso actual\n" +
-    "\u2022 ad\u00f3nde quieres llegar\n" +
-    "\u2022 tu edad\n" +
-    "\u2022 qu\u00e9 has probado ya\n" +
-    "\u2022 con qu\u00e9 est\u00e1s luchando ahora\n\n" +
-    "Cuanto m\u00e1s compartas, mejor podr\u00e9 ayudarte \u{1F917}",
+    "Cada d\u00eda ayudo a personas a alcanzar sus objetivos de salud y me gusta pensar contigo en lo que necesitas \u{1F917}\n\n" +
+    "Ya hemos ayudado a decenas de miles de personas y creo que tambi\u00e9n puedo ayudarte bien a ti \u{1F49A}\n\n" +
+    "Cu\u00e9ntame, \u00bfqu\u00e9 es lo que m\u00e1s te gustar\u00eda cambiar? \u{1F49A}\n\n" +
+    "Puedes responder con todo el detalle que quieras o de forma muy breve. Todo est\u00e1 bien \u{1F917}\n\n" +
+    "Por ejemplo, puedes contarme cu\u00e1l es tu objetivo, qu\u00e9 te est\u00e1 frenando o qu\u00e9 has probado hasta ahora.",
   pl:
     "Cze\u015b\u0107, jestem Emma \u{1F60A}\n\n" +
-    "Jestem asystentk\u0105 AI w Nutrition Works i codziennie pomagam ludziom osi\u0105ga\u0107 ich cele \u{1F917}\u2728\n\n" +
-    "Pomogli\u015bmy ju\u017c dziesi\u0105tkom tysi\u0119cy os\u00f3b i naprawd\u0119 wierz\u0119, \u017ce Tobie te\u017c mog\u0119 pom\u00f3c \u{1F49A}\n\n" +
-    "\u017beby pom\u00f3c Ci jak najlepiej, opowiedz mi od razu troch\u0119 wi\u0119cej o swojej sytuacji \u{1F64F}\n\n" +
-    "Na przyk\u0142ad:\n" +
-    "\u2022 Twoja obecna waga\n" +
-    "\u2022 dok\u0105d zmierzasz\n" +
-    "\u2022 Tw\u00f3j wiek\n" +
-    "\u2022 czego ju\u017c pr\u00f3bowa\u0142a\u015b\n" +
-    "\u2022 z czym teraz si\u0119 zmagasz\n\n" +
-    "Im wi\u0119cej napiszesz, tym lepiej mog\u0119 Ci pom\u00f3c \u{1F917}",
+    "Ka\u017cdego dnia pomagam ludziom osi\u0105ga\u0107 cele zdrowotne i ch\u0119tnie zastanowi\u0119 si\u0119 razem z Tob\u0105, co b\u0119dzie najlepsze \u{1F917}\n\n" +
+    "Pomogli\u015bmy ju\u017c dziesi\u0105tkom tysi\u0119cy os\u00f3b i my\u015bl\u0119, \u017ce Tobie te\u017c mog\u0119 dobrze pom\u00f3c \u{1F49A}\n\n" +
+    "Powiedz, co najbardziej chcia\u0142aby\u015b zmieni\u0107? \u{1F49A}\n\n" +
+    "Mo\u017cesz odpowiedzie\u0107 bardzo szczeg\u00f3\u0142owo albo kr\u00f3tko. Ka\u017cda odpowied\u017a jest w porz\u0105dku \u{1F917}\n\n" +
+    "Mo\u017cesz na przyk\u0142ad opisa\u0107 sw\u00f3j cel, to, co Ci\u0119 teraz blokuje, albo czego ju\u017c pr\u00f3bowa\u0142a\u015b.",
 };
 
 const openai = process.env.OPENAI_API_KEY
