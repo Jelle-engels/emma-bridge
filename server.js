@@ -641,11 +641,12 @@ function hasCheckoutLinkBeenSent(messages) {
   // SKUs, all program+Control combos, loose upgrade products (Berry caps,
   // Fruit/Vegetable caps, Berry+Fruit/Vegetable combos), extra products
   // (Omega, Complete Bars, Superfood, Luminate, Vegetable Soup), in both
-  // Dutch and Belgian markets.
+  // Dutch and Belgian markets, plus the France 4-instalment links which all
+  // end in "-4x-fr".
   return messages.some(
     (msg) =>
       msg.role === "emma" &&
-      /tr\.ee\/(?:bestellen-(?:nl|be)-|(?:basic|beauty|deluxe|exclusive)-(?:van|choc|mix)|control1x)/i.test(
+      /tr\.ee\/(?:bestellen-(?:nl|be)-|(?:basic|beauty|deluxe|exclusive)-(?:van|choc|mix)|control1x|[a-z0-9-]+-4x-fr\b)/i.test(
         msg.message_text
       )
   );
@@ -846,6 +847,29 @@ const CONTROL_COMBO_PATTERN =
 function parseCheckoutLinkSKU(url) {
   if (!url) return null;
 
+  // France 4-instalment links (2026): tr.ee/basic-van-4x-fr,
+  // tr.ee/beauty-mixte-control-4x-fr, tr.ee/basic-mix-control-4x-fr, ...
+  // Note the taste token is "mixte" everywhere EXCEPT Basic+Control, which
+  // uses "mix". Both spellings are accepted here, and "mixte" is listed before
+  // "mix" so the longer token wins.
+  //
+  // This branch MUST run before the universal branch below. The universal
+  // pattern would otherwise match the "beauty-mix" prefix of
+  // "beauty-mixte-control-4x-fr", fail to see the "-control" that follows
+  // "mixte", and return hasControl=false for a combo order.
+  const franceMatch = url.match(
+    /tr\.ee\/(basic|beauty|deluxe|exclusive)-(?:van|choc|mixte|mix)(-control)?-4x-fr/i
+  );
+  if (franceMatch) {
+    const lower = franceMatch[1].toLowerCase();
+    const program = lower.charAt(0).toUpperCase() + lower.slice(1);
+    const hasControl = Boolean(franceMatch[2]);
+    return { program, hasControl };
+  }
+  if (/tr\.ee\/control-4x-fr(?:\b|\/|\?|$)/i.test(url)) {
+    return { program: "", hasControl: true };
+  }
+
   // Universal links (2026): tr.ee/Basic-Van, tr.ee/Deluxe-Mix-Control, ...
   const universalMatch = url.match(
     /tr\.ee\/(basic|beauty|deluxe|exclusive)-(?:van|choc|mix)(-control)?/i
@@ -880,8 +904,11 @@ function parseCheckoutLinkSKU(url) {
 // Walks backward through Emma's messages to find the most recent tr.ee
 // checkout URL she sent. Prefers the current reply if it contains a link.
 function findLastEmmaCheckoutLink(messages, currentReply) {
+  // The France alternative is listed FIRST so that a "-4x-fr" link is matched
+  // in full. Otherwise the universal alternative would match its "basic-van"
+  // prefix and silently drop the "-control" that follows "mixte".
   const urlRegex =
-    /(https?:\/\/tr\.ee\/(?:bestellen-[a-z0-9-]+|(?:basic|beauty|deluxe|exclusive)-(?:van|choc|mix)(?:-control)?|control1x))/i;
+    /(https?:\/\/tr\.ee\/(?:(?:basic|beauty|deluxe|exclusive)-(?:van|choc|mixte|mix)(?:-control)?-4x-fr|control-4x-fr|[a-z0-9-]+-4x-fr|bestellen-[a-z0-9-]+|(?:basic|beauty|deluxe|exclusive)-(?:van|choc|mix)(?:-control)?|control1x))/i;
 
   if (currentReply) {
     const match = cleanText(currentReply).match(urlRegex);
@@ -1759,7 +1786,7 @@ async function getElevenReply({
         }
         if (guardTestimonialsSent) {
           guardLines.push(
-            "De testimonials-link is AL gedeeld. NIET opnieuw sturen, tenzij de klant er expliciet om vraagt — verwijs in woorden naar de resultatenpagina."
+            "De testimonials-link is AL gedeeld. Stuur hem NIET opnieuw, ook niet bij twijfel of bezwaar (sectie 8.4 en 8.6) — dezelfde link twee keer sturen voelt automatisch. Verwijs in woorden naar de resultaten en vraag gerust of de klant ze al heeft kunnen bekijken. Twijfelt de klant vooral over WELK programma past: stuur dan de programma-uitleg pagina https://nutritionworks.online/#programma-info (mits die nog niet gedeeld is). Alleen als de klant expliciet om de testimonials-link vraagt, stuur je hem opnieuw."
           );
         }
         if (guardProgrammaInfoSent) {
@@ -1798,6 +1825,33 @@ async function getElevenReply({
         if ((customerCountry || "").toUpperCase() === "PT") {
           guardLines.push(
             "Deze klant zit in Portugal: Control is daar NIET beschikbaar. Sla de Control-upsell volledig over en verkoop nooit Control aan deze klant."
+          );
+        }
+        // France runs its own checkout flow. This guard is keyed on
+        // customer_country only (phone prefix), never on conversation_language:
+        // a French-speaking Belgian stays on the Belgian flow.
+        if ((customerCountry || "").toUpperCase() === "FR") {
+          guardLines.push(
+            [
+              "Deze klant zit in FRANKRIJK. De Frankrijk-flow geldt:",
+              "- Gebruik UITSLUITEND de checkout-links uit tabel 4.1c (die eindigen op -4x-fr). Gebruik NOOIT de universele links uit tabel 4.1, tenzij de klant zelf expliciet vraagt om alles in een keer te betalen.",
+              "- Betalen gaat in 4 maandtermijnen met creditcard. Noem NOOIT Klarna en noem NOOIT 3 termijnen.",
+              "- Noem prijzen alleen in het formaat 'EUR X x4'. Noem NOOIT een totaalbedrag en reken het totaal nooit voor de klant uit.",
+              "- De 10% korting en de 2,50 euro termijnkosten zitten al in het bedrag. Noem ze niet uit jezelf.",
+              "- Het is technisch een abonnement. Begin daar NOOIT zelf over. Vraagt de klant ernaar: eerlijk bevestigen, kort uitleggen dat het in het Juice Plus account met een paar klikken opgezegd wordt, en dat er anders na 4 maanden automatisch een nieuwe bestelling volgt.",
+              "- SEPA nooit aanraden of uit jezelf noemen. Alleen kort feitelijk uitleggen als de klant er expliciet naar vraagt.",
+              "- Alle programma's duren 4 maanden, ook Basic. Noem NOOIT 3 maanden en gebruik NOOIT het verhaal dat de capsules de vierde maand zijn.",
+              "- Vraagt de klant of 90 porties genoeg is voor 4 maanden: antwoord ja, elke keer in je eigen woorden en nooit met een vaste zin.",
+            ].join("\n")
+          );
+        } else {
+          // Counterpart to the France guard above. The France 4-instalment
+          // links and pricing live in the system prompt for every turn, so a
+          // customer outside France asking for 4 monthly payments (which the
+          // Dutch market genuinely used to offer) could otherwise pull Emma
+          // toward a "-4x-fr" link that does not work in their country.
+          guardLines.push(
+            "Deze klant zit NIET in Frankrijk. Betalen in 4 maandtermijnen bestaat hier NIET en de checkout-links uit tabel 4.1c (die eindigen op -4x-fr) mag je NOOIT sturen. Vraagt de klant om 4 termijnen, bijvoorbeeld omdat dat vroeger in Nederland kon: zeg kort en eerlijk dat dat niet meer kan en bied Klarna in 3 termijnen aan. Beloof nooit dat je het nakijkt of regelt, en noem Frankrijk of andere markten niet."
           );
         }
         const turnGuards =
