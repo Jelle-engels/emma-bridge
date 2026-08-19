@@ -56,13 +56,18 @@ const WELCOME_MESSAGES = {
     "Tell me, what would you most like to see change? \u{1F49A}\n\n" +
     "You can answer in as much or as little detail as you like. Anything is fine \u{1F917}\n\n" +
     "For example, tell me about your goal, what you're struggling with, or what you've already tried.",
+  // Frankrijk heeft een eigen openingsbericht, geschreven op conversie.
+  // Opzet: sociale bewijskracht eerst, dan een lage-drempelvraag naar doel EN
+  // grootste obstakel (samen precies de Stap 2-gate uit de prompt), met het
+  // kilo-aantal expliciet als optioneel. "Gratis" staat er bewust in: het haalt
+  // de belangrijkste onuitgesproken drempel weg voordat die ontstaat.
   fr:
     "Bonjour, je suis Emma \u{1F60A}\n\n" +
-    "J'aide chaque jour des personnes \u00e0 atteindre leurs objectifs de sant\u00e9 et je suis l\u00e0 pour r\u00e9fl\u00e9chir avec toi \u{1F917}\n\n" +
-    "Nous avons d\u00e9j\u00e0 aid\u00e9 des dizaines de milliers de personnes et je pense pouvoir bien t'aider toi aussi \u{1F49A}\n\n" +
-    "Dis-moi, qu'aimerais-tu le plus voir changer ? \u{1F49A}\n\n" +
-    "Tu peux r\u00e9pondre aussi bri\u00e8vement ou aussi pr\u00e9cis\u00e9ment que tu le souhaites. Tout est bon \u{1F917}\n\n" +
-    "Tu peux par exemple parler de ton objectif, de ce qui te bloque ou de ce que tu as d\u00e9j\u00e0 essay\u00e9.",
+    "J'accompagne chaque jour des personnes vers leurs objectifs de sant\u00e9, et j'ai d\u00e9j\u00e0 aid\u00e9 des milliers de personnes \u00e0 perdre du poids durablement, sans effet yo-yo \u{1F49A}\n\n" +
+    "Je suis convaincue que je peux t'aider toi aussi \u{1F917}\n\n" +
+    "Dis-moi, qu'est-ce que tu aimerais changer en ce moment, et qu'est-ce qui te bloque le plus ? \u{1F49A}\n\n" +
+    "Si tu as un nombre de kilos en t\u00eate, tu peux me le dire, mais ce n'est pas obligatoire. Raconte-moi simplement ce que tu as d\u00e9j\u00e0 essay\u00e9 \u{1F917}\n\n" +
+    "Quelques mots suffisent. Et rassure-toi : mes conseils sont enti\u00e8rement gratuits.",
   de:
     "Hallo, ich bin Emma \u{1F60A}\n\n" +
     "Ich helfe jeden Tag Menschen dabei, ihre Gesundheitsziele zu erreichen, und denke gern gemeinsam mit dir nach \u{1F917}\n\n" +
