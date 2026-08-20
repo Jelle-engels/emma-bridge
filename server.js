@@ -62,12 +62,11 @@ const WELCOME_MESSAGES = {
   // kilo-aantal expliciet als optioneel. "Gratis" staat er bewust in: het haalt
   // de belangrijkste onuitgesproken drempel weg voordat die ontstaat.
   fr:
-    "Bonjour, je suis Emma \u{1F60A}\n\n" +
-    "J'accompagne chaque jour des personnes vers leurs objectifs de sant\u00e9, et j'ai d\u00e9j\u00e0 aid\u00e9 des milliers de personnes \u00e0 perdre du poids durablement, sans effet yo-yo \u{1F49A}\n\n" +
-    "Je suis convaincue que je peux t'aider toi aussi \u{1F917}\n\n" +
-    "Dis-moi, qu'est-ce que tu aimerais changer en ce moment, et qu'est-ce qui te bloque le plus ? \u{1F49A}\n\n" +
-    "Si tu as un nombre de kilos en t\u00eate, tu peux me le dire, mais ce n'est pas obligatoire. Raconte-moi simplement ce que tu as d\u00e9j\u00e0 essay\u00e9 \u{1F917}\n\n" +
-    "Quelques mots suffisent. Et rassure-toi : mes conseils sont enti\u00e8rement gratuits.",
+    "Coucou ! \u{1F60A} Super que tu aies r\u00e9pondu !\n\n" +
+    "Tu souhaites perdre du poids ? Je serais ravie de t\u2019aider \u00e0 y arriver.\n\n" +
+    "J\u2019ai d\u00e9j\u00e0 accompagn\u00e9 des milliers de femmes et d\u2019hommes avec de tr\u00e8s beaux r\u00e9sultats, et surtout sans le fameux effet yo-yo tant redout\u00e9 !\n\n" +
+    "La plupart avaient pourtant d\u00e9j\u00e0 essay\u00e9 plein de choses, sans obtenir les r\u00e9sultats qu\u2019ils esp\u00e9raient.\n\n" +
+    "Est-ce que je peux te demander ce que tu as d\u00e9j\u00e0 essay\u00e9 ?",
   de:
     "Hallo, ich bin Emma \u{1F60A}\n\n" +
     "Ich helfe jeden Tag Menschen dabei, ihre Gesundheitsziele zu erreichen, und denke gern gemeinsam mit dir nach \u{1F917}\n\n" +
@@ -617,17 +616,6 @@ function getLastUserMessages(messages, limit = 3) {
     .filter((msg) => msg.role === "user" && msg.message_text)
     .slice(-limit)
     .map((msg) => msg.message_text);
-}
-
-function hasLinkBeenSent(messages, linkPart) {
-  const needle = cleanText(linkPart).toLowerCase();
-  if (!needle) return false;
-
-  return messages.some(
-    (msg) =>
-      msg.role === "emma" &&
-      cleanText(msg.message_text).toLowerCase().includes(needle)
-  );
 }
 
 function hasPriceBeenMentioned(messages) {
@@ -1247,10 +1235,6 @@ function buildContextBlock({
   const lastEmmaMessages = getLastEmmaMessages(recent_messages, 3);
   const lastUserMessages = getLastUserMessages(recent_messages, 3);
 
-  const testimonialAlreadySent = hasLinkBeenSent(
-    recent_messages,
-    "youtube.com/@Nutrition-Works"
-  );
   const websiteLinkAlreadySent = hasPatternBeenSent(
     recent_messages,
     PLAIN_WEBSITE_LINK_PATTERN
@@ -1280,7 +1264,6 @@ function buildContextBlock({
     agent_name: "Emma",
     runtime_state: {
       ...state,
-      testimonial_already_sent: testimonialAlreadySent,
       website_link_already_sent: websiteLinkAlreadySent,
       testimonials_link_already_sent: testimonialsLinkAlreadySent,
       programma_info_link_already_sent: programmaInfoLinkAlreadySent,
@@ -1323,7 +1306,6 @@ function buildContextBlock({
         "Als het gesprek bestaand is: stel jezelf niet opnieuw voor en gebruik geen startbericht.",
         "Zeg NOOIT welkom terug, goed dat je er weer bent of iets vergelijkbaars, en maak nooit opmerkingen over verstreken tijd. Begin altijd direct met je antwoord, alsof het gesprek gewoon doorloopt.",
         "Vraag NOOIT of de klant er nog is en jaag nooit op (geen Ben je er nog, Lukt het, Heb je al gekeken). Een emoji of kort bericht is een gewoon bericht: reageer er kort en warm op. Follow-ups gebeuren handmatig, nooit door jou.",
-        "Als testimonial_already_sent true is: stuur de testimonial-link niet opnieuw, tenzij de klant er expliciet om vraagt.",
         "Als website_link_already_sent true is: stuur de website-link en het freebies-blok NOOIT opnieuw, tenzij de klant er expliciet om vraagt. Geef bij twijfel kort persoonlijk advies in eigen woorden, zonder link.",
         "Als testimonials_link_already_sent true is: stuur de testimonials-link NIET opnieuw, tenzij de klant er expliciet om vraagt — verwijs in woorden naar de resultatenpagina.",
         "Als programma_info_link_already_sent true is: stuur de programma-uitleg link NIET opnieuw, tenzij de klant er expliciet om vraagt.",
