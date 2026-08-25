@@ -8,7 +8,6 @@ import { franc } from "franc-min";
 dotenv.config();
 
 const app = express();
-
 // Accept JSON bodies (Make scenarios that already work).
 app.use(express.json({ limit: "1mb" }));
 // Also accept application/x-www-form-urlencoded bodies. ManyChat (via Make)
@@ -32,560 +31,322 @@ const MAX_GOAL_CHARS = Number(process.env.MAX_GOAL_CHARS || 300);
 const MAX_OBJECTIONS_CHARS = Number(process.env.MAX_OBJECTIONS_CHARS || 400);
 const MAX_SHORT_FIELD_CHARS = Number(process.env.MAX_SHORT_FIELD_CHARS || 30);
 
-// De marker die ManyChat vóór de External Request in emma_reply zet. De
-// Condition-stap in de ManyChat-flow luidt "emma_reply isn't
-// WACHTEN_OP_ANTWOORD": staat de marker er nog, dan neemt de flow de rode tak
-// en wordt er niets naar de klant gestuurd. Deze constante bestaat nog voor
-// dat mechanisme, maar wordt op dit moment nergens als reply gebruikt.
-const NO_REPLY = "WACHTEN_OP_ANTWOORD";
-
-// Afsluitend bericht na een aangekondigd vertrek (v51).
-// De klant heeft gezegd dat ze weg moest, Emma heeft afscheid genomen, en er
-// komt alleen nog een "Ok" / "Merci" / duimpje binnen. Daar hoort geen nieuw
-// gesprek op te volgen, maar ook geen stilte: een enkel groen hart sluit de
-// uitwisseling netjes af. Het laatste bericht is van Emma, er staat geen vraag
-// open, en de klant kan zonder ongemak weggaan.
-//
-// Bewust taalonafhankelijk: een emoji leest in alle zeven talen hetzelfde.
-const CLOSING_HEART = "\u{1F49A}";
+const NO_REPLY = "__NO_REPLY__";
 
 const FALLBACK_REPLY =
-  "Er ging iets mis met mijn antwoord, kun je je bericht nog een keer sturen";
+    "Er ging iets mis met mijn antwoord, kun je je bericht nog een keer sturen";
 
 const WELCOME_MESSAGE =
-  "Hallo, ik ben Emma 😊\n\n" +
-  "Ik help dagelijks mensen om hun gezondheidsdoelen te bereiken en ik denk graag met je mee 🤗\n\n" +
-  "We hebben al tienduizenden mensen geholpen en ik denk dat ik jou ook goed kan helpen 💚\n\n" +
-  "Vertel eens, waar zou jij het allerliefst verandering in willen zien? 💚\n\n" +
-  "Je mag zo uitgebreid of juist zo kort antwoorden als je wilt. Alles is goed 🤗\n\n" +
-  "Vertel bijvoorbeeld iets over je doel, waar je tegenaan loopt of wat je al geprobeerd hebt.";
+    "Hallo, ik ben Emma \n\n" +
+    "Ik help dagelijks mensen om hun gezondheidsdoelen te bereiken en ik denk graag met je mee \n\n" +
+    "We hebben al tienduizenden mensen geholpen en ik denk dat ik jou ook goed kan helpen \n\n" +
+    "Vertel eens, waar zou jij het allerliefst verandering in willen zien? \n\n" +
+    "Je mag zo uitgebreid of juist zo kort antwoorden als je wilt. Alles is goed \n\n" +
+    "Vertel bijvoorbeeld iets over je doel, waar je tegenaan loopt of wat je al geprobeerd hebt.";
 
 // One hardcoded welcome message per supported language. This message never
 // touches the LLM, so the most-seen message is guaranteed correct in every
 // language. The Dutch text above is the reference version.
 const WELCOME_MESSAGES = {
-  nl: WELCOME_MESSAGE,
-  en:
-    "Hi, I'm Emma \u{1F60A}\n\n" +
-    "Every day I help people work toward their health goals, and I'm happy to think things through with you \u{1F917}\n\n" +
-    "We've already helped tens of thousands of people, and I believe I can help you too \u{1F49A}\n\n" +
-    "Tell me, what would you most like to see change? \u{1F49A}\n\n" +
-    "You can answer in as much or as little detail as you like. Anything is fine \u{1F917}\n\n" +
-    "For example, tell me about your goal, what you're struggling with, or what you've already tried.",
-  // Frankrijk heeft een eigen openingsbericht, geschreven op conversie.
-  // Opzet: sociale bewijskracht eerst, dan een lage-drempelvraag naar doel EN
-  // grootste obstakel (samen precies de Stap 2-gate uit de prompt), met het
-  // kilo-aantal expliciet als optioneel. "Gratis" staat er bewust in: het haalt
-  // de belangrijkste onuitgesproken drempel weg voordat die ontstaat.
-  fr:
-    "Coucou ! \u{1F60A} Super que tu aies répondu !\n\n" +
-    "Tu souhaites perdre du poids ? Je serais ravie de t’aider à y arriver.\n\n" +
-    "J’ai déjà accompagné des milliers de femmes et d’hommes avec de très beaux résultats, et surtout sans le fameux effet yo-yo tant redouté !\n\n" +
-    "La plupart avaient pourtant déjà essayé plein de choses, sans obtenir les résultats qu’ils espéraient.\n\n" +
-    "Est-ce que je peux te demander ce que tu as déjà essayé ?",
-  de:
-    "Hallo, ich bin Emma \u{1F60A}\n\n" +
-    "Ich helfe jeden Tag Menschen dabei, ihre Gesundheitsziele zu erreichen, und denke gern gemeinsam mit dir nach \u{1F917}\n\n" +
-    "Wir haben bereits Zehntausenden Menschen geholfen und ich glaube, dass ich auch dir gut helfen kann \u{1F49A}\n\n" +
-    "Erzähl mal, was würdest du am allerliebsten verändern? \u{1F49A}\n\n" +
-    "Du kannst so ausführlich oder so kurz antworten, wie du möchtest. Alles ist in Ordnung \u{1F917}\n\n" +
-    "Erzähl zum Beispiel etwas über dein Ziel, woran du gerade scheiterst oder was du schon ausprobiert hast.",
-  it:
-    "Ciao, sono Emma \u{1F60A}\n\n" +
-    "Ogni giorno aiuto le persone a raggiungere i loro obiettivi di salute e mi fa piacere ragionare insieme a te \u{1F917}\n\n" +
-    "Abbiamo già aiutato decine di migliaia di persone e penso di poter aiutare bene anche te \u{1F49A}\n\n" +
-    "Dimmi, quale cambiamento vorresti vedere più di ogni altra cosa? \u{1F49A}\n\n" +
-    "Puoi rispondere in modo dettagliato oppure molto breve. Va bene tutto \u{1F917}\n\n" +
-    "Per esempio, puoi raccontarmi il tuo obiettivo, ciò che ti sta bloccando o cosa hai già provato.",
-  es:
-    "Hola, soy Emma \u{1F60A}\n\n" +
-    "Cada día ayudo a personas a alcanzar sus objetivos de salud y me gusta pensar contigo en lo que necesitas \u{1F917}\n\n" +
-    "Ya hemos ayudado a decenas de miles de personas y creo que también puedo ayudarte bien a ti \u{1F49A}\n\n" +
-    "Cuéntame, ¿qué es lo que más te gustaría cambiar? \u{1F49A}\n\n" +
-    "Puedes responder con todo el detalle que quieras o de forma muy breve. Todo está bien \u{1F917}\n\n" +
-    "Por ejemplo, puedes contarme cuál es tu objetivo, qué te está frenando o qué has probado hasta ahora.",
-  pl:
-    "Cześć, jestem Emma \u{1F60A}\n\n" +
-    "Każdego dnia pomagam ludziom osiągać cele zdrowotne i chętnie zastanowię się razem z Tobą, co będzie najlepsze \u{1F917}\n\n" +
-    "Pomogliśmy już dziesiątkom tysięcy osób i myślę, że Tobie też mogę dobrze pomóc \u{1F49A}\n\n" +
-    "Powiedz, co najbardziej chciałabyś zmienić? \u{1F49A}\n\n" +
-    "Możesz odpowiedzieć bardzo szczegółowo albo krótko. Każda odpowiedź jest w porządku \u{1F917}\n\n" +
-    "Możesz na przykład opisać swój cel, to, co Cię teraz blokuje, albo czego już próbowałaś.",
-  // Europees Portugees (tu-vorm), zelfde opzet als de andere talen.
-  pt:
-    "Olá, sou a Emma \u{1F60A}\n\n" +
-    "Todos os dias ajudo pessoas a alcançar os seus objetivos de saúde e gosto de pensar contigo no que precisas \u{1F917}\n\n" +
-    "Já ajudámos dezenas de milhares de pessoas e acredito que também te posso ajudar \u{1F49A}\n\n" +
-    "Conta-me, o que é que mais gostarias de mudar? \u{1F49A}\n\n" +
-    "Podes responder com todo o detalhe que quiseres ou de forma muito breve. Está tudo bem \u{1F917}\n\n" +
-    "Por exemplo, podes contar-me qual é o teu objetivo, o que te está a travar ou o que já experimentaste.",
+    nl: WELCOME_MESSAGE,
+    en:
+      "Hi, I'm Emma \u{1F60A}\n\n" +
+      "Every day I help people work toward their health goals, and I'm happy to think things through with you \u{1F917}\n\n" +
+      "We've already helped tens of thousands of people, and I believe I can help you too \u{1F49A}\n\n" +
+      "Tell me, what would you most like to see change? \u{1F49A}\n\n" +
+      "You can answer in as much or as little detail as you like. Anything is fine \u{1F917}\n\n" +
+      "For example, tell me about your goal, what you're struggling with, or what you've already tried.",
+    // Frankrijk heeft een eigen openingsbericht, geschreven op conversie.
+    // Opzet: sociale bewijskracht eerst, dan een lage-drempelvraag naar doel EN
+    // grootste obstakel (samen precies de Stap 2-gate uit de prompt), met het
+    // kilo-aantal expliciet als optioneel. "Gratis" staat er bewust in: het haalt
+    // de belangrijkste onuitgesproken drempel weg voordat die ontstaat.
+    fr:
+      "Coucou ! \u{1F60A} Super que tu aies r\u00e9pondu !\n\n" +
+      "Tu souhaites perdre du poids ? Je serais ravie de t\u2019aider \u00e0 y arriver.\n\n" +
+      "J\u2019ai d\u00e9j\u00e0 accompagn\u00e9 des milliers de femmes et d\u2019hommes avec de tr\u00e8s beaux r\u00e9sultats, et surtout sans le fameux effet yo-yo tant redout\u00e9 !\n\n" +
+      "La plupart avaient pourtant d\u00e9j\u00e0 essay\u00e9 plein de choses, sans obtenir les r\u00e9sultats qu\u2019ilsesp\u00e9raient.\n\n" +
+      "Est-ce que je peux te demander ce que tu as d\u00e9j\u00e0 essay\u00e9 ?",
+    de:
+      "Hallo, ich bin Emma \u{1F60A}\n\n" +
+      "Ich helfe jeden Tag Menschen dabei, ihre Gesundheitsziele zu erreichen, und denke gern gemeinsam mit dir nach \u{1F917}\n\n" +
+     "Wir haben bereits Zehntausenden Menschen geholfen und ich glaube, dass ich auch dir gut helfen kann \u{1F49A}\n\n" +
+     "Erz\u00e4hl mal, was w\u00fcrdest du am allerliebsten ver\u00e4ndern? \u{1F49A}\n\n" +
+     "Du kannst so ausf\u00fchrlich oder so kurz antworten, wie du m\u00f6chtest. Alles ist in Ordnung \u{1F917}\n\n" +
+     "Erz\u00e4hl zum Beispiel etwas \u00fcber dein Ziel, woran du gerade scheiterst oder was du schon ausprobiert hast.",
+   it:
+     "Ciao, sono Emma \u{1F60A}\n\n" +
+     "Ogni giorno aiuto le persone a raggiungere i loro obiettivi di salute e mi fa piacere ragionare insieme a te \u{1F917}\n\n" +
+     "Abbiamo gi\u00e0 aiutato decine di migliaia di persone e penso di poter aiutare bene anche te \u{1F49A}\n\n" +
+     "Dimmi, quale cambiamento vorresti vedere pi\u00f9 di ogni altra cosa? \u{1F49A}\n\n" +
+     "Puoi rispondere in modo dettagliato oppure molto breve. Va bene tutto \u{1F917}\n\n" +
+     "Per esempio, puoi raccontarmi il tuo obiettivo, ci\u00f2 che ti sta bloccando o cosa hai gi\u00e0 provato.",
+   es:
+     "Hola, soy Emma \u{1F60A}\n\n" +
+     "Cada d\u00eda ayudo a personas a alcanzar sus objetivos de salud y me gusta pensar contigo en lo que necesitas \u{1F917}\n\n" +
+     "Ya hemos ayudado a decenas de miles de personas y creo que tambi\u00e9n puedo ayudarte bien a ti \u{1F49A}\n\n" +
+     "Cu\u00e9ntame, \u00bfqu\u00e9 es lo que m\u00e1s te gustar\u00eda cambiar? \u{1F49A}\n\n" +
+     "Puedes responder con todo el detalle que quieras o de forma muy breve. Todo est\u00e1 bien \u{1F917}\n\n" +
+     "Por ejemplo, puedes contarme cu\u00e1l es tu objetivo, qu\u00e9 te est\u00e1 frenando o qu\u00e9 has probado hasta ahora.",
+   pl:
+     "Cze\u015b\u0107, jestem Emma \u{1F60A}\n\n" +
+     "Ka\u017cdego dnia pomagam ludziom osi\u0105ga\u0107 cele zdrowotne i ch\u0119tnie zastanowi\u0119 si\u0119 razem z Tob\u0105, co b\u0119dzie najlepsze \u{1F917}\n\n" +
+     "Pomogli\u015bmy ju\u017c dziesi\u0105tkom tysi\u0119cy os\u00f3b i my\u015bl\u0119, \u017ce Tobie te\u017c mog\u0119dobrze pom\u00f3c \u{1F49A}\n\n" +
+     "Powiedz, co najbardziej chcia\u0142aby\u015b zmieni\u0107? \u{1F49A}\n\n" +
+     "Mo\u017cesz odpowiedzie\u0107 bardzo szczeg\u00f3\u0142owo albo kr\u00f3tko. Ka\u017cda odpowied\u017a jest w porz\u0105dku \u{1F917}\n\n" +
+     "Mo\u017cesz na przyk\u0142ad opisa\u0107 sw\u00f3j cel, to, co Ci\u0119 teraz blokuje, albo czego ju\u017c pr\u00f3bowa\u0142a\u015b.",
 };
 
 const openai = process.env.OPENAI_API_KEY
-  ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
-  : null;
+   ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
+   : null;
 
 /* ----------------------------- BASIC HELPERS ----------------------------- */
 
 function cleanText(value) {
-  if (value === null || value === undefined) return "";
-  return String(value).replace(/\s+/g, " ").trim();
+   if (value === null || value === undefined) return "";
+   return String(value).replace(/\s+/g, " ").trim();
 }
 
 function removePromptLeakTerms(value) {
-  if (value === null || value === undefined) return "";
+   if (value === null || value === undefined) return "";
 
-  return String(value)
-    .replace(/\bneutrale afsluiting\b/gi, "")
-    .replace(/\bkorte erkenning\b/gi, "")
-    .replace(/\bduidelijke afbakening\b/gi, "")
-    .replace(/\bdoorverwijzing\b/gi, "")
-    .replace(/\bzonder verkoopdruk\b/gi, "")
-    .replace(/\bstructuur van het antwoord\b/gi, "")
-    .replace(/\bmedische trigger\b/gi, "")
-    .replace(/\bmedical trigger\b/gi, "")
-    .replace(/\bsalesflow\b/gi, "")
-    .replace(/\bexit-conditie\b/gi, "")
-    .replace(/\bexit conditie\b/gi, "")
-    .replace(/\bcontextblok\b/gi, "")
-    .replace(/\bruntime context\b/gi, "")
-    .replace(/\bruntime_state\b/gi, "")
-    .replace(/\bcrm_memory\b/gi, "")
-    .replace(/\brepetition_guard\b/gi, "")
-    .replace(/\blatest_user_message\b/gi, "")
-    .replace(/\brecent_conversation_history\b/gi, "");
+   return String(value)
+     .replace(/\bneutrale afsluiting\b/gi, "")
+     .replace(/\bkorte erkenning\b/gi, "")
+     .replace(/\bduidelijke afbakening\b/gi, "")
+     .replace(/\bdoorverwijzing\b/gi, "")
+     .replace(/\bzonder verkoopdruk\b/gi, "")
+     .replace(/\bstructuur van het antwoord\b/gi, "")
+     .replace(/\bmedische trigger\b/gi, "")
+     .replace(/\bmedical trigger\b/gi, "")
+     .replace(/\bsalesflow\b/gi, "")
+     .replace(/\bexit-conditie\b/gi, "")
+     .replace(/\bexit conditie\b/gi, "")
+     .replace(/\bcontextblok\b/gi, "")
+     .replace(/\bruntime context\b/gi, "")
+     .replace(/\bruntime_state\b/gi, "")
+     .replace(/\bcrm_memory\b/gi, "")
+     .replace(/\brepetition_guard\b/gi, "")
+     .replace(/\blatest_user_message\b/gi, "")
+     .replace(/\brecent_conversation_history\b/gi, "");
 }
 
 function cleanReplyText(value) {
-  if (value === null || value === undefined) return "";
+   if (value === null || value === undefined) return "";
 
-  return removePromptLeakTerms(value)
-    .replace(/\r\n/g, "\n")
-    .replace(/\r/g, "\n")
-    // Remove AI-tell dashes. " — " / " – " between words become a comma;
-    // a dash glued to text becomes nothing; a leading "- " bullet is kept.
-    .replace(/\s+[—–]\s+/g, ", ")
-    .replace(/(\S)[—–](\S)/g, "$1 $2")
-    .replace(/[—–]/g, "")
-    .replace(/[ \t]+\n/g, "\n")
-    .replace(/\n[ \t]+/g, "\n")
-    .replace(/[ \t]{2,}/g, " ")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
+   return removePromptLeakTerms(value)
+     .replace(/\r\n/g, "\n")
+     .replace(/\r/g, "\n")
+     // Remove AI-tell dashes. " — " / " – " between words become a comma;
+     // a dash glued to text becomes nothing; a leading "- " bullet is kept.
+     .replace(/\s+[\u2014\u2013]\s+/g, ", ")
+     .replace(/(\S)[\u2014\u2013](\S)/g, "$1 $2")
+     .replace(/[\u2014\u2013]/g, "")
+     .replace(/[ \t]+\n/g, "\n")
+     .replace(/\n[ \t]+/g, "\n")
+     .replace(/[ \t]{2,}/g, " ")
+     .replace(/\n{3,}/g, "\n\n")
+     .trim();
 }
 
 // The website exists in three variants that must be tracked independently:
 // the plain site (Stap 4), the testimonials page (Stap 3) and the program
 // explanation page (decision help). All three contain "nutritionworks.online",
-// so plain-substring matching would let one block the others.
-const PLAIN_WEBSITE_LINK_PATTERN = /nutritionworks\.online(?!\/?#)/i;
-const TESTIMONIALS_LINK_PATTERN = /nutritionworks\.online\/?#testimonials/i;
-const PROGRAMMA_INFO_LINK_PATTERN = /nutritionworks\.online\/?#programma-info/i;
+  // so plain-substring matching would let one block the others.
+  const PLAIN_WEBSITE_LINK_PATTERN = /nutritionworks\.online(?!\/?#)/i;
+  const TESTIMONIALS_LINK_PATTERN = /nutritionworks\.online\/?#testimonials/i;
+  const PROGRAMMA_INFO_LINK_PATTERN = /nutritionworks\.online\/?#programma-info/i;
 
-function hasPatternBeenSent(messages, pattern) {
-  return messages.some(
-    (msg) => msg.role === "emma" && pattern.test(cleanText(msg.message_text))
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Stap 2-gate: de checklist mag pas als doel EN uitdaging bekend zijn (v51)
-// ---------------------------------------------------------------------------
-// Sectie 3.2 van de prompt eist twee dingen voordat de checklist met vinkjes
-// gestuurd mag worden: het DOEL en de GROOTSTE HUIDIGE UITDAGING. In de praktijk
-// stuurde Emma de lijst al na alleen een doel ("ik wil afvallen, maar ik hou het
-// niet vol"), omdat het letterlijke voorbeeld in de prompt zwaarder woog dan de
-// regel erboven. Deze guard zet dat server-side vast.
-
-// Herkent de checklist in een Emma-bericht: minstens twee vinkjes.
-const CHECKLIST_PATTERN = /(?:✅[^\n]*\n?){2,}/;
-
-function hasChecklistBeenSent(messages) {
-  return messages.some(
-    (msg) => msg.role === "emma" && CHECKLIST_PATTERN.test(msg.message_text || "")
-  );
-}
-
-// "Ik hou het niet vol" / "het lukt me niet" is GEEN uitdaging -- dat is het
-// probleem opnieuw benoemen. De echte uitdaging is de reden daarachter (tijd,
-// avondeten, motivatie, ploegendienst, stress, sociale druk, ...).
-//
-// Deze lijst dekt bewust alleen de duidelijke gevallen. Bij twijfel geldt de
-// uitdaging als ONBEKEND en stelt Emma de vervolgvraag -- dat is de veilige kant:
-// één extra vraag kost niets, een te vroege checklist kost vertrouwen.
-const RESTATED_PROBLEM_PATTERN = new RegExp(
-  [
-    // NL
-    "hou(?:d)? het niet vol",
-    "niet vol ?houden",
-    "lukt (?:me |mij )?niet",
-    "krijg het niet voor elkaar",
-    "kom er niet doorheen",
-    "val steeds terug",
-    "blijf hangen",
-    "geen resultaat",
-    "werkt niet (?:bij|voor) me",
-    // FR
-    "je (?:n')?arrive pas",
-    "je (?:ne )?tiens pas",
-    "je craque",
-    "je reprends? (?:tout|du poids)",
-    "[çc]a (?:ne )?marche pas",
-    "aucun r[ée]sultat",
-    "je (?:re)?commence toujours",
-    // EN
-    "can'?t (?:keep|stick|maintain|do) it",
-    "cannot keep it up",
-    "i (?:always )?give up",
-    "i keep (?:failing|slipping|falling off)",
-    "doesn'?t work for me",
-    "no results?",
-    "gain it (?:all )?back",
-    // DE
-    "halte (?:es )?nicht durch",
-    "schaffe (?:es )?nicht",
-    "klappt (?:bei mir )?nicht",
-    "nehme (?:alles )?wieder zu",
-    "keine ergebnisse",
-    "funktioniert (?:bei mir )?nicht",
-    // IT
-    "non (?:ci )?riesco",
-    "non resisto",
-    "mollo sempre",
-    "riprendo (?:tutto|peso)",
-    "non funziona",
-    "nessun risultato",
-    // ES
-    "no (?:lo )?consigo",
-    "no aguanto",
-    "siempre lo dejo",
-    "recupero (?:todo|el peso)",
-    "no funciona",
-    "ning[úu]n resultado",
-    // PL
-    "nie (?:daj[ęe] rady|potrafi[ęe]|wytrzymuj[ęe])",
-    "zawsze (?:si[ęe] poddaj[ęe]|rezygnuj[ęe])",
-    "nie dzia[łl]a",
-    "brak (?:efekt[óo]w|rezultat[óo]w)",
-    // PT
-    "n[ãa]o (?:consigo|aguento)",
-    "desisto sempre",
-    "volto (?:sempre )?a (?:engordar|ganhar)",
-    "n[ãa]o (?:resulta|funciona)",
-    "sem resultados?",
-  ].join("|"),
-  "i"
-);
-
-// Concrete obstakels die WEL als uitdaging tellen.
-const REAL_CHALLENGE_PATTERN = new RegExp(
-  "\\b(?:" +
-    [
-      // Taalonafhankelijk / internationaal
-      "stress\\w*",
-      "yo-?yo",
-      "jojo",
-      "burn-?out",
-      "menopauz\\w*",
-      "hormo\\w*",
-      "diabet\\w*",
-      "sport\\w*",
-      "budget",
-      "snack\\w*",
-      // NL
-      "geen tijd|te druk|werk\\w*|ploegendienst\\w*|nachtdienst\\w*|avond\\w*",
-      "snoep\\w*|zoet\\w*|trek\\b|honger\\w*|emotie\\w*|emo-?eten|verdriet",
-      "kinderen|gezin|alleen ?staand\\w*|beweeg\\w*|bewegen|beweging",
-      "blessure\\w*|medicat\\w*|schildklier\\w*|overgang|slaap\\w*|slecht slapen",
-      "moe\\b|moeheid|vermoeid\\w*|energie|geld|koken|kook\\w*|restaurant\\w*",
-      "uit eten|sociaal|sociale|feest\\w*|vakantie\\w*|discipline|motivatie",
-      "structuur|planning|gewoonte\\w*",
-      // FR
-      "pas le temps|trop occup[ée]\\w*|travail\\w*|boulot|horaires?|nuit",
-      "le soir|grignot\\w*|sucr[ée]\\w*|fringale\\w*|faim|[ée]motion\\w*",
-      "enfants?|famille|c[ée]libataire|bouge\\w*|activit[ée] physique",
-      "blessure\\w*|m[ée]dicament\\w*|thyro[ïi]de|sommeil|dor[sm]\\w*|fatigu[ée]\\w*",
-      "[ée]nergie|argent|cuisin\\w*|restaurant\\w*|social\\w*|f[êe]te\\w*",
-      "vacances|discipline|motivation|organisation|habitude\\w*",
-      // EN
-      "no time|too busy|work\\w*|shift\\w*|night shift|evenings?",
-      "snacking|sweets?|sugar|craving\\w*|hungry|hunger|emotional eating",
-      "kids|children|family|single (?:mum|mom|parent)|exercis\\w*|moving",
-      "injur\\w*|medicat\\w*|thyroid|sleep\\w*|tired\\w*|fatigue|energy",
-      "money|cooking|eating out|social|part(?:y|ies)|holidays?|vacation",
-      "discipline|motivation|routine|habits?",
-      // DE
-      "keine zeit|zu besch[äa]ftigt|arbeit\\w*|schicht\\w*|nachtschicht|abends?",
-      "naschen|s[üu][ßs]\\w*|hei[ßs]hunger|hunger|emotional\\w*",
-      "kinder|familie|alleinerziehend\\w*|bewegung|sport",
-      "verletzung\\w*|medikament\\w*|schilddr[üu]se|schlaf\\w*|m[üu]de|energie",
-      "geld|kochen|essen gehen|sozial\\w*|feier\\w*|urlaub|disziplin",
-      "motivation|struktur|gewohnheit\\w*",
-      // IT
-      "non ho tempo|troppo impegnat\\w*|lavoro|turni?|sera|serale",
-      "spuntin\\w*|dolc\\w*|zucchero|voglia|fame|emotiv\\w*",
-      "figli|famiglia|single|movimento|attivit[àa] fisica",
-      "infortuni\\w*|farmac\\w*|tiroide|sonno|dormire|stanc\\w*|energia",
-      "soldi|cucina\\w*|mangiare fuori|social\\w*|fest\\w*|vacanz\\w*",
-      "disciplina|motivazione|abitudin\\w*",
-      // ES
-      "no tengo tiempo|muy ocupad\\w*|trabajo|turnos?|noche|por la tarde",
-      "picar|dulce\\w*|az[úu]car|antojo\\w*|hambre|emocional",
-      "hijos|familia|madre soltera|ejercicio|moverme",
-      "lesi[óo]n\\w*|medicament\\w*|tiroides|sue[ñn]o|dormir|cansad\\w*|energ[íi]a",
-      "dinero|cocinar|comer fuera|social\\w*|fiesta\\w*|vacaciones",
-      "disciplina|motivaci[óo]n|rutina|h[áa]bito\\w*",
-      // PL
-      "nie mam czasu|zaj[ęe]t\\w*|praca|prac[ęy]|zmian\\w*|wieczor\\w*",
-      "podjada\\w*|s[łl]odycz\\w*|cukier|g[łl][óo]d|emocj\\w*",
-      "dzieci|rodzin\\w*|ruch|[ćc]wicz\\w*",
-      "kontuzj\\w*|lek(?:i|arstw)\\w*|tarczyc\\w*|sen\\b|spa[ćc]|zm[ęe]czon\\w*|energi\\w*",
-      "pieni[ąa]dz\\w*|gotowa\\w*|jedzenie na mie[śs]cie|towarzysk\\w*",
-      "imprez\\w*|wakacj\\w*|dyscyplin\\w*|motywacj\\w*|nawyk\\w*",
-      // PT
-      "n[ãa]o tenho tempo|muito ocupad\\w*|trabalho|turnos?|[àa] noite",
-      "petisc\\w*|doce\\w*|a[çc][úu]car|vontade de comer|fome|emocional",
-      "filhos|fam[íi]lia|m[ãa]e solteira|exerc[íi]cio|mexer",
-      "les[ãa]o|medicament\\w*|tire[óo]ide|sono|dormir|cansad\\w*|energia",
-      "dinheiro|cozinha\\w*|comer fora|social|festa\\w*|f[ée]rias",
-      "disciplina|motiva[çc][ãa]o|rotina|h[áa]bito\\w*",
-    ].join("|") +
-    ")",
-  "i"
-);
-
-// Is de grootste huidige uitdaging bekend? Kijkt naar de CRM-velden en naar wat
-// de klant zelf in het gesprek heeft geschreven.
-function isChallengeKnown({ goal, objections, lastSummary, messages, currentMessage }) {
-  const userText = [
-    ...(Array.isArray(messages) ? messages : [])
-      .filter((msg) => msg.role === "user")
-      .map((msg) => msg.message_text || ""),
-    currentMessage || "",
-  ].join(" ");
-
-  const crmText = [goal || "", objections || "", lastSummary || ""].join(" ");
-  const combined = cleanText(`${crmText} ${userText}`);
-  if (!combined) return false;
-
-  // Een concreet obstakel telt altijd.
-  if (REAL_CHALLENGE_PATTERN.test(combined)) return true;
-
-  // Alleen een herhaling van het probleem telt niet.
-  if (RESTATED_PROBLEM_PATTERN.test(combined)) return false;
-
-  // Geen van beide herkend: behandel de uitdaging als onbekend.
-  return false;
-}
-
-// Deterministic removal of forbidden phrases the prompt alone could not
-// suppress reliably: "welcome back" openers and "are you still there?"
-// chasers. Applied to every reply.
-function stripForbiddenReplyPhrases(value) {
-  const text = cleanReplyText(value);
-  if (!text) return text;
-
-  // Emojis often end a sentence without punctuation, so they count as
-  // sentence boundaries in these patterns.
-  const B = "\\n.!?\\u{2600}-\\u{27BF}\\u{1F300}-\\u{1FAFF}";
-  const E = "[.!?\\u2026\\u{2600}-\\u{27BF}\\u{1F300}-\\u{1FAFF}]*";
-
-  let out = text
-    // "Welkom terug!", "Welkom terug 💚 ..." — strip the phrase/sentence
-    .replace(new RegExp(`(^|\\n)\\s*welkom terug[^${B}]*${E}\\s*`, "giu"), "$1")
-    // "Goed/Fijn/Leuk dat je er weer bent", "Goed om je weer te horen", etc.
-    .replace(
-      new RegExp(
-        `(^|[\\n.!?\\u2026]\\s*)(goed|fijn|leuk|mooi)\\s+(dat|om)\\s+je\\s+(er\\s+)?weer[^${B}]*${E}\\s*`,
-        "giu"
-      ),
-      "$1"
-    )
-    // Any sentence containing "ben je er nog"
-    .replace(new RegExp(`[^${B}]*ben je er nog[^${B}]*\\??\\s*`, "giu"), "")
-    // Anderstalige "welkom terug"-varianten (v51). De Nederlandse regel hierboven
-    // ving deze niet af, waardoor Emma in het Frans alsnog "C'est super que tu
-    // sois de retour" opende. Zelfde verbod, nu in alle 7 talen.
-    .replace(
-      new RegExp(
-        `(^|\\n)\\s*(?:c'est\\s+)?(?:super|g[ée]nial|chouette|ravie?|contente?)\\s+(?:que\\s+)?(?:tu\\s+sois|de\\s+te\\s+revoir)[^${B}]*de\\s+retour[^${B}]*${E}\\s*`,
-        "giu"
-      ),
-      "$1"
-    )
-    .replace(
-      new RegExp(
-        `(^|\\n)\\s*(?:welcome back|good to (?:have|hear from) you again|great to hear from you again|willkommen zur[üu]ck|sch[öo]n,? dass du wieder da bist|bentornat[ao]|che bello (?:ri)?sentirti|bienvenid[ao] de (?:nuevo|vuelta)|qu[ée] bueno (?:volver a saber de ti|tenerte de vuelta)|witaj z powrotem|mi[łl]o (?:ci[ęe]) znowu|bem-?vind[ao] de volta|que bom (?:que est[áa]s de volta|voltar a saber de ti)|ainda bem que voltaste)[^${B}]*${E}\\s*`,
-        "giu"
-      ),
-      "$1"
+  function hasPatternBeenSent(messages, pattern) {
+    return messages.some(
+       (msg) => msg.role === "emma" && pattern.test(cleanText(msg.message_text))
     );
-
-  out = cleanReplyText(out);
-  return out || text;
-}
-
-// Coaching mode: strip trailing question sentences so Emma cannot keep the
-// conversation going from her side. Exceptions: a reply that is entirely one
-// clarifying question, and checkout-flow content (a validated customer who
-// explicitly asks to buy still gets the country/taste/Control questions).
-function stripTrailingCoachingQuestions(value) {
-  const text = cleanReplyText(value);
-  if (!text) return text;
-  if (
-    /tr\.ee\/bestellen-|nederland of belgi|welke smaak|chocolade|vanille|half[-\s]?half|\bcontrol\b|ordernummer/i.test(
-      text
-    )
-  ) {
-    return text;
   }
 
-  const sentenceSplit = (p) =>
-    (p.match(/[^.!?\n]+[.!?…]*[^\w\n.!?]*/gu) || [p]).map((s) => s.trim()).filter(Boolean);
-  const paragraphs = text.split("\n\n").map((p) => p.trim()).filter(Boolean);
-  const totalSentences = () =>
-    paragraphs.reduce((n, p) => n + sentenceSplit(p).length, 0);
+  // Deterministic removal of forbidden phrases the prompt alone could not
+  // suppress reliably: "welcome back" openers and "are you still there?"
+  // chasers. Applied to every reply.
+  function stripForbiddenReplyPhrases(value) {
+    const text = cleanReplyText(value);
+    if (!text) return text;
+    // Emojis often end a sentence without punctuation, so they count as
+    // sentence boundaries in these patterns.
+    const B = "\\n.!?\\u{2600}-\\u{27BF}\\u{1F300}-\\u{1FAFF}";
+    const E = "[.!?\\u2026\\u{2600}-\\u{27BF}\\u{1F300}-\\u{1FAFF}]*";
+    let out = text
+      // "Welkom terug!", "Welkom terug    ..." — strip the phrase/sentence
+      .replace(new RegExp(`(^|\\n)\\s*welkom terug[^${B}]*${E}\\s*`, "giu"), "$1")
+      // "Goed/Fijn/Leuk dat je er weer bent", "Goed om je weer te horen", etc.
+      .replace(
+        new RegExp(
+           `(^|[\\n.!?\\u2026]\\s*)(goed|fijn|leuk|mooi)\\s+(dat|om)\\s+je\\s+(er\\s+)?weer[^${B}]*${E}\\s*`,
+           "giu"
+        ),
+        "$1"
+      )
+      // Any sentence containing "ben je er nog"
+      .replace(new RegExp(`[^${B}]*ben je er nog[^${B}]*\\??\\s*`, "giu"), "");
+    out = cleanReplyText(out);
+    return out || text;
+  }
 
-  let changed = true;
-  while (changed && paragraphs.length > 0 && totalSentences() > 1) {
-    changed = false;
-    const sentences = sentenceSplit(paragraphs[paragraphs.length - 1]);
-    const last = sentences[sentences.length - 1] || "";
-    if (/\?[^\w\n]*$/u.test(last)) {
-      sentences.pop();
-      if (sentences.length > 0) {
-        paragraphs[paragraphs.length - 1] = sentences.join(" ");
-      } else {
-        paragraphs.pop();
+  // Coaching mode: strip trailing question sentences so Emma cannot keep the
+  // conversation going from her side. Exceptions: a reply that is entirely one
+  // clarifying question, and checkout-flow content (a validated customer who
+  // explicitly asks to buy still gets the country/taste/Control questions).
+  function stripTrailingCoachingQuestions(value) {
+    const text = cleanReplyText(value);
+    if (!text) return text;
+    if (
+      /tr\.ee\/bestellen-|nederland of belgi|welke smaak|chocolade|vanille|half[-\s]?half|\bcontrol\b|ordernummer/i.test(
+         text
+      )
+    ) {
+      return text;
+    }
+    const sentenceSplit = (p) =>
+      (p.match(/[^.!?\n]+[.!?…]*[^\w\n.!?]*/gu) || [p]).map((s) => s.trim()).filter(Boolean);
+    const paragraphs = text.split("\n\n").map((p) => p.trim()).filter(Boolean);
+    const totalSentences = () =>
+      paragraphs.reduce((n, p) => n + sentenceSplit(p).length, 0);
+    let changed = true;
+    while (changed && paragraphs.length > 0 && totalSentences() > 1) {
+      changed = false;
+      const sentences = sentenceSplit(paragraphs[paragraphs.length - 1]);
+      const last = sentences[sentences.length - 1] || "";
+      if (/\?[^\w\n]*$/u.test(last)) {
+         sentences.pop();
+         if (sentences.length > 0) {
+           paragraphs[paragraphs.length - 1] = sentences.join(" ");
+         } else {
+           paragraphs.pop();
+         }
+         changed = true;
       }
-      changed = true;
     }
+    const out = cleanReplyText(paragraphs.join("\n\n"));
+    return out || text;
   }
 
-  const out = cleanReplyText(paragraphs.join("\n\n"));
-  return out || text;
-}
-
-// Removes a repeated Stap 4 website/freebies block from a reply. Only
-// called when the website link was already sent earlier AND the customer's
-// current message does not explicitly ask for it.
-function stripRepeatedWebsiteBlock(value) {
-  const text = cleanReplyText(value);
-  if (!text || !PLAIN_WEBSITE_LINK_PATTERN.test(text)) return text;
-
-  const paragraphs = text.split("\n\n").filter((p) => {
-    if (TESTIMONIALS_LINK_PATTERN.test(p) || PROGRAMMA_INFO_LINK_PATTERN.test(p)) {
-      return true;
-    }
-    if (PLAIN_WEBSITE_LINK_PATTERN.test(p)) return false;
-    if (/op deze pagina vind je/i.test(p)) return false;
-    if (/volledig gratis/i.test(p)) return false;
-    if (/kijk welk programma je aanspreekt/i.test(p)) return false;
-    if ((p.match(/\u{2705}/gu) || []).length >= 2) return false;
-    return true;
-  });
-
-  const out = cleanReplyText(paragraphs.join("\n\n"));
-  return (
-    out || "Alles over de programma's staat op de pagina die ik je eerder stuurde \u{1F49A}"
-  );
-}
-
-function clamp(value, max = 500) {
-  const text = cleanText(value);
-  if (text.length <= max) return text;
-  return `${text.slice(0, max).trim()}...`;
-}
-
-function normalizeComparableText(value) {
-  return cleanText(value)
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}\s]/gu, "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function normalizeBinaryFlag(value) {
-  const v = cleanText(value).toLowerCase();
-  if (v === "ja" || v === "yes" || v === "wel" || v === "true") return "ja";
-  if (v === "nee" || v === "no" || v === "niet" || v === "false") return "nee";
-  return "";
-}
-
-function normalizeProgramName(value) {
-  const v = cleanText(value).toLowerCase();
-  if (v === "basic") return "Basic";
-  if (v === "beauty") return "Beauty";
-  if (v === "deluxe") return "Deluxe";
-  if (v === "exclusive") return "Exclusive";
-  return "";
-}
-
-function normalizePhaseName(value) {
-  const v = cleanText(value).toLowerCase();
-  const allowed = [
-    "intake",
-    "verdieping",
-    "analyse",
-    "advies",
-    "commitment",
-    "presentatie",
-    "closing",
-    "checkout-bevestiging",
-    "checkout",
-    "coaching",
-    "na_aankoop",
-  ];
-  return allowed.includes(v) ? v : "";
-}
-
-function uniqueBy(items, keyFn) {
-  const seen = new Set();
-  const out = [];
-
-  for (const item of items) {
-    const key = keyFn(item);
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
-    out.push(item);
+  // Removes a repeated Stap 4 website/freebies block from a reply. Only
+  // called when the website link was already sent earlier AND the customer's
+  // current message does not explicitly ask for it.
+  function stripRepeatedWebsiteBlock(value) {
+    const text = cleanReplyText(value);
+    if (!text || !PLAIN_WEBSITE_LINK_PATTERN.test(text)) return text;
+    const paragraphs = text.split("\n\n").filter((p) => {
+      if (TESTIMONIALS_LINK_PATTERN.test(p) || PROGRAMMA_INFO_LINK_PATTERN.test(p)) {
+        return true;
+      }
+      if (PLAIN_WEBSITE_LINK_PATTERN.test(p)) return false;
+      if (/op deze pagina vind je/i.test(p)) return false;
+      if (/volledig gratis/i.test(p)) return false;
+      if (/kijk welk programma je aanspreekt/i.test(p)) return false;
+      if ((p.match(/\u{2705}/gu) || []).length >= 2) return false;
+         return true;
+      });
+      const out = cleanReplyText(paragraphs.join("\n\n"));
+      return (
+         out || "Alles over de programma's staat op de pagina die ik je eerder stuurde \u{1F49A}"
+      );
   }
 
-  return out;
-}
+  function clamp(value, max = 500) {
+    const text = cleanText(value);
+    if (text.length <= max) return text;
+    return `${text.slice(0, max).trim()}...`;
+  }
 
-function buildResponse({
-  reply,
-  goal_update = "",
-  objections_update = "",
-  last_summary_update = "",
-  customer_status_update = "",
-  current_phase_update = "",
-  interested_in_program_update = "",
-  interested_in_control_update = "",
-  purchased_program_update = "",
-  has_control_update = "",
-  language = "",
-  language_update = "",
-  send_reply,
-}) {
-  const rawReply = reply === NO_REPLY ? NO_REPLY : cleanReplyText(reply);
+  function normalizeComparableText(value) {
+    return cleanText(value)
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}\s]/gu, "")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
 
-  return {
-    send_reply:
-      typeof send_reply === "boolean" ? send_reply : rawReply !== "" && rawReply !== NO_REPLY,
-    reply: rawReply,
-    goal_update: cleanText(goal_update),
-    objections_update: cleanText(objections_update),
-    last_summary_update: cleanText(last_summary_update),
-    customer_status_update: cleanText(customer_status_update),
-    current_phase_update: cleanText(current_phase_update),
-    interested_in_program_update: cleanText(interested_in_program_update),
-    interested_in_control_update: cleanText(interested_in_control_update),
-    purchased_program_update: cleanText(purchased_program_update),
-    has_control_update: cleanText(has_control_update),
-    language: cleanText(language),
-    language_update: cleanText(language_update),
-  };
+  function normalizeBinaryFlag(value) {
+    const v = cleanText(value).toLowerCase();
+    if (v === "ja" || v === "yes" || v === "wel" || v === "true") return "ja";
+    if (v === "nee" || v === "no" || v === "niet" || v === "false") return "nee";
+    return "";
+  }
+
+  function normalizeProgramName(value) {
+    const v = cleanText(value).toLowerCase();
+    if (v === "basic") return "Basic";
+    if (v === "beauty") return "Beauty";
+    if (v === "deluxe") return "Deluxe";
+    if (v === "exclusive") return "Exclusive";
+    return "";
+  }
+
+  function normalizePhaseName(value) {
+    const v = cleanText(value).toLowerCase();
+    const allowed = [
+       "intake",
+       "verdieping",
+       "analyse",
+       "advies",
+       "commitment",
+       "presentatie",
+       "closing",
+       "checkout-bevestiging",
+       "checkout",
+       "coaching",
+       "na_aankoop",
+    ];
+    return allowed.includes(v) ? v : "";
+  }
+
+  function uniqueBy(items, keyFn) {
+    const seen = new Set();
+    const out = [];
+
+      for (const item of items) {
+        const key = keyFn(item);
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        out.push(item);
+      }
+
+      return out;
+  }
+
+  function buildResponse({
+    reply,
+    goal_update = "",
+    objections_update = "",
+    last_summary_update = "",
+    customer_status_update = "",
+    current_phase_update = "",
+    interested_in_program_update = "",
+    interested_in_control_update = "",
+    purchased_program_update = "",
+    has_control_update = "",
+    language = "",
+    language_update = "",
+    send_reply,
+  }) {
+    const rawReply = reply === NO_REPLY ? NO_REPLY : cleanReplyText(reply);
+
+      return {
+        send_reply:
+          typeof send_reply === "boolean" ? send_reply : rawReply !== "" && rawReply !== NO_REPLY,
+        reply: rawReply,
+      goal_update: cleanText(goal_update),
+      objections_update: cleanText(objections_update),
+      last_summary_update: cleanText(last_summary_update),
+      customer_status_update: cleanText(customer_status_update),
+      current_phase_update: cleanText(current_phase_update),
+      interested_in_program_update: cleanText(interested_in_program_update),
+      interested_in_control_update: cleanText(interested_in_control_update),
+      purchased_program_update: cleanText(purchased_program_update),
+      has_control_update: cleanText(has_control_update),
+      language: cleanText(language),
+      language_update: cleanText(language_update),
+   };
 }
 
 /* ------------------------------- LANGUAGE -------------------------------- */
@@ -593,65 +354,62 @@ function buildResponse({
 const SUPPORTED_LANGUAGES = ["nl", "en", "fr", "de", "it", "es", "pl"];
 
 const LANGUAGE_NAMES = {
-  nl: "Nederlands",
-  en: "English",
-  fr: "French",
-  de: "German",
-  it: "Italian",
-  es: "Spanish",
-  pl: "Polish",
-  pt: "Portuguese",
+   nl: "Nederlands",
+   en: "English",
+   fr: "French",
+   de: "German",
+   it: "Italian",
+   es: "Spanish",
+   pl: "Polish",
 };
 
 // Country calling code -> language. Checked longest-prefix-first so "1"
 // (US/Canada) cannot shadow longer codes. Belgium (32) defaults to Dutch;
 // French-speaking Belgians are fixed by the early text-based switch.
 const PHONE_PREFIX_LANGUAGE = {
-  "31": "nl",
-  "32": "nl",
-  "33": "fr",
-  "49": "de",
-  "43": "de",
-  "41": "de",
-  "39": "it",
-  "34": "es",
-  "351": "pt",
-  "48": "pl",
-  "44": "en",
-  "353": "en",
-  "61": "en",
-  "64": "en",
-  "1": "en",
+   "31": "nl",
+   "32": "nl",
+   "33": "fr",
+   "49": "de",
+   "43": "de",
+   "41": "de",
+   "39": "it",
+   "34": "es",
+   "48": "pl",
+   "44": "en",
+   "353": "en",
+   "61": "en",
+   "64": "en",
+   "1": "en",
 };
 
 const FRANC_TO_LANGUAGE = {
-  nld: "nl",
-  eng: "en",
-  fra: "fr",
-  deu: "de",
-  ita: "it",
-  spa: "es",
-  pol: "pl",
-  por: "pt",
+   nld: "nl",
+   eng: "en",
+   fra: "fr",
+   deu: "de",
+   ita: "it",
+   spa: "es",
+   pol: "pl",
 };
 
 function normalizeLanguage(value) {
-  const v = cleanText(value).toLowerCase();
-  return SUPPORTED_LANGUAGES.includes(v) ? v : "";
+   const v = cleanText(value).toLowerCase();
+   return SUPPORTED_LANGUAGES.includes(v) ? v : "";
 }
 
 function detectLanguageFromPhone(userId) {
-  const value = cleanText(userId).replace(/^\+/, "");
-  // Only trust the country prefix when the id actually looks like a phone
-  // number in international format: digits only, 10-15 characters. WhatsApp
-  // BSUIDs (username rollout, 2026) can contain digits too and must never be
-  // read as a country code.
-  if (!/^[0-9]{10,15}$/.test(value)) return "";
-  for (const len of [3, 2, 1]) {
-    const prefix = value.slice(0, len);
-    if (PHONE_PREFIX_LANGUAGE[prefix]) return PHONE_PREFIX_LANGUAGE[prefix];
-  }
-  return "";
+   const value = cleanText(userId).replace(/^\+/, "");
+   // Only trust the country prefix when the id actually looks like a phone
+   // number in international format: digits only, 10-15 characters. WhatsApp
+   // BSUIDs (username rollout, 2026) can contain digits too and must never be
+   // read as a country code.
+   if (!/^[0-9]{10,15}$/.test(value)) return "";
+   for (const len of [3, 2, 1]) {
+      const prefix = value.slice(0, len);
+      if (PHONE_PREFIX_LANGUAGE[prefix]) return PHONE_PREFIX_LANGUAGE[prefix];
+   }
+   return "";
 }
 
 // Explicit language requests ("can we speak English?", "auf Deutsch bitte").
@@ -659,587 +417,402 @@ function detectLanguageFromPhone(userId) {
 // detection these work on short sentences and at ANY point in the
 // conversation: an explicit request always wins and re-locks the language.
 const EXPLICIT_LANGUAGE_REQUEST_PATTERNS = [
-  {
-    language: "en",
-    pattern:
-      /\b(in english|speak english|english,? please|switch to english|continue in english|i don.?t speak dutch|i do not speak dutch|do you speak english)\b/i,
-  },
-  {
-    language: "nl",
-    pattern:
-      /\b(in het nederlands|nederlands,? graag|spreek je nederlands|verder in het nederlands)\b/i,
-  },
-  {
-    language: "fr",
-    pattern:
-      /\b(en fran[cç]ais|fran[cç]ais,? s.?il vous pla[iî]t|je ne parle pas n[eé]erlandais|parlez.?vous fran[cç]ais|continuer en fran[cç]ais)\b/i,
-  },
-  {
-    language: "de",
-    pattern:
-      /\b(auf deutsch|deutsch,? bitte|ich spreche kein niederl[aä]ndisch|sprechen sie deutsch|sprichst du deutsch|weiter auf deutsch)\b/i,
-  },
-  {
-    language: "it",
-    pattern:
-      /\b(in italiano|italiano,? per favore|non parlo olandese|parli italiano|continuare in italiano)\b/i,
-  },
-  {
-    language: "es",
-    pattern:
-      /\b(en espa[nñ]ol|espa[nñ]ol,? por favor|no hablo (holand[eé]s|neerland[eé]s)|hablas espa[nñ]ol|continuar en espa[nñ]ol)\b/i,
-  },
-  {
-    language: "pl",
-    pattern:
-      /\b(po polsku|nie m[oó]wi[eę] po (holendersku|niderlandzku)|m[oó]wisz po polsku)\b/i,
-  },
-  {
-    language: "pt",
-    pattern:
-      /\b(em portugu[eê]s|portugu[eê]s,? por favor|n[aã]o falo (holand[eê]s|neerland[eê]s)|falas portugu[eê]s|fala portugu[eê]s|continuar em portugu[eê]s)\b/i,
-  },
+   {
+      language: "en",
+      pattern:
+        /\b(in english|speak english|english,? please|switch to english|continue in english|i don.?t speak dutch|i do not speak dutch|do you speak english)\b/i,
+   },
+   {
+      language: "nl",
+      pattern:
+        /\b(in het nederlands|nederlands,? graag|spreek je nederlands|verder in het nederlands)\b/i,
+   },
+   {
+      language: "fr",
+      pattern:
+        /\b(en fran[cç]ais|fran[cç]ais,? s.?il vous pla[iî]t|je ne parle pas n[eé]erlandais|parlez.?vous fran[cç]ais|continuer en fran[cç]ais)\b/i,
+   },
+   {
+      language: "de",
+      pattern:
+        /\b(auf deutsch|deutsch,? bitte|ich spreche kein niederl[aä]ndisch|sprechen sie deutsch|sprichst du deutsch|weiterauf deutsch)\b/i,
+   },
+   {
+      language: "it",
+      pattern:
+        /\b(in italiano|italiano,? per favore|non parlo olandese|parli italiano|continuare in italiano)\b/i,
+   },
+   {
+      language: "es",
+      pattern:
+        /\b(en espa[nñ]ol|espa[nñ]ol,? por favor|no hablo (holand[eé]s|neerland[eé]s)|hablas espa[nñ]ol|continuar en espa[nñ]ol)\b/i,
+   },
+   {
+      language: "pl",
+      pattern:
+        /\b(po polsku|nie m[oó]wi[eę] po (holendersku|niderlandzku)|m[oó]wisz po polsku)\b/i,
+   },
 ];
 
 function detectExplicitLanguageRequest(text) {
-  const value = cleanText(text);
-  if (!value) return "";
-  for (const { language, pattern } of EXPLICIT_LANGUAGE_REQUEST_PATTERNS) {
-    if (pattern.test(value)) return language;
-  }
-  return "";
+   const value = cleanText(text);
+   if (!value) return "";
+   for (const { language, pattern } of EXPLICIT_LANGUAGE_REQUEST_PATTERNS) {
+      if (pattern.test(value)) return language;
+   }
+   return "";
 }
 
 // Country calling code -> customer country for PRICING. The checkout links
 // are universal; this only determines which price table row Emma quotes.
 // Unknown prefix / BSUID -> "UK" (business decision: UK prices as fallback).
 const PHONE_PREFIX_COUNTRY = {
-  "31": "NL",
-  "32": "BE",
-  "33": "FR",
-  "34": "ES",
-  "39": "IT",
-  "44": "UK",
-  "48": "PL",
-  "49": "DE",
-  "351": "PT",
+   "31": "NL",
+   "32": "BE",
+   "33": "FR",
+   "34": "ES",
+   "39": "IT",
+   "44": "UK",
+   "48": "PL",
+   "49": "DE",
+   "351": "PT",
 };
 
 function detectCountryFromPhone(userId) {
-  const value = cleanText(userId).replace(/^\+/, "");
-  if (!/^[0-9]{10,15}$/.test(value)) return "";
-  for (const len of [3, 2, 1]) {
-    const prefix = value.slice(0, len);
-    if (PHONE_PREFIX_COUNTRY[prefix]) return PHONE_PREFIX_COUNTRY[prefix];
-  }
-  return "";
+   const value = cleanText(userId).replace(/^\+/, "");
+   if (!/^[0-9]{10,15}$/.test(value)) return "";
+   for (const len of [3, 2, 1]) {
+      const prefix = value.slice(0, len);
+      if (PHONE_PREFIX_COUNTRY[prefix]) return PHONE_PREFIX_COUNTRY[prefix];
+   }
+   return "";
 }
 
 // Returns one of SUPPORTED_LANGUAGES, "other" (confidently detected but not a
 // supported language), or "" (too short / undetermined).
 function detectLanguageFromText(text) {
-  const value = cleanText(text);
-  if (value.length < LANGUAGE_TEXT_MIN_CHARS) return "";
-  const iso3 = franc(value, { minLength: LANGUAGE_TEXT_MIN_CHARS });
-  if (!iso3 || iso3 === "und") return "";
-  return FRANC_TO_LANGUAGE[iso3] || "other";
+   const value = cleanText(text);
+   if (value.length < LANGUAGE_TEXT_MIN_CHARS) return "";
+   const iso3 = franc(value, { minLength: LANGUAGE_TEXT_MIN_CHARS });
+   if (!iso3 || iso3 === "und") return "";
+   return FRANC_TO_LANGUAGE[iso3] || "other";
 }
+
 
 /* -------------------------- MESSAGE NORMALIZATION ------------------------- */
 
 function normalizeRole(role) {
-  const r = cleanText(role).toLowerCase();
+   const r = cleanText(role).toLowerCase();
 
-  if (["emma", "assistant", "ai", "agent", "bot"].includes(r)) return "emma";
+   if (["emma", "assistant", "ai", "agent", "bot"].includes(r)) return "emma";
 
-  if (["user", "customer", "klant", "client", "lead", "persoon"].includes(r)) {
-    return "user";
+   if (["user", "customer", "klant", "client", "lead", "persoon"].includes(r)) {
+      return "user";
+   }
+
+   return r || "unknown";
+}
+
+  function parseTimestamp(value) {
+    const raw = cleanText(value);
+    if (!raw) return null;
+
+      const t = Date.parse(raw);
+      return Number.isFinite(t) ? t : null;
   }
 
-  return r || "unknown";
-}
+  function normalizeRecentMessages(value) {
+    if (!Array.isArray(value)) return [];
 
-function parseTimestamp(value) {
-  const raw = cleanText(value);
-  if (!raw) return null;
+      return value
+        .map((item, index) => {
+          const role = normalizeRole(item?.role || item?.sender || item?.from);
+          const message_text = cleanText(
+             item?.message_text || item?.message || item?.text || item?.content
+          );
+          const timestamp = cleanText(
+             item?.timestamp || item?.created_at || item?.date || item?.time
+          );
 
-  const t = Date.parse(raw);
-  return Number.isFinite(t) ? t : null;
-}
+          return {
+             role,
+             message_text,
+             timestamp,
+             _index: index,
+             _time: parseTimestamp(timestamp),
+          };
+       })
+       .filter((item) => item.role || item.message_text || item.timestamp);
+  }
 
-function normalizeRecentMessages(value) {
-  if (!Array.isArray(value)) return [];
+  function sortMessagesChronologically(messages) {
+    return [...messages].sort((a, b) => {
+      if (a._time !== null && b._time !== null) return a._time - b._time;
+      if (a._time !== null) return -1;
+      if (b._time !== null) return 1;
+      return a._index - b._index;
+    });
+  }
 
-  return value
-    .map((item, index) => {
-      const role = normalizeRole(item?.role || item?.sender || item?.from);
-      const message_text = cleanText(
-        item?.message_text || item?.message || item?.text || item?.content
+  function removeCurrentUserMessageFromHistory(messages, currentMessage) {
+    const current = normalizeComparableText(currentMessage);
+    if (!current) return messages;
+
+      let removed = false;
+
+      return [...messages]
+        .reverse()
+        .filter((msg) => {
+          if (removed) return true;
+
+          const sameRole = msg.role === "user";
+          const sameText = normalizeComparableText(msg.message_text) === current;
+
+          if (sameRole && sameText) {
+            removed = true;
+            return false;
+          }
+
+          return true;
+       })
+       .reverse();
+  }
+
+  function sanitizeAndPrepareRecentMessages(recentMessages, currentMessage) {
+    const normalized = normalizeRecentMessages(recentMessages);
+    const sorted = sortMessagesChronologically(normalized);
+
+      const deduped = uniqueBy(sorted, (msg) => {
+        const role = msg.role || "unknown";
+        const text = normalizeComparableText(msg.message_text);
+        const time = msg.timestamp || "";
+        return `${role}|${text}|${time}`;
+      });
+
+      const withoutCurrentMessage = removeCurrentUserMessageFromHistory(
+         deduped,
+         currentMessage
       );
-      const timestamp = cleanText(
-        item?.timestamp || item?.created_at || item?.date || item?.time
-      );
 
-      return {
-        role,
-        message_text,
-        timestamp,
-        _index: index,
-        _time: parseTimestamp(timestamp),
-      };
-    })
-    .filter((item) => item.role || item.message_text || item.timestamp);
-}
-
-function sortMessagesChronologically(messages) {
-  return [...messages].sort((a, b) => {
-    if (a._time !== null && b._time !== null) return a._time - b._time;
-    if (a._time !== null) return -1;
-    if (b._time !== null) return 1;
-    return a._index - b._index;
-  });
-}
-
-function removeCurrentUserMessageFromHistory(messages, currentMessage) {
-  const current = normalizeComparableText(currentMessage);
-  if (!current) return messages;
-
-  let removed = false;
-
-  return [...messages]
-    .reverse()
-    .filter((msg) => {
-      if (removed) return true;
-
-      const sameRole = msg.role === "user";
-      const sameText = normalizeComparableText(msg.message_text) === current;
-
-      if (sameRole && sameText) {
-        removed = true;
-        return false;
-      }
-
-      return true;
-    })
-    .reverse();
-}
-
-function sanitizeAndPrepareRecentMessages(recentMessages, currentMessage) {
-  const normalized = normalizeRecentMessages(recentMessages);
-  const sorted = sortMessagesChronologically(normalized);
-
-  const deduped = uniqueBy(sorted, (msg) => {
-    const role = msg.role || "unknown";
-    const text = normalizeComparableText(msg.message_text);
-    const time = msg.timestamp || "";
-    return `${role}|${text}|${time}`;
-  });
-
-  const withoutCurrentMessage = removeCurrentUserMessageFromHistory(
-    deduped,
-    currentMessage
-  );
-
-  return withoutCurrentMessage
-    .filter((msg) => msg.message_text)
-    .slice(-MAX_CONTEXT_MESSAGES)
-    .map((msg) => ({
-      role: msg.role || "unknown",
-      message_text: clamp(msg.message_text, MAX_MESSAGE_CHARS),
-      timestamp: msg.timestamp || "",
-      // _time blijft behouden: getActiveAbsence gebruikt het voor het
-      // tijdvenster van de afwezigheidsstatus. Het veld wordt niet naar
-      // ElevenLabs of Airtable gestuurd -- buildContextBlock bouwt zijn eigen
-      // objecten met alleen role/timestamp/message_text.
-      _time: msg._time ?? parseTimestamp(msg.timestamp),
-    }));
-}
+      return withoutCurrentMessage
+        .filter((msg) => msg.message_text)
+        .slice(-MAX_CONTEXT_MESSAGES)
+        .map((msg) => ({
+          role: msg.role || "unknown",
+          message_text: clamp(msg.message_text, MAX_MESSAGE_CHARS),
+          timestamp: msg.timestamp || "",
+        }));
+  }
 
 function getLastEmmaMessages(messages, limit = 3) {
-  return messages
-    .filter((msg) => msg.role === "emma" && msg.message_text)
-    .slice(-limit)
-    .map((msg) => msg.message_text);
+   return messages
+      .filter((msg) => msg.role === "emma" && msg.message_text)
+      .slice(-limit)
+      .map((msg) => msg.message_text);
 }
 
 function getLastUserMessages(messages, limit = 3) {
-  return messages
-    .filter((msg) => msg.role === "user" && msg.message_text)
-    .slice(-limit)
-    .map((msg) => msg.message_text);
+   return messages
+      .filter((msg) => msg.role === "user" && msg.message_text)
+      .slice(-limit)
+      .map((msg) => msg.message_text);
 }
 
 function hasPriceBeenMentioned(messages) {
-  // Matches any of the known SKU prices (Control, Basic, Beauty, Deluxe,
-  // Exclusive, combos, plus loose upgrade products), in either € notation
-  // or "euro" form, plus generic price phrasings.
-  const priceRegex =
-    /€\s*\d|£\s*\d|\d\s*zł|\d+\s*euro\b|programma kost|kost in totaal|totaalprijs/i;
-  return messages.some(
-    (msg) => msg.role === "emma" && priceRegex.test(msg.message_text)
-  );
+   // Matches any of the known SKU prices (Control, Basic, Beauty, Deluxe,
+   // Exclusive, combos, plus loose upgrade products), in either € notation
+   // or "euro" form, plus generic price phrasings.
+   const priceRegex =
+      /€\s*\d|£\s*\d|\d\s*zł|\d+\s*euro\b|programma kost|kost in totaal|totaalprijs/i;
+   return messages.some(
+      (msg) => msg.role === "emma" && priceRegex.test(msg.message_text)
+   );
 }
 
 function hasCheckoutLinkBeenSent(messages) {
-  // Matches any of the real tr.ee checkout URLs. Covers Control, all 4 program
-  // SKUs, all program+Control combos, loose upgrade products (Berry caps,
-  // Fruit/Vegetable caps, Berry+Fruit/Vegetable combos), extra products
-  // (Omega, Complete Bars, Superfood, Luminate, Vegetable Soup), in both
-  // Dutch and Belgian markets, plus the France 4-instalment links which all
-  // end in "-4x-fr".
-  return messages.some(
-    (msg) =>
-      msg.role === "emma" &&
-      /tr\.ee\/(?:bestellen-(?:nl|be)-|(?:basic|beauty|deluxe|exclusive)-(?:van|choc|mix)|control1x|[a-z0-9-]+-4x-fr\b)/i.test(
-        msg.message_text
-      )
-  );
+   // Matches any of the real tr.ee checkout URLs. Covers Control, all 4 program
+   // SKUs, all program+Control combos, loose upgrade products (Berry caps,
+   // Fruit/Vegetable caps, Berry+Fruit/Vegetable combos), extra products
+   // (Omega, Complete Bars, Superfood, Luminate, Vegetable Soup), in both
+   // Dutch and Belgian markets, plus the France 4-instalment links which all
+   // end in "-4x-fr".
+   return messages.some(
+      (msg) =>
+        msg.role === "emma" &&
+        /tr\.ee\/(?:bestellen-(?:nl|be)-|(?:basic|beauty|deluxe|exclusive)-(?:van|choc|mix)|control1x|[a-z0-9-]+-4x-fr\b)/i.test(
+          msg.message_text
+        )
+   );
 }
 
 function hasWhatsappGroupLinkBeenSent(messages) {
-  return messages.some(
-    (msg) =>
-      msg.role === "emma" &&
-      /chat\.whatsapp\.com/i.test(msg.message_text)
-  );
+   return messages.some(
+      (msg) =>
+        msg.role === "emma" &&
+        /chat\.whatsapp\.com/i.test(msg.message_text)
+   );
 }
 
 function hasAskedOrderNumber(messages) {
-  return messages.some(
-    (msg) => msg.role === "emma" && /ordernummer/i.test(msg.message_text)
-  );
+   return messages.some(
+      (msg) => msg.role === "emma" && /ordernummer/i.test(msg.message_text)
+   );
 }
 
 function hasAskedTaste(messages) {
-  return messages.some(
-    (msg) =>
-      msg.role === "emma" &&
-      /welke smaak|chocolade.*vanille|vanille.*chocolade|half-half|smaak complete/i.test(
-        msg.message_text
-      )
-  );
+   return messages.some(
+      (msg) =>
+        msg.role === "emma" &&
+        /welke smaak|chocolade.*vanille|vanille.*chocolade|half-half|smaak complete/i.test(
+          msg.message_text
+        )
+   );
 }
 
 function hasReceivedTasteAnswer(messages) {
-  return messages.some(
-    (msg) =>
-      msg.role === "user" &&
-      /\b(chocola(?:de|t)?|vanille|half[-\s]?half|half|mix|gemengd)\b/i.test(
-        msg.message_text
-      )
-  );
+   return messages.some(
+      (msg) =>
+        msg.role === "user" &&
+        /\b(chocola(?:de|t)?|vanille|half[-\s]?half|half|mix|gemengd)\b/i.test(
+          msg.message_text
+        )
+   );
 }
 
 function isTasteOnlyCheckoutAnswer(text) {
-  const normalized = cleanText(text).toLowerCase();
-  if (!normalized) return false;
+   const normalized = cleanText(text).toLowerCase();
+   if (!normalized) return false;
 
-  // Only intercept short answers whose actual content is the taste choice.
-  // Longer messages or questions about Control remain available to Emma so she
-  // can answer them naturally before asking for the final yes/no choice.
-  return /^\s*(?:graag\s+)?(?:chocola(?:de|t)?|vanille|half[-\s]?half|half|mix|gemengd)(?:\s+graag)?[.!]?\s*$/i.test(
-    normalized
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Aangekondigd vertrek (v51)
-// ---------------------------------------------------------------------------
-// Situatie die dit oplost: de klant zegt midden in het gesprek dat ze weg moet
-// ("je vais au kine", "ik moet weg"). Emma sluit correct af met "tot later".
-// De klant bevestigt dat met "Ok" -- en Emma las dat tot nu toe als een nieuwe
-// gespreksbeurt en hervatte met "wat leuk dat je terug bent", terwijl de klant
-// net vertrokken was.
-//
-// Dit staat los van de "welkom terug"-regel elders in dit bestand: die dekt
-// LANGE stiltes tussen sessies. Dit dekt een aangekondigd vertrek BINNEN een
-// lopend gesprek.
-
-// Zegt de klant in dit bericht dat ze weg moet / later terugkomt?
-// Bewust smal gehouden: alleen expliciete vertreksignalen, in alle 7 talen.
-const ABSENCE_ANNOUNCEMENT_PATTERN = new RegExp(
-  [
-    // NL
-    "ik moet (?:er ?vandoor|weg|gaan|stoppen|afsluiten)",
-    "moet (?:even|nu) weg",
-    "ben (?:zo|straks|later) (?:terug|weer terug)",
-    "spreek je (?:later|straks|morgen)",
-    "tot (?:later|straks|morgen|zo)",
-    // FR
-    "je (?:dois|vais) (?:y aller|partir|filer)",
-    "je suis oblig[ée]+e? d[e']\\s*(?:partir|quitter|y aller)",
-    "je vais (?:au|chez|a la|à la)\\s",
-    "je reviens",
-    "[àa] (?:plus tard|toute|tout de suite|demain)",
-    "je te (?:redis|recontacte|rappelle)",
-    // EN
-    "i (?:have to|need to|gotta|must) (?:go|run|leave|head off)",
-    "talk (?:to you )?(?:later|soon|tomorrow)",
-    "be(?: right)? back",
-    "brb\\b",
-    // DE
-    "ich muss (?:los|weg|gehen|aufh[öo]ren)",
-    "bis (?:sp[äa]ter|gleich|morgen)",
-    "melde mich (?:sp[äa]ter|wieder)",
-    // IT
-    "devo (?:andare|scappare)",
-    "a (?:dopo|pi[ùu] tardi|domani)",
-    "torno (?:dopo|pi[ùu] tardi)",
-    // ES
-    "tengo que (?:irme|marcharme|salir)",
-    "hasta (?:luego|ma[ñn]ana|ahora)",
-    "vuelvo (?:luego|m[áa]s tarde)",
-    // PL
-    "musz[ęe] (?:i[śs][ćc]|leci[ćc]|ko[ńn]czy[ćc])",
-    "do (?:zobaczenia|p[óo][źz]niej)",
-    "wracam (?:p[óo][źz]niej|za chwil)",
-    // PT
-    "tenho (?:de|que) (?:ir|sair|desligar)",
-    "vou (?:ter que ir|indo|sair)",
-    "at[ée] (?:logo|j[áa]|mais tarde|amanh[ãa])",
-    "j[áa] volto",
-    "volto (?:mais tarde|logo)",
-    "falamos (?:mais tarde|logo|amanh[ãa])",
-  ].join("|"),
-  "i"
-);
-
-function isAbsenceAnnouncement(text) {
-  const normalized = cleanText(text);
-  if (!normalized) return false;
-  return ABSENCE_ANNOUNCEMENT_PATTERN.test(normalized);
-}
-
-// Puur bevestigend bericht zonder eigen inhoud: "ok", "merci", een duimpje.
-// Dat is geen gespreksbeurt maar een punt achter de vorige beurt.
-//
-// BEWUST NIET IN DEZE LIJST: ja/nee/oui/non/yes/no/si/tak. Dat lijken
-// bevestigingen, maar het zijn ANTWOORDEN. Staat er ergens nog een open vraag
-// (bijvoorbeeld de Control-upsell), dan is "Oui" een koopsignaal en geen punt
-// achter het gesprek. Die mogen we nooit inslikken.
-const PURE_ACKNOWLEDGEMENT_WORD =
-  "(?:ok(?:e|ay|é|ee)?|oke|d'accord|daccord|dacc|entendu|parfait|tr[èe]s bien|merci(?:\\s+beaucoup)?|bedankt|dank ?je ?wel|dank ?je|dank ?u ?wel|dankjewel|dankje|dank|thanks|thank you|thx|danke(?:\\s+sch[öo]n)?|vielen dank|grazie(?:\\s+mille)?|gracias|muchas gracias|dzi[ęe]kuj[ęe]|dzi[ęe]ki|prima|top|fijn|mooi|helder|duidelijk|bien s[ûu]r|va bene|super|obrigad[ao]|est[áa] bem|combinado)";
-
-// Eén of meer bevestigingswoorden achter elkaar: "Ok", "Ok merci", "Merci !!".
-const PURE_ACKNOWLEDGEMENT_PATTERN = new RegExp(
-  `^\\s*${PURE_ACKNOWLEDGEMENT_WORD}(?:[\\s,.!…]+${PURE_ACKNOWLEDGEMENT_WORD})*[\\s.!,…]*$`,
-  "iu"
-);
-
-
-function isPureAcknowledgement(text) {
-  const normalized = cleanText(text);
-  if (!normalized) return false;
-  // Alleen korte berichten; alles langer bevat eigen inhoud.
-  if (normalized.length > 25) return false;
-  // Een vraagteken maakt het altijd een echte beurt.
-  if (/\?/.test(normalized)) return false;
-  // Los emoji-bericht telt ook als bevestiging.
-  if (/^[\p{Extended_Pictographic}‍️\s]+$/u.test(normalized)) {
-    return true;
-  }
-  // Emoji's achteraan negeren voor de tekstmatch ("Ok 👍").
-  const withoutEmoji = normalized
-    .replace(/[\p{Extended_Pictographic}‍️]/gu, "")
-    .trim();
-  if (!withoutEmoji) return true;
-  return PURE_ACKNOWLEDGEMENT_PATTERN.test(withoutEmoji);
-}
-
-// ---------------------------------------------------------------------------
-// Afwezigheidsstatus (v51) -- structuur, geen woordenlijst
-// ---------------------------------------------------------------------------
-// De klant heeft in dit gesprek gezegd dat ze weg moest. Vanaf dat moment geldt
-// ze als AFWEZIG, en blijft dat, tot een van deze twee dingen gebeurt:
-//
-//   1. ze stuurt een bericht met echte inhoud (een vraag, een keuze, een
-//      verhaal) -- dan is ze terug;
-//   2. er is meer dan ABSENCE_WINDOW_MS verstreken sinds het vertreksignaal --
-//      dan pakt Emma het gesprek gewoon weer op.
-//
-// Er wordt bewust NIET gekeken naar hoe Emma afscheid nam. Zij varieert haar
-// formulering met opzet (de prompt verbiedt vaste sjablonen), dus elke
-// woordenlijst daarvoor loopt per definitie achter. De gespreksstructuur is
-// stabiel, de woorden niet.
-
-const ABSENCE_WINDOW_MS = Number(
-  process.env.ABSENCE_WINDOW_MS || 30 * 60 * 1000
-);
-
-// Is dit bericht van de klant "echte inhoud"? Alles wat geen kale bevestiging
-// en geen vertreksignaal is, telt als terugkomen in het gesprek.
-function isSubstantiveUserMessage(text) {
-  const value = cleanText(text);
-  if (!value) return false;
-  if (isPureAcknowledgement(value)) return false;
-  if (isAbsenceAnnouncement(value)) return false;
-  return true;
-}
-
-// Bepaalt of de klant op DIT moment als afwezig geldt.
-// Geeft het vertreksignaal terug (of null), zodat de aanroeper kan loggen waarom.
-function getActiveAbsence(messages, nowMs) {
-  const list = Array.isArray(messages) ? messages : [];
-
-  // Zoek het LAATSTE vertreksignaal van de klant.
-  let departureIndex = -1;
-  for (let i = list.length - 1; i >= 0; i -= 1) {
-    const msg = list[i];
-    if (msg.role === "user" && isAbsenceAnnouncement(msg.message_text)) {
-      departureIndex = i;
-      break;
-    }
-  }
-  if (departureIndex === -1) return null;
-
-  const departure = list[departureIndex];
-
-  // Heeft de klant NA het vertrek al iets inhoudelijks gestuurd? Dan is ze terug.
-  for (let i = departureIndex + 1; i < list.length; i += 1) {
-    const msg = list[i];
-    if (msg.role === "user" && isSubstantiveUserMessage(msg.message_text)) {
-      return null;
-    }
-  }
-
-  // Tijdvenster: na ABSENCE_WINDOW_MS pakt Emma het gesprek gewoon weer op.
-  // Ontbreekt de timestamp, dan valt de afwezigheid terug op de inhoudsregel
-  // hierboven -- dat is de veilige kant (Emma zwijgt liever te lang dan te kort).
-  const departureTime = departure._time;
-  if (departureTime && Number.isFinite(nowMs)) {
-    if (nowMs - departureTime > ABSENCE_WINDOW_MS) return null;
-  }
-
-  return departure;
+   // Only intercept short answers whose actual content is the taste choice.
+   // Longer messages or questions about Control remain available to Emma so she
+   // can answer them naturally before asking for the final yes/no choice.
+   return /^\s*(?:graag\s+)?(?:chocola(?:de|t)?|vanille|half[-\s]?half|half|mix|gemengd)(?:\s+graag)?[.!]?\s*$/i.test(
+      normalized
+   );
 }
 
 function controlFollowUpForLanguage(language, tasteText) {
-  const taste = cleanText(tasteText).toLowerCase();
-  const labels = {
-    nl: { chocolate: "chocolade", vanilla: "vanille", mix: "half-half" },
-    en: { chocolate: "chocolate", vanilla: "vanilla", mix: "half-and-half" },
-    fr: { chocolate: "chocolat", vanilla: "vanille", mix: "moitié-moitié" },
-    de: { chocolate: "Schokolade", vanilla: "Vanille", mix: "halb-halb" },
-    it: { chocolate: "cioccolato", vanilla: "vaniglia", mix: "metà e metà" },
-    es: { chocolate: "chocolate", vanilla: "vainilla", mix: "mitad y mitad" },
-    pl: { chocolate: "czekolada", vanilla: "wanilia", mix: "pół na pół" },
-    pt: { chocolate: "chocolate", vanilla: "baunilha", mix: "meio a meio" },
-  };
+   const taste = cleanText(tasteText).toLowerCase();
+   const labels = {
+        nl: { chocolate: "chocolade", vanilla: "vanille", mix: "half-half" },
+        en: { chocolate: "chocolate", vanilla: "vanilla", mix: "half-and-half" },
+        fr: { chocolate: "chocolat", vanilla: "vanille", mix: "moitié-moitié" },
+        de: { chocolate: "Schokolade", vanilla: "Vanille", mix: "halb-halb" },
+        it: { chocolate: "cioccolato", vanilla: "vaniglia", mix: "metà e metà" },
+        es: { chocolate: "chocolate", vanilla: "vainilla", mix: "mitad y mitad" },
+        pl: { chocolate: "czekolada", vanilla: "wanilia", mix: "pół na pół" },
+      };
 
-  const key = /chocola/.test(taste)
-    ? "chocolate"
-    : /half|mix|gemengd/.test(taste)
-      ? "mix"
-      : "vanilla";
-  const lang = labels[language] ? language : "en";
-  const label = labels[lang][key];
+      const key = /chocola/.test(taste)
+        ? "chocolate"
+        : /half|mix|gemengd/.test(taste)
+          ? "mix"
+          : "vanilla";
+      const lang = labels[language] ? language : "en";
+      const label = labels[lang][key];
 
-  const messages = {
-    nl: `Helder, ${label} genoteerd 🍦\n\nWil je Control erbij doen? 💚`,
-    en: `Got it, ${label} noted 🍦\n\nWould you like to add Control? 💚`,
-    fr: `Parfait, ${label} noté 🍦\n\nSouhaites-tu ajouter Control ? 💚`,
-    de: `Alles klar, ${label} ist notiert 🍦\n\nMöchtest du Control dazu nehmen? 💚`,
-    it: `Perfetto, ${label} segnato 🍦\n\nVuoi aggiungere Control? 💚`,
-    es: `Perfecto, ${label} anotado 🍦\n\n¿Quieres añadir Control? 💚`,
-    pl: `Jasne, zapisuję ${label} 🍦\n\nCzy chcesz dodać Control? 💚`,
-    // Alleen voor de volledigheid. Een Portugeestalige klant in Portugal krijgt
-    // de Control-vraag nooit (customer_country PT -> Control bestaat daar niet);
-    // deze regel is er voor het geval een pt-gesprek buiten Portugal loopt.
-    pt: `Perfeito, ${label} anotado 🍦\n\nQueres juntar o Control? 💚`,
-  };
+      const messages = {
+         nl: `Helder, ${label} genoteerd \n\nWil je Control erbij doen? `,
+         en: `Got it, ${label} noted \n\nWould you like to add Control? `,
+         fr: `Parfait, ${label} noté \n\nSouhaites-tu ajouter Control ? `,
+         de: `Alles klar, ${label} ist notiert \n\nMöchtest du Control dazu nehmen?   `,
+         it: `Perfetto, ${label} segnato \n\nVuoi aggiungere Control? `,
+         es: `Perfecto, ${label} anotado \n\n¿Quieres añadir Control? `,
+         pl: `Jasne, zapisuję ${label} \n\nCzy chcesz dodać Control? `,
+      };
 
-  return messages[lang];
-}
-
-// Detects whether the user has explicitly answered Emma's "wil je Control
-// erbij?" upsell question in the checkout flow. Looks for affirmative or
-// negative responses around Control, plus standalone yes/no answers that
-// immediately follow Emma's combo question containing "Control".
-function hasReceivedControlAnswer(messages) {
-  // Find the most recent Emma message that asks about Control.
-  // Matches several common phrasings of the upsell question:
-  //   - "Control er gelijk bij doen"
-  //   - "Control erbij doen"
-  //   - "Control er bij"
-  //   - "Control toevoegen"
-  //   - "ook Control"
-  const emmaControlQuestionPattern =
-    /control\s+(?:er\s*(?:gelijk\s+)?bij|toevoegen)|\book\s+control\b/i;
-  let lastEmmaIndexWithControlAsk = -1;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const msg = messages[i];
-    if (
-      msg.role === "emma" &&
-      emmaControlQuestionPattern.test(msg.message_text || "")
-    ) {
-      lastEmmaIndexWithControlAsk = i;
-      break;
-    }
+      return messages[lang];
   }
 
-  // Check user messages AFTER Emma's Control question for an answer
-  const userMessagesAfterAsk =
-    lastEmmaIndexWithControlAsk >= 0
-      ? messages.slice(lastEmmaIndexWithControlAsk + 1)
-      : messages;
-
-  return userMessagesAfterAsk.some((msg) => {
-    if (msg.role !== "user") return false;
-    const text = (msg.message_text || "").toLowerCase();
-
-    // Explicit Control yes/no
-    if (
-      /\b(ja|jazeker|graag|prima|zeker|doe maar|inderdaad|natuurlijk).{0,30}control\b/i.test(
-        text
-      )
-    )
-      return true;
-    if (
-      /\bcontrol.{0,30}(ja|jazeker|graag|prima|zeker|doe maar|inderdaad|natuurlijk)\b/i.test(
-        text
-      )
-    )
-      return true;
-    if (
-      /\b(nee|geen|zonder|liever niet|laat maar).{0,30}control\b/i.test(text)
-    )
-      return true;
-    if (
-      /\bcontrol.{0,30}(nee|geen|zonder|liever niet|laat maar|niet)\b/i.test(
-        text
-      )
-    )
-      return true;
-
-    // Standalone yes/no when Emma's last question contained Control
-    if (lastEmmaIndexWithControlAsk >= 0) {
-      // Standalone affirmative answers (single or short combinations).
-      // The "doe\s*maa?r[ts]?" pattern matches "doe maar", "doemaar",
-      // "doe maart" (common typo with extra t), "doe mar", etc.
-      if (
-        /^\s*(?:ja|jazeker|graag|prima|doe\s*maa?r[ts]?|inderdaad|natuurlijk|zeker|oke|ok|jep|yes|sure)(?:\s+(?:graag|zeker|prima|doe\s*maa?r[ts]?|natuurlijk))?\s*[\.!]?\s*$/i.test(
-          text
-        )
-      )
-        return true;
-      // Standalone negative answers (single or short combinations)
-      if (
-        /^\s*(?:nee|nope|geen|niks)(?:,?\s*(?:dank\s*je(?:\s*wel)?|bedankt|laat\s+maar|hoor|joh))?\s*[\.!]?\s*$/i.test(
-          text
-        )
-      )
-        return true;
+  // Detects whether the user has explicitly answered Emma's "wil je Control
+  // erbij?" upsell question in the checkout flow. Looks for affirmative or
+  // negative responses around Control, plus standalone yes/no answers that
+  // immediately follow Emma's combo question containing "Control".
+  function hasReceivedControlAnswer(messages) {
+    // Find the most recent Emma message that asks about Control.
+    // Matches several common phrasings of the upsell question:
+    //     - "Control er gelijk bij doen"
+    //     - "Control erbij doen"
+    //     - "Control er bij"
+    //     - "Control toevoegen"
+    //     - "ook Control"
+    const emmaControlQuestionPattern =
+       /control\s+(?:er\s*(?:gelijk\s+)?bij|toevoegen)|\book\s+control\b/i;
+    let lastEmmaIndexWithControlAsk = -1;
+    for (let i = messages.length - 1; i >= 0; i--) {
+       const msg = messages[i];
+       if (
+         msg.role === "emma" &&
+         emmaControlQuestionPattern.test(msg.message_text || "")
+       ) {
+         lastEmmaIndexWithControlAsk = i;
+         break;
+       }
     }
 
-    return false;
-  });
+      // Check user messages AFTER Emma's Control question for an answer
+      const userMessagesAfterAsk =
+        lastEmmaIndexWithControlAsk >= 0
+          ? messages.slice(lastEmmaIndexWithControlAsk + 1)
+          : messages;
+
+      return userMessagesAfterAsk.some((msg) => {
+        if (msg.role !== "user") return false;
+        const text = (msg.message_text || "").toLowerCase();
+
+        // Explicit Control yes/no
+        if (
+          /\b(ja|jazeker|graag|prima|zeker|doe maar|inderdaad|natuurlijk).{0,30}control\b/i.test(
+             text
+          )
+        )
+          return true;
+        if (
+          /\bcontrol.{0,30}(ja|jazeker|graag|prima|zeker|doe maar|inderdaad|natuurlijk)\b/i.test(
+             text
+          )
+        )
+          return true;
+        if (
+          /\b(nee|geen|zonder|liever niet|laat maar).{0,30}control\b/i.test(text)
+        )
+          return true;
+        if (
+          /\bcontrol.{0,30}(nee|geen|zonder|liever niet|laat maar|niet)\b/i.test(
+             text
+          )
+        )
+          return true;
+
+        // Standalone yes/no when Emma's last question contained Control
+      if (lastEmmaIndexWithControlAsk >= 0) {
+        // Standalone affirmative answers (single or short combinations).
+        // The "doe\s*maa?r[ts]?" pattern matches "doe maar", "doemaar",
+        // "doe maart" (common typo with extra t), "doe mar", etc.
+        if (
+          /^\s*(?:ja|jazeker|graag|prima|doe\s*maa?r[ts]?|inderdaad|natuurlijk|zeker|oke|ok|jep|yes|sure)(?:\s+(?:graag|zeker|prima|doe\s*maa?r[ts]?|natuurlijk))?\s*[\.!]?\s*$/i.test(
+             text
+          )
+        )
+          return true;
+        // Standalone negative answers (single or short combinations)
+        if (
+          /^\s*(?:nee|nope|geen|niks)(?:,?\s*(?:dank\s*je(?:\s*wel)?|bedankt|laat\s+maar|hoor|joh))?\s*[\.!]?\s*$/i.test(
+             text
+          )
+        )
+          return true;
+      }
+
+      return false;
+   });
 }
 
 function isCustomerStatusValidated(customerStatus, recentMessages) {
-  return (
-    cleanText(customerStatus).toLowerCase() === "customer" ||
-    hasWhatsappGroupLinkBeenSent(recentMessages)
-  );
+   return (
+      cleanText(customerStatus).toLowerCase() === "customer" ||
+      hasWhatsappGroupLinkBeenSent(recentMessages)
+   );
 }
 
 /* ---------------------- PRODUCT FIELD DERIVATION ------------------------- */
@@ -1257,7 +830,7 @@ const PROGRAM_PATTERN = /\b(basic|beauty|deluxe|exclusive)\b/i;
 const PROGRAM_PATTERN_GLOBAL = /\b(basic|beauty|deluxe|exclusive)\b/gi;
 const CONTROL_MENTION_PATTERN = /\bcontrol\b/i;
 const CONTROL_COMBO_PATTERN =
-  /(?:\bmet[\s-]*(?:de[\s-]*)?control|\ben[\s-]*(?:de[\s-]*)?control|\binclusief[\s-]*control|\bcontrol[\s-]*erbij|(?:^|\s|\W)\+[\s-]*control)/i;
+   /(?:\bmet[\s-]*(?:de[\s-]*)?control|\ben[\s-]*(?:de[\s-]*)?control|\binclusief[\s-]*control|\bcontrol[\s-]*erbij|(?:^|\s|\W)\+[\s-]*control)/i;
 
 // Parses a tr.ee checkout URL and extracts the SKU components:
 // program (Basic/Beauty/Deluxe/Exclusive or empty for Control-only) and
@@ -1265,351 +838,352 @@ const CONTROL_COMBO_PATTERN =
 // what the customer was actually directed to buy, which is more reliable
 // than parsing Emma's natural-language confirmation text.
 function parseCheckoutLinkSKU(url) {
-  if (!url) return null;
+   if (!url) return null;
 
-  // France 4-instalment links (2026): tr.ee/basic-van-4x-fr,
-  // tr.ee/beauty-mixte-control-4x-fr, tr.ee/basic-mix-control-4x-fr, ...
-  // Note the taste token is "mixte" everywhere EXCEPT Basic+Control, which
-  // uses "mix". Both spellings are accepted here, and "mixte" is listed before
-  // "mix" so the longer token wins.
-  //
-  // This branch MUST run before the universal branch below. The universal
-  // pattern would otherwise match the "beauty-mix" prefix of
-  // "beauty-mixte-control-4x-fr", fail to see the "-control" that follows
-  // "mixte", and return hasControl=false for a combo order.
-  const franceMatch = url.match(
-    /tr\.ee\/(basic|beauty|deluxe|exclusive)-(?:van|choc|mixte|mix)(-control)?-4x-fr/i
-  );
-  if (franceMatch) {
-    const lower = franceMatch[1].toLowerCase();
-    const program = lower.charAt(0).toUpperCase() + lower.slice(1);
-    const hasControl = Boolean(franceMatch[2]);
-    return { program, hasControl };
-  }
-  if (/tr\.ee\/control-4x-fr(?:\b|\/|\?|$)/i.test(url)) {
-    return { program: "", hasControl: true };
-  }
+   // France 4-instalment links (2026): tr.ee/basic-van-4x-fr,
+   // tr.ee/beauty-mixte-control-4x-fr, tr.ee/basic-mix-control-4x-fr, ...
+   // Note the taste token is "mixte" everywhere EXCEPT Basic+Control, which
+   // uses "mix". Both spellings are accepted here, and "mixte" is listed before
+   // "mix" so the longer token wins.
+   //
+   // This branch MUST run before the universal branch below. The universal
+   // pattern would otherwise match the "beauty-mix" prefix of
+   // "beauty-mixte-control-4x-fr", fail to see the "-control" that follows
+   // "mixte", and return hasControl=false for a combo order.
+   const franceMatch = url.match(
+      /tr\.ee\/(basic|beauty|deluxe|exclusive)-(?:van|choc|mixte|mix)(-control)?-4x-fr/i
+   );
+   if (franceMatch) {
+      const lower = franceMatch[1].toLowerCase();
+      const program = lower.charAt(0).toUpperCase() + lower.slice(1);
+      const hasControl = Boolean(franceMatch[2]);
+      return { program, hasControl };
+   }
+   if (/tr\.ee\/control-4x-fr(?:\b|\/|\?|$)/i.test(url)) {
+      return { program: "", hasControl: true };
+   }
 
-  // Universal links (2026): tr.ee/Basic-Van, tr.ee/Deluxe-Mix-Control, ...
-  const universalMatch = url.match(
-    /tr\.ee\/(basic|beauty|deluxe|exclusive)-(?:van|choc|mix)(-control)?/i
-  );
-  if (universalMatch) {
-    const lower = universalMatch[1].toLowerCase();
-    const program = lower.charAt(0).toUpperCase() + lower.slice(1);
-    const hasControl = Boolean(universalMatch[2]);
-    return { program, hasControl };
-  }
-  if (/tr\.ee\/control1x(?:\b|\/|\?|$)/i.test(url)) {
-    return { program: "", hasControl: true };
-  }
+   // Universal links (2026): tr.ee/Basic-Van, tr.ee/Deluxe-Mix-Control, ...
+   const universalMatch = url.match(
+      /tr\.ee\/(basic|beauty|deluxe|exclusive)-(?:van|choc|mix)(-control)?/i
+   );
+   if (universalMatch) {
+      const lower = universalMatch[1].toLowerCase();
+      const program = lower.charAt(0).toUpperCase() + lower.slice(1);
+      const hasControl = Boolean(universalMatch[2]);
+      return { program, hasControl };
+   }
+   if (/tr\.ee\/control1x(?:\b|\/|\?|$)/i.test(url)) {
+      return { program: "", hasControl: true };
+   }
 
-  // Legacy country links, kept so running conversations still validate.
-  const programMatch = url.match(
-    /tr\.ee\/bestellen-(?:nl|be)-(basic|beauty|deluxe|exclusive)(?:-(?:choc|van|mix))?(-control)?/i
-  );
-  if (programMatch) {
-    const lower = programMatch[1].toLowerCase();
-    const program = lower.charAt(0).toUpperCase() + lower.slice(1);
-    const hasControl = Boolean(programMatch[2]);
-    return { program, hasControl };
-  }
-  if (/tr\.ee\/bestellen-(?:nl|be)-control(?:\b|\/|\?|$)/i.test(url)) {
-    return { program: "", hasControl: true };
-  }
+   // Legacy country links, kept so running conversations still validate.
+   const programMatch = url.match(
+      /tr\.ee\/bestellen-(?:nl|be)-(basic|beauty|deluxe|exclusive)(?:-(?:choc|van|mix))?(-control)?/i
+   );
+   if (programMatch) {
+      const lower = programMatch[1].toLowerCase();
+      const program = lower.charAt(0).toUpperCase() + lower.slice(1);
+      const hasControl = Boolean(programMatch[2]);
+      return { program, hasControl };
+   }
+   if (/tr\.ee\/bestellen-(?:nl|be)-control(?:\b|\/|\?|$)/i.test(url)) {
+      return { program: "", hasControl: true };
+   }
 
-  return null;
+   return null;
 }
 
 // Walks backward through Emma's messages to find the most recent tr.ee
 // checkout URL she sent. Prefers the current reply if it contains a link.
 function findLastEmmaCheckoutLink(messages, currentReply) {
-  // The France alternative is listed FIRST so that a "-4x-fr" link is matched
-  // in full. Otherwise the universal alternative would match its "basic-van"
-  // prefix and silently drop the "-control" that follows "mixte".
-  const urlRegex =
-    /(https?:\/\/tr\.ee\/(?:(?:basic|beauty|deluxe|exclusive)-(?:van|choc|mixte|mix)(?:-control)?-4x-fr|control-4x-fr|[a-z0-9-]+-4x-fr|bestellen-[a-z0-9-]+|(?:basic|beauty|deluxe|exclusive)-(?:van|choc|mix)(?:-control)?|control1x))/i;
+   // The France alternative is listed FIRST so that a "-4x-fr" link is matched
+   // in full. Otherwise the universal alternative would match its "basic-van"
+   // prefix and silently drop the "-control" that follows "mixte".
+   const urlRegex =
+      /(https?:\/\/tr\.ee\/(?:(?:basic|beauty|deluxe|exclusive)-(?:van|choc|mixte|mix)(?:-control)?-4x-fr|control-4x-fr|[a-z0-9-]+-4x-fr|bestellen-[a-z0-9-]+|(?:basic|beauty|deluxe|exclusive)-(?:van|choc|mix)(?:-control)?|control1x))/i;
 
-  if (currentReply) {
-    const match = cleanText(currentReply).match(urlRegex);
-    if (match) return match[1];
-  }
-
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const msg = messages[i];
-    if (msg.role === "emma" && msg.message_text) {
-      const match = cleanText(msg.message_text).match(urlRegex);
+   if (currentReply) {
+      const match = cleanText(currentReply).match(urlRegex);
       if (match) return match[1];
-    }
-  }
+   }
 
-  return "";
+   for (let i = messages.length - 1; i >= 0; i--) {
+      const msg = messages[i];
+      if (msg.role === "emma" && msg.message_text) {
+        const match = cleanText(msg.message_text).match(urlRegex);
+        if (match) return match[1];
+      }
+   }
+
+   return "";
 }
 
 function userMessagesContainOrderNumber(messages, currentUserMessage) {
-  if (currentUserMessage && ORDER_NUMBER_PATTERN.test(cleanText(currentUserMessage))) {
-    return true;
-  }
+   if (currentUserMessage && ORDER_NUMBER_PATTERN.test(cleanText(currentUserMessage))) {
+      return true;
+   }
 
-  return messages.some(
-    (msg) =>
-      msg.role === "user" &&
-      ORDER_NUMBER_PATTERN.test(cleanText(msg.message_text))
-  );
+   return messages.some(
+      (msg) =>
+        msg.role === "user" &&
+        ORDER_NUMBER_PATTERN.test(cleanText(msg.message_text))
+   );
 }
 
 function findProgramInText(text) {
-  if (!text) return "";
-  const matches = text.match(PROGRAM_PATTERN_GLOBAL);
-  if (!matches || matches.length === 0) return "";
-  const lastMatch = matches[matches.length - 1];
-  const lower = lastMatch.toLowerCase();
-  return lower.charAt(0).toUpperCase() + lower.slice(1);
+   if (!text) return "";
+   const matches = text.match(PROGRAM_PATTERN_GLOBAL);
+   if (!matches || matches.length === 0) return "";
+   const lastMatch = matches[matches.length - 1];
+   const lower = lastMatch.toLowerCase();
+   return lower.charAt(0).toUpperCase() + lower.slice(1);
 }
 
 function findEmmaConfirmationMessage(messages, currentReply) {
-  // The "confirmation" is the most recent Emma message that contains the
-  // WhatsApp group link. Prefer the current reply if it contains the link.
-  if (currentReply && /chat\.whatsapp\.com/i.test(cleanText(currentReply))) {
-    return cleanText(currentReply);
-  }
+   // The "confirmation" is the most recent Emma message that contains the
+   // WhatsApp group link. Prefer the current reply if it contains the link.
+   if (currentReply && /chat\.whatsapp\.com/i.test(cleanText(currentReply))) {
+      return cleanText(currentReply);
+   }
+   for (let i = messages.length - 1; i >= 0; i--) {
+      const msg = messages[i];
+      if (
+        msg.role === "emma" &&
+        /chat\.whatsapp\.com/i.test(cleanText(msg.message_text))
+      ) {
+        return cleanText(msg.message_text);
+      }
+   }
 
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const msg = messages[i];
-    if (
-      msg.role === "emma" &&
-      /chat\.whatsapp\.com/i.test(cleanText(msg.message_text))
-    ) {
-      return cleanText(msg.message_text);
-    }
-  }
-
-  return "";
+   return "";
 }
 
 function extractPurchasedProgram(messages, currentReply) {
-  // Primary source: the last checkout URL Emma sent. The URL is the canonical
-  // truth about what the customer was directed to purchase, and is reliable
-  // regardless of what Emma writes in her post-order confirmation message.
-  const lastUrl = findLastEmmaCheckoutLink(messages, currentReply);
-  const fromUrl = parseCheckoutLinkSKU(lastUrl);
-  if (fromUrl) {
-    return fromUrl.program;
-  }
+   // Primary source: the last checkout URL Emma sent. The URL is the canonical
+   // truth about what the customer was directed to purchase, and is reliable
+   // regardless of what Emma writes in her post-order confirmation message.
+   const lastUrl = findLastEmmaCheckoutLink(messages, currentReply);
+   const fromUrl = parseCheckoutLinkSKU(lastUrl);
+   if (fromUrl) {
+      return fromUrl.program;
+   }
 
-  // Fallback: parse Emma's post-order confirmation message (the one with the
-  // WhatsApp group link). Used when no checkout URL was sent earlier in the
-  // conversation, e.g. the customer arrived with an order number they got
-  // through a different channel.
-  const confirmationText = findEmmaConfirmationMessage(messages, currentReply);
-  return findProgramInText(confirmationText);
+   // Fallback: parse Emma's post-order confirmation message (the one with the
+   // WhatsApp group link). Used when no checkout URL was sent earlier in the
+   // conversation, e.g. the customer arrived with an order number they got
+   // through a different channel.
+   const confirmationText = findEmmaConfirmationMessage(messages, currentReply);
+   return findProgramInText(confirmationText);
 }
 
 function extractInterestedInProgram(messages, currentUserMessage) {
-  // Program interest is based only on the customer's own statements or
-  // choices. A program suggested by Emma must never be stored as customer
-  // interest. Take the customer's LAST explicit program mention.
-  let lastMatch = "";
+   // Program interest is based only on the customer's own statements or
+   // choices. A program suggested by Emma must never be stored as customer
+   // interest. Take the customer's LAST explicit program mention.
+   let lastMatch = "";
 
-  for (const msg of messages) {
-    if (msg.role !== "user") continue;
-    const found = findProgramInText(cleanText(msg.message_text));
-    if (found) lastMatch = found;
-  }
+   for (const msg of messages) {
+      if (msg.role !== "user") continue;
+      const found = findProgramInText(cleanText(msg.message_text));
+      if (found) lastMatch = found;
+   }
 
-  const userFound = findProgramInText(cleanText(currentUserMessage));
-  if (userFound) lastMatch = userFound;
+   const userFound = findProgramInText(cleanText(currentUserMessage));
+   if (userFound) lastMatch = userFound;
 
-  return lastMatch;
+   return lastMatch;
 }
 
 function deriveHasControl(messages, currentReply, programName) {
-  // Returns "ja" / "nee" for consistency with the interested_in_control field
-  // (both fields use the same Dutch boolean style in Airtable, instead of the
-  // English "true"/"false" which created select-option mismatches).
-  //
-  // Primary source: the last checkout URL Emma sent. If the URL ends with
-  // "-control" the customer was directed to a combo SKU; if it's a plain
-  // control URL (tr.ee/bestellen-{land}-control) the customer bought
-  // standalone Control. The URL is the canonical truth.
-  const lastUrl = findLastEmmaCheckoutLink(messages, currentReply);
-  const fromUrl = parseCheckoutLinkSKU(lastUrl);
-  if (fromUrl) {
-    return fromUrl.hasControl ? "ja" : "nee";
-  }
+   // Returns "ja" / "nee" for consistency with the interested_in_control field
+   // (both fields use the same Dutch boolean style in Airtable, instead of the
+   // English "true"/"false" which created select-option mismatches).
+   //
+   // Primary source: the last checkout URL Emma sent. If the URL ends with
+   // "-control" the customer was directed to a combo SKU; if it's a plain
+   // control URL (tr.ee/bestellen-{land}-control) the customer bought
+   // standalone Control. The URL is the canonical truth.
+   const lastUrl = findLastEmmaCheckoutLink(messages, currentReply);
+   const fromUrl = parseCheckoutLinkSKU(lastUrl);
+   if (fromUrl) {
+      return fromUrl.hasControl ? "ja" : "nee";
+   }
 
-  // Fallback (no checkout URL was sent): use the legacy text-based detection
-  // on Emma's confirmation message.
-  if (!programName) return "ja";
+   // Fallback (no checkout URL was sent): use the legacy text-based detection
+   // on Emma's confirmation message.
+   if (!programName) return "ja";
 
-  const confirmationText = findEmmaConfirmationMessage(messages, currentReply);
-  if (!confirmationText) return "nee";
+   const confirmationText = findEmmaConfirmationMessage(messages, currentReply);
+   if (!confirmationText) return "nee";
 
-  return CONTROL_COMBO_PATTERN.test(confirmationText) ? "ja" : "nee";
+   return CONTROL_COMBO_PATTERN.test(confirmationText) ? "ja" : "nee";
 }
 
 function deriveInterestedInControl(messages, currentUserMessage) {
-  // Store Control interest only when the customer shows demonstrably positive
-  // interest. Emma mentioning or explaining Control is never sufficient.
-  // Negative answers are deliberately returned as an empty update so they can
-  // never be stored as positive interest.
-  const positiveWithControl =
-    /(?:\b(?:ja|jazeker|graag|prima|zeker|doe\s*maa?r[ts]?|inderdaad|natuurlijk|oke|ok|yes|sure)\b.{0,40}\bcontrol\b|\bcontrol\b.{0,40}\b(?:ja|jazeker|graag|prima|zeker|doe\s*maa?r[ts]?|inderdaad|natuurlijk|oke|ok|yes|sure|erbij|toevoegen|nemen|wil|bestellen)\b)/i;
-  const negativeWithControl =
-    /(?:\b(?:nee|geen|zonder|liever\s+niet|laat\s+maar)\b.{0,40}\bcontrol\b|\bcontrol\b.{0,40}\b(?:nee|niet|geen|zonder|liever\s+niet|laat\s+maar)\b)/i;
-  const standalonePositive =
-    /^\s*(?:ja|jazeker|graag|prima|doe\s*maa?r[ts]?|inderdaad|natuurlijk|zeker|oke|ok|jep|yes|sure)(?:\s+(?:graag|zeker|prima|doe\s*maa?r[ts]?|natuurlijk))?\s*[.!]?\s*$/i;
-  const standaloneNegative =
-    /^\s*(?:nee|nope|geen|niks)(?:,?\s*(?:dank\s*je(?:\s*wel)?|bedankt|laat\s+maar|hoor|joh))?\s*[.!]?\s*$/i;
+   // Store Control interest only when the customer shows demonstrably positive
+   // interest. Emma mentioning or explaining Control is never sufficient.
+   // Negative answers are deliberately returned as an empty update so they can
+   // never be stored as positive interest.
+   const positiveWithControl =
+      /(?:\b(?:ja|jazeker|graag|prima|zeker|doe\s*maa?r[ts]?|inderdaad|natuurlijk|oke|ok|yes|sure)\b.{0,40}\bcontrol\b|\bcontrol\b.{0,40}\b(?:ja|jazeker|graag|prima|zeker|doe\s*maa?r[ts]?|inderdaad|natuurlijk|oke|ok|yes|sure|erbij|toevoegen|nemen|wil|bestellen)\b)/i;
+   const negativeWithControl =
+      /(?:\b(?:nee|geen|zonder|liever\s+niet|laat\s+maar)\b.{0,40}\bcontrol\b|\bcontrol\b.{0,40}\b(?:nee|niet|geen|zonder|liever\s+niet|laat\s+maar)\b)/i;
+   const standalonePositive =
+      /^\s*(?:ja|jazeker|graag|prima|doe\s*maa?r[ts]?|inderdaad|natuurlijk|zeker|oke|ok|jep|yes|sure)(?:\s+(?:graag|zeker|prima|doe\s*maa?r[ts]?|natuurlijk))?\s*[.!]?\s*$/i;
+   const standaloneNegative =
+      /^\s*(?:nee|nope|geen|niks)(?:,?\s*(?:dank\s*je(?:\s*wel)?|bedankt|laat\s+maar|hoor|joh))?\s*[.!]?\s*$/i;
 
-  let lastEmmaControlAsk = -1;
-  const emmaControlQuestionPattern =
-    /control\s+(?:er\s*(?:gelijk\s+)?bij|toevoegen)|\book\s+control\b/i;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const msg = messages[i];
-    if (msg.role === "emma" && emmaControlQuestionPattern.test(cleanText(msg.message_text))) {
-      lastEmmaControlAsk = i;
-      break;
-    }
+   let lastEmmaControlAsk = -1;
+   const emmaControlQuestionPattern =
+      /control\s+(?:er\s*(?:gelijk\s+)?bij|toevoegen)|\book\s+control\b/i;
+
+   for (let i = messages.length - 1; i >= 0; i--) {
+      const msg = messages[i];
+      if (msg.role === "emma" && emmaControlQuestionPattern.test(cleanText(msg.message_text))) {
+        lastEmmaControlAsk = i;
+        break;
+      }
+   }
+
+   const customerTexts = [];
+   for (let i = 0; i < messages.length; i++) {
+      if (messages[i].role === "user") {
+        customerTexts.push({ index: i, text: cleanText(messages[i].message_text) });
+      }
+      }
+      if (currentUserMessage) {
+        customerTexts.push({ index: messages.length, text: cleanText(currentUserMessage) });
+      }
+
+      for (let i = customerTexts.length - 1; i >= 0; i--) {
+        const { index, text } = customerTexts[i];
+        if (!text) continue;
+
+          if (negativeWithControl.test(text)) return "";
+          if (positiveWithControl.test(text)) return "ja";
+
+          // A simple "ja" counts when it answers the latest still-open Control
+          // question. Intervening Emma explanations do not close that question.
+          if (lastEmmaControlAsk >= 0 && index > lastEmmaControlAsk) {
+            if (standaloneNegative.test(text)) return "";
+            if (standalonePositive.test(text)) return "ja";
+          }
+      }
+
+      return "";
   }
 
-  const customerTexts = [];
-  for (let i = 0; i < messages.length; i++) {
-    if (messages[i].role === "user") {
-      customerTexts.push({ index: i, text: cleanText(messages[i].message_text) });
-    }
-  }
-  if (currentUserMessage) {
-    customerTexts.push({ index: messages.length, text: cleanText(currentUserMessage) });
-  }
-
-  for (let i = customerTexts.length - 1; i >= 0; i--) {
-    const { index, text } = customerTexts[i];
-    if (!text) continue;
-
-    if (negativeWithControl.test(text)) return "";
-    if (positiveWithControl.test(text)) return "ja";
-
-    // A simple "ja" counts when it answers the latest still-open Control
-    // question. Intervening Emma explanations do not close that question.
-    if (lastEmmaControlAsk >= 0 && index > lastEmmaControlAsk) {
-      if (standaloneNegative.test(text)) return "";
-      if (standalonePositive.test(text)) return "ja";
-    }
-  }
-
-  return "";
-}
-
-function derivePurchaseFields({
-  recentMessages,
-  currentUserMessage,
-  currentReply,
-  whatsappGroupLinkSentNowOrEarlier,
-}) {
-  // Hard gate: a valid JP04 order number from the user AND a checkout link
-  // sent by Emma. The checkout URL is the canonical purchased SKU.
-  const orderNumberPresent = userMessagesContainOrderNumber(
+  function derivePurchaseFields({
     recentMessages,
-    currentUserMessage
-  );
-  const checkoutLink = findLastEmmaCheckoutLink(recentMessages, currentReply);
-  const validated = orderNumberPresent && Boolean(checkoutLink);
-
-  // interested_in_program / interested_in_control can be derived independently
-  // of the purchase trigger (a customer can be "interested" before buying).
-  const interestedInProgram = extractInterestedInProgram(
-    recentMessages,
-    currentUserMessage
-  );
-  const interestedInControlSignal = deriveInterestedInControl(
-    recentMessages,
-    currentUserMessage
-  );
-
-  if (!validated) {
-    return {
-      validated: false,
-      purchased_program: "",
-      has_control: "",
-      interested_in_program: interestedInProgram,
-      interested_in_control: interestedInControlSignal,
-    };
-  }
-
-  // Validated purchase -> derive purchased_program from Emma's confirmation
-  // message only (the message that contains the WhatsApp group link).
-  const purchasedProgram = extractPurchasedProgram(recentMessages, currentReply);
-  const hasControl = deriveHasControl(
-    recentMessages,
+    currentUserMessage,
     currentReply,
-    purchasedProgram
-  );
-
-  return {
-    validated: true,
-    purchased_program: purchasedProgram,
-    has_control: hasControl,
-    interested_in_program: interestedInProgram,
-    interested_in_control: interestedInControlSignal,
-  };
-}
-
-function detectState({
-  currentMessage,
-  recentMessages,
-  lastSummary,
-  currentPhase,
-  customerStatus = "",
-}) {
-  const hasPreviousEmmaMessage = recentMessages.some(
-    (msg) => msg.role === "emma"
-  );
-
-  const isExistingConversation =
-    hasPreviousEmmaMessage || Boolean(cleanText(lastSummary));
-
-  const latest = cleanText(currentMessage).toLowerCase();
-
-  const hasMedicalTrigger =
-    /\b(zwanger|zwangerschap|borstvoeding|actieve?\s+chemo|chemo(?:therapie)?|eetstoornis|anorexia|boulimia|binge[-\s]?eating)\b/i.test(
-      latest
+    whatsappGroupLinkSentNowOrEarlier,
+  }) {
+    // Hard gate: a valid JP04 order number from the user AND a checkout link
+    // sent by Emma. The checkout URL is the canonical purchased SKU.
+    const orderNumberPresent = userMessagesContainOrderNumber(
+       recentMessages,
+       currentUserMessage
     );
 
-  const hasPurchaseClaim =
-    /\b(besteld|order|ordernummer|betaald|gekocht|whatsapp.?groep|groep|toegang)\b/i.test(
-      latest
+      const checkoutLink = findLastEmmaCheckoutLink(recentMessages, currentReply);
+      const validated = orderNumberPresent && Boolean(checkoutLink);
+
+      // interested_in_program / interested_in_control can be derived independently
+      // of the purchase trigger (a customer can be "interested" before buying).
+      const interestedInProgram = extractInterestedInProgram(
+         recentMessages,
+         currentUserMessage
+      );
+      const interestedInControlSignal = deriveInterestedInControl(
+         recentMessages,
+         currentUserMessage
+      );
+
+      if (!validated) {
+        return {
+           validated: false,
+           purchased_program: "",
+           has_control: "",
+           interested_in_program: interestedInProgram,
+           interested_in_control: interestedInControlSignal,
+        };
+      }
+
+      // Validated purchase -> derive purchased_program from Emma's confirmation
+      // message only (the message that contains the WhatsApp group link).
+      const purchasedProgram = extractPurchasedProgram(recentMessages, currentReply);
+      const hasControl = deriveHasControl(
+         recentMessages,
+         currentReply,
+         purchasedProgram
+      );
+
+      return {
+         validated: true,
+         purchased_program: purchasedProgram,
+         has_control: hasControl,
+         interested_in_program: interestedInProgram,
+         interested_in_control: interestedInControlSignal,
+      };
+  }
+
+  function detectState({
+    currentMessage,
+    recentMessages,
+    lastSummary,
+    currentPhase,
+    customerStatus = "",
+  }) {
+    const hasPreviousEmmaMessage = recentMessages.some(
+       (msg) => msg.role === "emma"
     );
 
-  const hasExplicitBuyingIntent =
-    /\b(bestellen|starten|ik wil starten|hoe bestel|link|kopen|aanschaffen|doorgaan)\b/i.test(
-      latest
-    );
+      const isExistingConversation =
+        hasPreviousEmmaMessage || Boolean(cleanText(lastSummary));
 
-  const lowIntent =
-    /^(ok|oke|ja|nee|weet niet|misschien|kan|vertel maar|hoe bedoel je|prima|goed|klinkt goed)\.?$/i.test(
-      latest
-    );
+   const latest = cleanText(currentMessage).toLowerCase();
 
-  const isValidatedCustomer = isCustomerStatusValidated(
-    customerStatus,
-    recentMessages
-  );
+   const hasMedicalTrigger =
+      /\b(zwanger|zwangerschap|borstvoeding|actieve?\s+chemo|chemo(?:therapie)?|eetstoornis|anorexia|boulimia|binge[-\s]?eating)\b/i.test(
+         latest
+      );
 
-  return {
-    is_existing_conversation: isExistingConversation,
-    has_previous_emma_message: hasPreviousEmmaMessage,
-    has_medical_trigger: hasMedicalTrigger,
-    has_purchase_claim: hasPurchaseClaim,
-    has_explicit_buying_intent: hasExplicitBuyingIntent,
-    is_low_intent: lowIntent,
-    is_validated_customer: isValidatedCustomer,
-    should_use_coaching_mode: isValidatedCustomer,
-    current_phase: isValidatedCustomer ? "coaching" : cleanText(currentPhase),
-  };
+   const hasPurchaseClaim =
+      /\b(besteld|order|ordernummer|betaald|gekocht|whatsapp.?groep|groep|toegang)\b/i.test(
+         latest
+      );
+   const hasExplicitBuyingIntent =
+      /\b(bestellen|starten|ik wil starten|hoe bestel|link|kopen|aanschaffen|doorgaan)\b/i.test(
+         latest
+      );
+
+   const lowIntent =
+      /^(ok|oke|ja|nee|weet niet|misschien|kan|vertel maar|hoe bedoel je|prima|goed|klinkt goed)\.?$/i.test(
+         latest
+      );
+
+   const isValidatedCustomer = isCustomerStatusValidated(
+      customerStatus,
+      recentMessages
+   );
+
+   return {
+      is_existing_conversation: isExistingConversation,
+      has_previous_emma_message: hasPreviousEmmaMessage,
+      has_medical_trigger: hasMedicalTrigger,
+      has_purchase_claim: hasPurchaseClaim,
+      has_explicit_buying_intent: hasExplicitBuyingIntent,
+      is_low_intent: lowIntent,
+      is_validated_customer: isValidatedCustomer,
+      should_use_coaching_mode: isValidatedCustomer,
+      current_phase: isValidatedCustomer ? "coaching" : cleanText(currentPhase),
+   };
 }
 
 /* --------------------------- NEW USER DETECTION --------------------------- */
+
 // A "new user" is detected when the request arrives with no prior conversation
 // — no recent_messages and no last_summary. We deliberately do NOT check
 // customer_status, because Make pre-sets it to "lead" for users routed through
@@ -1626,821 +1200,797 @@ function detectState({
 // Source attribution (Airtable Bron field) is handled by Make/Airtable
 // downstream from the original message body — not by this server.
 function isNewUser({ recentMessages, lastSummary }) {
-  const hasRecentMessages =
-    Array.isArray(recentMessages) && recentMessages.length > 0;
-  const hasLastSummary = Boolean(cleanText(lastSummary));
+   const hasRecentMessages =
+      Array.isArray(recentMessages) && recentMessages.length > 0;
+   const hasLastSummary = Boolean(cleanText(lastSummary));
 
-  return !hasRecentMessages && !hasLastSummary;
+   return !hasRecentMessages && !hasLastSummary;
 }
 
 /* ------------------------------ CONTEXT BLOCK ----------------------------- */
 
 function buildContextBlock({
-  conversation_language,
-  customer_country,
-  customer_status,
-  current_phase,
-  goal,
-  objections,
-  last_summary,
-  interested_in_program,
-  interested_in_control,
-  purchased_program,
-  has_control,
-  recent_messages,
-  latest_user_message,
+   conversation_language,
+   customer_country,
+   customer_status,
+   current_phase,
+   goal,
+   objections,
+   last_summary,
+   interested_in_program,
+   interested_in_control,
+   purchased_program,
+   has_control,
+   recent_messages,
+   latest_user_message,
 }) {
-  const state = detectState({
-    currentMessage: latest_user_message,
-    recentMessages: recent_messages,
-    lastSummary: last_summary,
-    currentPhase: current_phase,
-    customerStatus: customer_status,
-  });
+   const state = detectState({
+      currentMessage: latest_user_message,
+      recentMessages: recent_messages,
+      lastSummary: last_summary,
+      currentPhase: current_phase,
+      customerStatus: customer_status,
+   });
 
-  const lastEmmaMessages = getLastEmmaMessages(recent_messages, 3);
-  const lastUserMessages = getLastUserMessages(recent_messages, 3);
-  const websiteLinkAlreadySent = hasPatternBeenSent(
-    recent_messages,
-    PLAIN_WEBSITE_LINK_PATTERN
-  );
-  const testimonialsLinkAlreadySent = hasPatternBeenSent(
-    recent_messages,
-    TESTIMONIALS_LINK_PATTERN
-  );
-  const programmaInfoLinkAlreadySent = hasPatternBeenSent(
-    recent_messages,
-    PROGRAMMA_INFO_LINK_PATTERN
-  );
-  const priceAlreadyMentioned = hasPriceBeenMentioned(recent_messages);
-  const checkoutLinkAlreadySent = hasCheckoutLinkBeenSent(recent_messages);
-  const whatsappGroupLinkAlreadySent = hasWhatsappGroupLinkBeenSent(recent_messages);
-  const tasteAlreadyAsked = hasAskedTaste(recent_messages);
-  const tasteAnswerReceived = hasReceivedTasteAnswer(recent_messages);
-  const controlAnswerReceived = hasReceivedControlAnswer(recent_messages);
-  const orderNumberAlreadyAsked = hasAskedOrderNumber(recent_messages);
-  const validatedCustomer = isCustomerStatusValidated(
-    customer_status,
-    recent_messages
-  );
+   const lastEmmaMessages = getLastEmmaMessages(recent_messages, 3);
+   const lastUserMessages = getLastUserMessages(recent_messages, 3);
 
-  const context = {
-    agent_name: "Emma",
-    runtime_state: {
-      ...state,
-      website_link_already_sent: websiteLinkAlreadySent,
-      testimonials_link_already_sent: testimonialsLinkAlreadySent,
-      programma_info_link_already_sent: programmaInfoLinkAlreadySent,
-      price_already_mentioned: priceAlreadyMentioned,
-      checkout_link_already_sent: checkoutLinkAlreadySent,
-      whatsapp_group_link_already_sent: whatsappGroupLinkAlreadySent,
-      taste_already_asked: tasteAlreadyAsked,
-      taste_answer_received: tasteAnswerReceived,
-      control_answer_received: controlAnswerReceived,
-      order_number_already_asked: orderNumberAlreadyAsked,
-      conversation_language: cleanText(conversation_language) || "nl",
-      customer_country: cleanText(customer_country) || "UNKNOWN",
-      order_validation_server_side: true,
-    },
-    crm_memory: {
-      customer_status: validatedCustomer ? "customer" : cleanText(customer_status),
-      current_phase: validatedCustomer ? "coaching" : cleanText(current_phase),
-      goal: clamp(goal, MAX_GOAL_CHARS),
-      objections: clamp(objections, MAX_OBJECTIONS_CHARS),
-      last_summary: clamp(last_summary, MAX_SUMMARY_CHARS),
-      interested_in_program: clamp(interested_in_program, MAX_SHORT_FIELD_CHARS),
-      interested_in_control: clamp(interested_in_control, MAX_SHORT_FIELD_CHARS),
-      purchased_program: clamp(purchased_program, MAX_SHORT_FIELD_CHARS),
-      has_control: clamp(has_control, MAX_SHORT_FIELD_CHARS),
-    },
-    latest_user_message: clamp(latest_user_message, 1000),
-    recent_conversation_history: recent_messages.map((msg) => ({
-      role: msg.role,
-      message_text: clamp(msg.message_text, MAX_MESSAGE_CHARS),
-    })),
-    repetition_guard: {
-      do_not_repeat_these_recent_emma_messages: lastEmmaMessages,
-      last_user_messages_for_context_only: lastUserMessages,
-      rules: [
-        "Antwoord alleen op het nieuwste klantbericht.",
-        "Antwoord ALTIJD in de gesprekstaal (conversation_language). Wissel nooit zelf van taal.",
-        "Gebruik bekende CRM-data als achtergrond, niet als tekst om opnieuw op te sommen.",
-        "Herhaal geen vraag, uitleg, prijs, testimonial-link, checkout-link of ordernummer-instructie die al in de recente Emma-berichten staat.",
-        "Als iets al bekend is uit goal, objections, last_summary of recent_conversation_history: vraag er niet opnieuw naar.",
-        "Als het gesprek bestaand is: stel jezelf niet opnieuw voor en gebruik geen startbericht.",
-        "Zeg NOOIT welkom terug, goed dat je er weer bent of iets vergelijkbaars, en maak nooit opmerkingen over verstreken tijd. Begin altijd direct met je antwoord, alsof het gesprek gewoon doorloopt.",
-        "Vraag NOOIT of de klant er nog is en jaag nooit op (geen Ben je er nog, Lukt het, Heb je al gekeken). Een emoji of kort bericht is een gewoon bericht: reageer er kort en warm op. Follow-ups gebeuren handmatig, nooit door jou.",
-        "Als website_link_already_sent true is: stuur de website-link en het freebies-blok NOOIT opnieuw, tenzij de klant er expliciet om vraagt. Geef bij twijfel kort persoonlijk advies in eigen woorden, zonder link.",
-        "Als testimonials_link_already_sent true is: stuur de testimonials-link NIET opnieuw, tenzij de klant er expliciet om vraagt — verwijs in woorden naar de resultatenpagina.",
-        "Als programma_info_link_already_sent true is: stuur de programma-uitleg link NIET opnieuw, tenzij de klant er expliciet om vraagt.",
-        "Uitleggen betekent uitleggen in eigen woorden. Een link sturen is geen uitleg; stuur nooit een eerder gestuurde link opnieuw als vervanging van uitleg.",
-        "Als price_already_mentioned true is: noem de prijs niet opnieuw, tenzij de klant ernaar vraagt.",
-        "Vraag NOOIT naar het land van de klant. De checkout-links zijn universeel en openen automatisch in het juiste land met de juiste prijzen.",
-        "Als checkout_link_already_sent true is: stuur geen nieuwe checkout-link, tenzij de klant er expliciet opnieuw om vraagt.",
-        "Als whatsapp_group_link_already_sent true is: behandel de klant als gevalideerde klant en ga over naar coachingsmodus.",
-        "In coachingsmodus: 100% coaching. Geen salesflow, geen prijs, geen checkout, geen upsell en geen productaanbevelingen uit jezelf. Verkoop alleen wanneer de klant er expliciet zelf om vraagt (bijvoorbeeld naar een specifiek product of als reactie op een broadcast-bericht). De WhatsApp-groep link alleen opnieuw delen als de klant er expliciet om vraagt.",
-        "Ordervalidatie wordt server-side uitgevoerd. Emma mag nooit zelf een ordernummer goedkeuren of de WhatsApp-link zelfstandig delen.",
-        "Gebruik nooit interne prompttermen zoals neutrale afsluiting, medische trigger, salesflow, runtime_state of repetition_guard in klantantwoorden.",
-      ],
-    },
-  };
+   const websiteLinkAlreadySent = hasPatternBeenSent(
+      recent_messages,
+      PLAIN_WEBSITE_LINK_PATTERN
+   );
+   const testimonialsLinkAlreadySent = hasPatternBeenSent(
+      recent_messages,
+      TESTIMONIALS_LINK_PATTERN
+   );
+   const programmaInfoLinkAlreadySent = hasPatternBeenSent(
+      recent_messages,
+      PROGRAMMA_INFO_LINK_PATTERN
+   );
+   const priceAlreadyMentioned = hasPriceBeenMentioned(recent_messages);
+   const checkoutLinkAlreadySent = hasCheckoutLinkBeenSent(recent_messages);
+   const whatsappGroupLinkAlreadySent = hasWhatsappGroupLinkBeenSent(recent_messages);
+   const tasteAlreadyAsked = hasAskedTaste(recent_messages);
+   const tasteAnswerReceived = hasReceivedTasteAnswer(recent_messages);
+   const controlAnswerReceived = hasReceivedControlAnswer(recent_messages);
+   const orderNumberAlreadyAsked = hasAskedOrderNumber(recent_messages);
 
-  // Validated customers get an explicit coaching banner ABOVE the JSON so
-  // Emma cannot miss it (a single field buried in the JSON blob proved too
-  // easy to overlook).
-  const bannerLines = validatedCustomer
-    ? [
-        "!!! DEZE KLANT IS GEVALIDEERD KLANT — JE BENT 100% COACH !!!",
-        "Geen verkoop, geen prijzen, geen programma's, geen upsells en geen checkout-links, tenzij de klant er expliciet zelf om vraagt (bijvoorbeeld naar een specifiek product of als reactie op een broadcast-bericht).",
-        "Vraag NOOIT of de klant de website of de programma's al heeft bekeken.",
-        "De website (nutritionworks.online) noem je alleen nog als recepten-tool om de klant tijdens het programma verder te helpen.",
-        "Eindig je berichten NIET standaard met een vraag. Help de klant met waar ze mee komt; stel alleen een tegenvraag als die echt nodig is om goed te kunnen helpen.",
-        "",
-      ]
-    : [];
+   const validatedCustomer = isCustomerStatusValidated(
+      customer_status,
+      recent_messages
+   );
 
-  return [
-    ...bannerLines,
-    "RUNTIME CONTEXT VOOR EMMA",
-    "Gebruik deze context als hoogste gespreksspecifieke input naast de system prompt.",
-    "De context is feitelijk; herhaal hem niet letterlijk naar de klant.",
-    "",
-    JSON.stringify(context, null, 2),
-  ].join("\n");
+   const context = {
+      agent_name: "Emma",
+      runtime_state: {
+         ...state,
+         website_link_already_sent: websiteLinkAlreadySent,
+         testimonials_link_already_sent: testimonialsLinkAlreadySent,
+         programma_info_link_already_sent: programmaInfoLinkAlreadySent,
+         price_already_mentioned: priceAlreadyMentioned,
+         checkout_link_already_sent: checkoutLinkAlreadySent,
+         whatsapp_group_link_already_sent: whatsappGroupLinkAlreadySent,
+         taste_already_asked: tasteAlreadyAsked,
+         taste_answer_received: tasteAnswerReceived,
+         control_answer_received: controlAnswerReceived,
+         order_number_already_asked: orderNumberAlreadyAsked,
+         conversation_language: cleanText(conversation_language) || "nl",
+         customer_country: cleanText(customer_country) || "UNKNOWN",
+         order_validation_server_side: true,
+      },
+      crm_memory: {
+         customer_status: validatedCustomer ? "customer" : cleanText(customer_status),
+         current_phase: validatedCustomer ? "coaching" : cleanText(current_phase),
+         goal: clamp(goal, MAX_GOAL_CHARS),
+         objections: clamp(objections, MAX_OBJECTIONS_CHARS),
+         last_summary: clamp(last_summary, MAX_SUMMARY_CHARS),
+         interested_in_program: clamp(interested_in_program, MAX_SHORT_FIELD_CHARS),
+         interested_in_control: clamp(interested_in_control, MAX_SHORT_FIELD_CHARS),
+         purchased_program: clamp(purchased_program, MAX_SHORT_FIELD_CHARS),
+         has_control: clamp(has_control, MAX_SHORT_FIELD_CHARS),
+      },
+      latest_user_message: clamp(latest_user_message, 1000),
+      recent_conversation_history: recent_messages.map((msg) => ({
+         role: msg.role,
+         message_text: clamp(msg.message_text, MAX_MESSAGE_CHARS),
+      })),
+      repetition_guard: {
+         do_not_repeat_these_recent_emma_messages: lastEmmaMessages,
+         last_user_messages_for_context_only: lastUserMessages,
+         rules: [
+           "Antwoord alleen op het nieuwste klantbericht.",
+           "Antwoord ALTIJD in de gesprekstaal (conversation_language). Wissel nooit zelf van taal.",
+           "Gebruik bekende CRM-data als achtergrond, niet als tekst om opnieuw op te sommen.",
+           "Herhaal geen vraag, uitleg, prijs, testimonial-link, checkout-link of ordernummer-instructie die al in de recente Emma-berichten staat.",
+           "Als iets al bekend is uit goal, objections, last_summary of recent_conversation_history: vraag er niet opnieuw naar.",
+           "Als het gesprek bestaand is: stel jezelf niet opnieuw voor en gebruik geen startbericht.",
+           "Zeg NOOIT welkom terug, goed dat je er weer bent of iets vergelijkbaars, en maak nooit opmerkingen over verstreken tijd. Begin altijd direct met je antwoord, alsof het gesprek gewoon doorloopt.",
+           "Vraag NOOIT of de klant er nog is en jaag nooit op (geen Ben je er nog, Lukt het, Heb je al gekeken). Een emojiof kort bericht is een gewoon bericht: reageer er kort en warm op. Follow-ups gebeuren handmatig, nooit door jou.",
+           "Als website_link_already_sent true is: stuur de website-link en het freebies-blok NOOIT opnieuw, tenzij de klanter expliciet om vraagt. Geef bij twijfel kort persoonlijk advies in eigen woorden, zonder link.",
+           "Als testimonials_link_already_sent true is: stuur de testimonials-link NIET opnieuw, tenzij de klant er expliciet om vraagt — verwijs in woorden naar de resultatenpagina.",
+           "Als programma_info_link_already_sent true is: stuur de programma-uitleg link NIET opnieuw, tenzij de klant er expliciet om vraagt.",
+           "Uitleggen betekent uitleggen in eigen woorden. Een link sturen is geen uitleg; stuur nooit een eerder gestuurdelink opnieuw als vervanging van uitleg.",
+           "Als price_already_mentioned true is: noem de prijs niet opnieuw, tenzij de klant ernaar vraagt.",
+           "Vraag NOOIT naar het land van de klant. De checkout-links zijn universeel en openen automatisch in het juiste land met de juiste prijzen.",
+           "Als checkout_link_already_sent true is: stuur geen nieuwe checkout-link, tenzij de klant er expliciet opnieuw omvraagt.",
+            "Als whatsapp_group_link_already_sent true is: behandel de klant als gevalideerde klant en ga over naar coachingsmodus.",
+            "In coachingsmodus: 100% coaching. Geen salesflow, geen prijs, geen checkout, geen upsell en geen productaanbevelingen uit jezelf. Verkoop alleen wanneer de klant er expliciet zelf om vraagt (bijvoorbeeld naar een specifiek product ofals reactie op een broadcast-bericht). De WhatsApp-groep link alleen opnieuw delen als de klant er expliciet om vraagt.",
+            "Ordervalidatie wordt server-side uitgevoerd. Emma mag nooit zelf een ordernummer goedkeuren of de WhatsApp-linkzelfstandig delen.",
+            "Gebruik nooit interne prompttermen zoals neutrale afsluiting, medische trigger, salesflow, runtime_state of repetition_guard in klantantwoorden.",
+         ],
+      },
+   };
+
+   // Validated customers get an explicit coaching banner ABOVE the JSON so
+   // Emma cannot miss it (a single field buried in the JSON blob proved too
+   // easy to overlook).
+   const bannerLines = validatedCustomer
+      ? [
+            "!!! DEZE KLANT IS GEVALIDEERD KLANT — JE BENT 100% COACH !!!",
+            "Geen verkoop, geen prijzen, geen programma's, geen upsells en geen checkout-links, tenzij de klant er explicietzelf om vraagt (bijvoorbeeld naar een specifiek product of als reactie op een broadcast-bericht).",
+            "Vraag NOOIT of de klant de website of de programma's al heeft bekeken.",
+            "De website (nutritionworks.online) noem je alleen nog als recepten-tool om de klant tijdens het programma verderte helpen.",
+            "Eindig je berichten NIET standaard met een vraag. Help de klant met waar ze mee komt; stel alleen een tegenvraagals die echt nodig is om goed te kunnen helpen.",
+            "",
+         ]
+      : [];
+
+   return [
+      ...bannerLines,
+      "RUNTIME CONTEXT VOOR EMMA",
+      "Gebruik deze context als hoogste gespreksspecifieke input naast de system prompt.",
+      "De context is feitelijk; herhaal hem niet letterlijk naar de klant.",
+      "",
+      JSON.stringify(context, null, 2),
+   ].join("\n");
 }
 
 /* ----------------------------- JSON UTILITIES ----------------------------- */
 
 function safeJsonParse(value) {
-  if (!value || typeof value !== "string") return null;
+   if (!value || typeof value !== "string") return null;
 
-  const trimmed = value.trim();
+   const trimmed = value.trim();
 
-  try {
-    return JSON.parse(trimmed);
-  } catch {}
+   try {
+      return JSON.parse(trimmed);
+   } catch {}
 
-  const fencedMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
-  if (fencedMatch?.[1]) {
-    try {
-      return JSON.parse(fencedMatch[1]);
-    } catch {}
-  }
+   const fencedMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+   if (fencedMatch?.[1]) {
+      try {
+         return JSON.parse(fencedMatch[1]);
+      } catch {}
+   }
 
-  const firstBrace = trimmed.indexOf("{");
-  const lastBrace = trimmed.lastIndexOf("}");
-  if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
-    try {
-      return JSON.parse(trimmed.slice(firstBrace, lastBrace + 1));
-    } catch {}
-  }
+   const firstBrace = trimmed.indexOf("{");
+   const lastBrace = trimmed.lastIndexOf("}");
+   if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+      try {
+         return JSON.parse(trimmed.slice(firstBrace, lastBrace + 1));
+      } catch {}
+   }
 
-  return null;
+   return null;
 }
 
 function extractOutputText(response) {
-  if (cleanText(response?.output_text)) return cleanText(response.output_text);
+   if (cleanText(response?.output_text)) return cleanText(response.output_text);
 
-  if (Array.isArray(response?.output)) {
-    const textParts = [];
+   if (Array.isArray(response?.output)) {
+      const textParts = [];
 
-    for (const item of response.output) {
-      if (!Array.isArray(item?.content)) continue;
+      for (const item of response.output) {
+         if (!Array.isArray(item?.content)) continue;
 
-      for (const contentItem of item.content) {
-        if (
-          contentItem?.type === "output_text" &&
-          cleanText(contentItem?.text)
-        ) {
-          textParts.push(cleanText(contentItem.text));
-        }
+         for (const contentItem of item.content) {
+            if (
+              contentItem?.type === "output_text" &&
+              cleanText(contentItem?.text)
+            ) {
+              textParts.push(cleanText(contentItem.text));
+            }
+         }
       }
-    }
 
-    return cleanText(textParts.join("\n"));
-  }
+      return cleanText(textParts.join("\n"));
+   }
 
-  return "";
+   return "";
 }
 
 /* -------------------------- OPENAI CRM EXTRACTION ------------------------- */
 
 async function getStructuredUpdates({
-  message,
-  customerStatus,
-  currentPhase,
-  currentGoal,
-  currentObjections,
-  currentLastSummary,
-  currentInterestedInProgram,
-  currentInterestedInControl,
-  currentPurchasedProgram,
-  currentHasControl,
-  recentMessages,
-  requestId,
-  requestStartMs,
+   message,
+   customerStatus,
+   currentPhase,
+   currentGoal,
+   currentObjections,
+   currentLastSummary,
+   currentInterestedInProgram,
+   currentInterestedInControl,
+   currentPurchasedProgram,
+   currentHasControl,
+   recentMessages,
+   requestId,
+   requestStartMs,
 }) {
-  const diag = (event, extra = {}) => {
-    const now = Date.now();
-    console.log(
-      JSON.stringify(
-        {
-          diag: true,
-          request_id: requestId,
-          event,
-          elapsed_ms: requestStartMs ? now - requestStartMs : null,
-          timestamp_ms: now,
-          ...extra,
-        },
-        null,
-        2
-      )
-    );
-  };
+   const diag = (event, extra = {}) => {
+      const now = Date.now();
+      console.log(
+         JSON.stringify(
+           {
+              diag: true,
+              request_id: requestId,
+              event,
+              elapsed_ms: requestStartMs ? now - requestStartMs : null,
+              timestamp_ms: now,
+              ...extra,
+           },
+           null,
+           2
+         )
+      );
+   };
 
-  const emptyResult = {
-    goal_update: "",
-    objections_update: "",
-    last_summary_update: "",
-    current_phase_update: "",
-    interested_in_program_update: "",
-    interested_in_control_update: "",
-    purchased_program_update: "",
-    has_control_update: "",
-  };
+   const emptyResult = {
+      goal_update: "",
+      objections_update: "",
+      last_summary_update: "",
+      current_phase_update: "",
+      interested_in_program_update: "",
+      interested_in_control_update: "",
+      purchased_program_update: "",
+      has_control_update: "",
+   };
 
-  if (!openai) {
-    console.error("OPENAI CONFIG ERROR: OPENAI_API_KEY ontbreekt");
-    return emptyResult;
-  }
-
-  const schema = {
-    type: "object",
-    additionalProperties: false,
-    properties: {
-      goal_update: { type: "string" },
-      objections_update: { type: "string" },
-      last_summary_update: { type: "string" },
-      current_phase_update: { type: "string" },
-      interested_in_program_update: { type: "string" },
-      interested_in_control_update: { type: "string" },
-      purchased_program_update: { type: "string" },
-      has_control_update: { type: "string" },
-    },
-    required: [
-      "goal_update",
-      "objections_update",
-      "last_summary_update",
-      "current_phase_update",
-      "interested_in_program_update",
-      "interested_in_control_update",
-      "purchased_program_update",
-      "has_control_update",
-    ],
-  };
-
-  const systemPrompt = [
-    "Je bent een strikte CRM-extractor voor een WhatsApp salesgesprek voor Nutrition Works.",
-    "Je taak is NIET om te antwoorden op de gebruiker.",
-    "Je analyseert het nieuwste gebruikersbericht in de context van het hele gesprek en de bestaande CRM-data.",
-    "Je geeft uitsluitend geldige JSON terug volgens het schema. Schrijf alle veldwaarden in het Nederlands, ook wanneer het gesprek in een andere taal wordt gevoerd.",
-    "Verzin niets. Vul nooit iets in dat niet uit het gesprek volgt.",
-    "",
-    "REGELS PER VELD:",
-    "",
-    "goal_update — De VOLLEDIGE, bijgewerkte doelomschrijving van de klant.",
-    "- Geef de complete bijgewerkte goal terug, met bestaande info plus eventuele nieuwe info uit het laatste bericht.",
-    "- Max 300 tekens.",
-    "- Als er werkelijk niets is veranderd ten opzichte van current_goal: lege string.",
-    "",
-    "objections_update — ALLE bezwaren die de klant tot nu toe heeft geuit, als één samenhangende tekst.",
-    "- Geef de complete bijgewerkte objections terug, met bestaande bezwaren plus eventuele nieuwe bezwaren uit het laatste bericht.",
-    "- Max 400 tekens.",
-    "- Als er werkelijk niets is veranderd ten opzichte van current_objections: lege string.",
-    "",
-    "last_summary_update — Een korte, lopende synthese van wat we tot nu toe weten over de klant.",
-    "- Dit is GEEN herhaling van latest_user_message. Het is een lopende werk-samenvatting van het hele gesprek tot dusver.",
-    "- Schrijf altijd iets zodra er één feit is om vast te leggen (naam, leeftijd, doel, situatie, twijfel, fase). Begin klein en bouw op.",
-    "- Integreer bestaande info uit current_last_summary met nieuwe info uit het laatste bericht. Herformuleer waar nodig.",
-    "- Eén tot drie zinnen vroeg in het gesprek is prima. Langer wordt het vanzelf naarmate er meer bekend wordt.",
-    "- Bedoeld om volgende turns context te geven over wie de klant is, wat ze wil, en waar we staan in het gesprek.",
-    "- Max 500 tekens.",
-    "- Alleen lege string als er werkelijk niets te onthouden valt (bijv. één enkel 'hoi' en verder niets).",
-    "",
-    "current_phase_update — De gespreksfase op basis van wat er tot nu toe is besproken.",
-    "- Een van: intake / verdieping / analyse / advies / commitment / presentatie / closing / checkout-bevestiging / checkout / coaching / na_aankoop.",
-    "- coaching of na_aankoop is alleen wanneer de klant al gevalideerd klant is (customer_status = customer).",
-    "- Geef de huidige fase terug zodra die verandert ten opzichte van current_phase.",
-    "- Als de fase niet duidelijk verandert: lege string.",
-    "",
-    "interested_in_program_update — Welk specifiek programma (Basic, Beauty, Deluxe of Exclusive) de klant zelf expliciet noemt of kiest.",
-    "- Geldige waarden: Basic / Beauty / Deluxe / Exclusive / (lege string).",
-    "- Vul ALLEEN in als de klant zelf de exacte programmanaam (Basic, Beauty, Deluxe of Exclusive) noemt of kiest.",
-    "- Algemene koopintentie, het bestellen van Control, of interesse in afvallen tellen NIET als programma-interesse.",
-    "- Kies nooit een default programma. Als geen programmanaam letterlijk is genoemd: lege string. Verzin nooit een programma.",
-    "",
-    "interested_in_control_update — Of de klant aantoonbaar positieve interesse toont in Control.",
-    "- Geldige waarden: ja / (lege string).",
-    "- Vul \"ja\" alleen in bij een positieve uitspraak of keuze van de klant, inclusief een kort contextueel antwoord zoals 'ja' op een openstaande Control-vraag.",
-    "- Een vermelding of suggestie van Emma is nooit voldoende.",
-    "- Negatieve antwoorden zoals 'nee', 'geen Control' en 'laat maar' geven altijd een lege string.",
-    "",
-    "purchased_program_update — Welk specifiek programma (Basic, Beauty, Deluxe of Exclusive) de klant heeft besteld.",
-    "- Geldige waarden: Basic / Beauty / Deluxe / Exclusive / (lege string).",
-    "- Vul ALLEEN in als de klant in haar bericht expliciet de naam van het bestelde programma noemt.",
-    "- Algemene koopintentie of het bestellen van Control telt NIET als programma-aankoop.",
-    "- Bij geen expliciete vermelding van een programmanaam in de aankoop: lege string. Verzin nooit een aankoop.",
-    "",
-    "has_control_update — Of de klant Control heeft besteld als onderdeel van haar bestelling.",
-    "- Geldige waarden: ja / nee / (lege string).",
-    "- Vul \"ja\" alleen in als de klant expliciet vermeldt dat Control onderdeel is van haar bestelling.",
-    "- Vul \"nee\" alleen als de klant expliciet aangeeft dat Control NIET in haar bestelling zit.",
-    "- Bij geen expliciete vermelding van Control in de aankoop: lege string. Verzin geen aankoop.",
-    "",
-    "Belangrijk: voor elk veld geldt — als er niets is veranderd, retourneer een lege string.",
-  ].join("\n");
-
-  const userPayload = {
-    latest_user_message: clamp(message, 1000),
-    current_customer_status: cleanText(customerStatus),
-    current_phase: cleanText(currentPhase),
-    current_goal: clamp(currentGoal, MAX_GOAL_CHARS),
-    current_objections: clamp(currentObjections, MAX_OBJECTIONS_CHARS),
-    current_last_summary: clamp(currentLastSummary, MAX_SUMMARY_CHARS),
-    current_interested_in_program: clamp(currentInterestedInProgram, MAX_SHORT_FIELD_CHARS),
-    current_interested_in_control: clamp(currentInterestedInControl, MAX_SHORT_FIELD_CHARS),
-    current_purchased_program: clamp(currentPurchasedProgram, MAX_SHORT_FIELD_CHARS),
-    current_has_control: clamp(currentHasControl, MAX_SHORT_FIELD_CHARS),
-    recent_messages: recentMessages.slice(-EXTRACTOR_CONTEXT_MESSAGES).map((msg) => ({
-      role: msg.role || "unknown",
-      message_text: clamp(msg.message_text, 250),
-    })),
-  };
-
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), OPENAI_TIMEOUT_MS);
-
-  const openaiStartMs = Date.now();
-  diag("OPENAI_REQUEST_START", {
-    model: process.env.OPENAI_EXTRACTION_MODEL || "gpt-4o-mini",
-    payload_size_bytes: JSON.stringify(userPayload).length,
-    system_prompt_size_bytes: systemPrompt.length,
-  });
-
-  try {
-    const response = await openai.responses.create(
-      {
-        model: process.env.OPENAI_EXTRACTION_MODEL || "gpt-4o-mini",
-        store: false,
-        input: [
-          {
-            role: "system",
-            content: [{ type: "input_text", text: systemPrompt }],
-          },
-          {
-            role: "user",
-            content: [{ type: "input_text", text: JSON.stringify(userPayload) }],
-          },
-        ],
-        text: {
-          format: {
-            type: "json_schema",
-            name: "memory_updates",
-            strict: true,
-            schema,
-          },
-        },
-      },
-      { signal: controller.signal }
-    );
-
-    const rawText = extractOutputText(response);
-    const parsed = safeJsonParse(rawText);
-
-    diag("OPENAI_REQUEST_COMPLETE", {
-      duration_ms: Date.now() - openaiStartMs,
-      raw_text_size_bytes: typeof rawText === "string" ? rawText.length : 0,
-      parsed_ok: Boolean(parsed && typeof parsed === "object"),
-    });
-
-    if (!parsed || typeof parsed !== "object") {
-      console.error("OPENAI EXTRACTION ERROR: ongeldige JSON output", rawText);
+   if (!openai) {
+      console.error("OPENAI CONFIG ERROR: OPENAI_API_KEY ontbreekt");
       return emptyResult;
-    }
+   }
 
-    return {
-      goal_update: cleanText(parsed.goal_update),
-      objections_update: cleanText(parsed.objections_update),
-      last_summary_update: cleanText(parsed.last_summary_update),
-      current_phase_update: normalizePhaseName(parsed.current_phase_update),
-      interested_in_program_update: normalizeProgramName(parsed.interested_in_program_update),
-      interested_in_control_update: normalizeBinaryFlag(parsed.interested_in_control_update),
-      purchased_program_update: normalizeProgramName(parsed.purchased_program_update),
-      has_control_update: normalizeBinaryFlag(parsed.has_control_update),
+   const schema = {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+         goal_update: { type: "string" },
+         objections_update: { type: "string" },
+         last_summary_update: { type: "string" },
+         current_phase_update: { type: "string" },
+         interested_in_program_update: { type: "string" },
+         interested_in_control_update: { type: "string" },
+         purchased_program_update: { type: "string" },
+         has_control_update: { type: "string" },
+      },
+      required: [
+         "goal_update",
+         "objections_update",
+         "last_summary_update",
+         "current_phase_update",
+         "interested_in_program_update",
+         "interested_in_control_update",
+         "purchased_program_update",
+         "has_control_update",
+      ],
+   };
+
+   const systemPrompt = [
+      "Je bent een strikte CRM-extractor voor een WhatsApp salesgesprek voor Nutrition Works.",
+      "Je taak is NIET om te antwoorden op de gebruiker.",
+      "Je analyseert het nieuwste gebruikersbericht in de context van het hele gesprek en de bestaande CRM-data.",
+      "Je geeft uitsluitend geldige JSON terug volgens het schema. Schrijf alle veldwaarden in het Nederlands, ook wanneerhet gesprek in een andere taal wordt gevoerd.",
+      "Verzin niets. Vul nooit iets in dat niet uit het gesprek volgt.",
+      "",
+      "REGELS PER VELD:",
+      "",
+      "goal_update — De VOLLEDIGE, bijgewerkte doelomschrijving van de klant.",
+       "- Geef de complete bijgewerkte goal terug, met bestaande info plus eventuele nieuwe info uit het laatste bericht.",
+       "- Max 300 tekens.",
+       "- Als er werkelijk niets is veranderd ten opzichte van current_goal: lege string.",
+       "",
+       "objections_update — ALLE bezwaren die de klant tot nu toe heeft geuit, als één samenhangende tekst.",
+       "- Geef de complete bijgewerkte objections terug, met bestaande bezwaren plus eventuele nieuwe bezwaren uit het laatste bericht.",
+       "- Max 400 tekens.",
+       "- Als er werkelijk niets is veranderd ten opzichte van current_objections: lege string.",
+       "",
+       "last_summary_update — Een korte, lopende synthese van wat we tot nu toe weten over de klant.",
+       "- Dit is GEEN herhaling van latest_user_message. Het is een lopende werk-samenvatting van het hele gesprek tot dusver.",
+       "- Schrijf altijd iets zodra er één feit is om vast te leggen (naam, leeftijd, doel, situatie, twijfel, fase). Beginklein en bouw op.",
+       "- Integreer bestaande info uit current_last_summary met nieuwe info uit het laatste bericht. Herformuleer waar nodig.",
+       "- Eén tot drie zinnen vroeg in het gesprek is prima. Langer wordt het vanzelf naarmate er meer bekend wordt.",
+       "- Bedoeld om volgende turns context te geven over wie de klant is, wat ze wil, en waar we staan in het gesprek.",
+       "- Max 500 tekens.",
+       "- Alleen lege string als er werkelijk niets te onthouden valt (bijv. één enkel 'hoi' en verder niets).",
+       "",
+       "current_phase_update — De gespreksfase op basis van wat er tot nu toe is besproken.",
+       "- Een van: intake / verdieping / analyse / advies / commitment / presentatie / closing / checkout-bevestiging / checkout / coaching / na_aankoop.",
+       "- coaching of na_aankoop is alleen wanneer de klant al gevalideerd klant is (customer_status = customer).",
+       "- Geef de huidige fase terug zodra die verandert ten opzichte van current_phase.",
+       "- Als de fase niet duidelijk verandert: lege string.",
+       "",
+       "interested_in_program_update — Welk specifiek programma (Basic, Beauty, Deluxe of Exclusive) de klant zelf explicietnoemt of kiest.",
+       "- Geldige waarden: Basic / Beauty / Deluxe / Exclusive / (lege string).",
+       "- Vul ALLEEN in als de klant zelf de exacte programmanaam (Basic, Beauty, Deluxe of Exclusive) noemt of kiest.",
+       "- Algemene koopintentie, het bestellen van Control, of interesse in afvallen tellen NIET als programma-interesse.",
+       "- Kies nooit een default programma. Als geen programmanaam letterlijk is genoemd: lege string. Verzin nooit een programma.",
+       "",
+       "interested_in_control_update — Of de klant aantoonbaar positieve interesse toont in Control.",
+       "- Geldige waarden: ja / (lege string).",
+       "- Vul \"ja\" alleen in bij een positieve uitspraak of keuze van de klant, inclusief een kort contextueel antwoord zoals 'ja' op een openstaande Control-vraag.",
+       "- Een vermelding of suggestie van Emma is nooit voldoende.",
+       "- Negatieve antwoorden zoals 'nee', 'geen Control' en 'laat maar' geven altijd een lege string.",
+       "",
+       "purchased_program_update — Welk specifiek programma (Basic, Beauty, Deluxe of Exclusive) de klant heeft besteld.",
+       "- Geldige waarden: Basic / Beauty / Deluxe / Exclusive / (lege string).",
+       "- Vul ALLEEN in als de klant in haar bericht expliciet de naam van het bestelde programma noemt.",
+       "- Algemene koopintentie of het bestellen van Control telt NIET als programma-aankoop.",
+       "- Bij geen expliciete vermelding van een programmanaam in de aankoop: lege string. Verzin nooit een aankoop.",
+       "",
+       "has_control_update — Of de klant Control heeft besteld als onderdeel van haar bestelling.",
+       "- Geldige waarden: ja / nee / (lege string).",
+       "- Vul \"ja\" alleen in als de klant expliciet vermeldt dat Control onderdeel is van haar bestelling.",
+       "- Vul \"nee\" alleen als de klant expliciet aangeeft dat Control NIET in haar bestelling zit.",
+       "- Bij geen expliciete vermelding van Control in de aankoop: lege string. Verzin geen aankoop.",
+       "",
+       "Belangrijk: voor elk veld geldt — als er niets is veranderd, retourneer een lege string.",
+    ].join("\n");
+
+    const userPayload = {
+       latest_user_message: clamp(message, 1000),
+       current_customer_status: cleanText(customerStatus),
+       current_phase: cleanText(currentPhase),
+       current_goal: clamp(currentGoal, MAX_GOAL_CHARS),
+       current_objections: clamp(currentObjections, MAX_OBJECTIONS_CHARS),
+       current_last_summary: clamp(currentLastSummary, MAX_SUMMARY_CHARS),
+       current_interested_in_program: clamp(currentInterestedInProgram, MAX_SHORT_FIELD_CHARS),
+       current_interested_in_control: clamp(currentInterestedInControl, MAX_SHORT_FIELD_CHARS),
+       current_purchased_program: clamp(currentPurchasedProgram, MAX_SHORT_FIELD_CHARS),
+       current_has_control: clamp(currentHasControl, MAX_SHORT_FIELD_CHARS),
+       recent_messages: recentMessages.slice(-EXTRACTOR_CONTEXT_MESSAGES).map((msg) => ({
+         role: msg.role || "unknown",
+         message_text: clamp(msg.message_text, 250),
+       })),
     };
-  } catch (error) {
-    diag("OPENAI_REQUEST_ERROR", {
-      duration_ms: Date.now() - openaiStartMs,
-      error_message: error?.message || String(error),
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), OPENAI_TIMEOUT_MS);
+
+    const openaiStartMs = Date.now();
+    diag("OPENAI_REQUEST_START", {
+       model: process.env.OPENAI_EXTRACTION_MODEL || "gpt-4o-mini",
+       payload_size_bytes: JSON.stringify(userPayload).length,
+       system_prompt_size_bytes: systemPrompt.length,
     });
-    console.error("OPENAI EXTRACTION ERROR:", error?.message || error);
-    return emptyResult;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-/* ----------------------------- ELEVENLABS CHAT ---------------------------- */
-
-async function getElevenReply({
-  userId,
-  conversationLanguage,
-  customerCountry,
-  message,
-  customerStatus,
-  currentPhase,
-  goal,
-  objections,
-  lastSummary,
-  interestedInProgram,
-  interestedInControl,
-  purchasedProgram,
-  hasControl,
-  recentMessages,
-  agentId,
-  requestId,
-  requestStartMs,
-}) {
-  const diag = (event, extra = {}) => {
-    const now = Date.now();
-    console.log(
-      JSON.stringify(
-        {
-          diag: true,
-          request_id: requestId,
-          event,
-          elapsed_ms: requestStartMs ? now - requestStartMs : null,
-          timestamp_ms: now,
-          ...extra,
-        },
-        null,
-        2
-      )
-    );
-  };
-
-  return await new Promise((resolve) => {
-    const wsUrl = `wss://api.elevenlabs.io/v1/convai/conversation?agent_id=${encodeURIComponent(
-      agentId
-    )}`;
-
-    let finalReply = "";
-    let firstPartLogged = false;
-    let settled = false;
-    let timeout = null;
-    let ws = null;
-    const wsStartMs = Date.now();
-
-    diag("ELEVENLABS_WS_CONNECT_ATTEMPT", { ws_url: wsUrl });
-
-    const settle = (reply) => {
-      if (settled) return;
-      settled = true;
-      resolve(cleanReplyText(reply) || FALLBACK_REPLY);
-    };
 
     try {
-      ws = new WebSocket(wsUrl);
-
-      timeout = setTimeout(() => {
-        diag("ELEVENLABS_WS_TIMEOUT", {
-          ws_duration_ms: Date.now() - wsStartMs,
-          partial_reply_length: finalReply.length,
-        });
-        console.error("ELEVENLABS TIMEOUT: geen reply binnen deadline");
-        try {
-          ws.close();
-        } catch {}
-        settle(finalReply || FALLBACK_REPLY);
-      }, ELEVEN_TIMEOUT_MS);
-
-      ws.on("open", () => {
-        diag("ELEVENLABS_WS_OPEN", {
-          ws_open_after_ms: Date.now() - wsStartMs,
-        });
-        // Coaching mode is injected INTO the system prompt via the
-        // {{coaching_banner}} dynamic variable (first line of the v42+ prompt).
-        // A contextual update alone proved too weak against the sales flow in
-        // the core prompt; a dynamic variable is substituted directly into the
-        // system prompt text, the strongest possible position.
-        const validatedCustomer = isCustomerStatusValidated(
-          customerStatus,
-          recentMessages
+       const response = await openai.responses.create(
+         {
+            model: process.env.OPENAI_EXTRACTION_MODEL || "gpt-4o-mini",
+            store: false,
+              input: [
+                 {
+                   role: "system",
+                   content: [{ type: "input_text", text: systemPrompt }],
+                 },
+                 {
+                   role: "user",
+                   content: [{ type: "input_text", text: JSON.stringify(userPayload) }],
+                 },
+              ],
+              text: {
+                 format: {
+                   type: "json_schema",
+                   name: "memory_updates",
+                   strict: true,
+                   schema,
+                 },
+              },
+             },
+             { signal: controller.signal }
         );
-        const coachingBanner = validatedCustomer
-          ? [
-              "!!! DEZE KLANT IS GEVALIDEERD KLANT — JE BENT 100% COACH !!!",
-              "Geen verkoop, geen prijzen, geen programma's, geen upsells en geen checkout-links, tenzij de klant er expliciet zelf om vraagt (bijvoorbeeld naar een specifiek product of als reactie op een broadcast-bericht).",
-              "Vraag NOOIT of de klant de website of de programma's al heeft bekeken.",
-              'Zeg NOOIT "welkom terug", "goed dat je er weer bent", "goed om je weer te horen" of iets vergelijkbaars. Begin ALTIJD direct met je antwoord.',
-              "Beantwoord ALLEEN het bericht van dit moment. Haal NIET zelf eerdere onderwerpen, doelen of gesprekken aan — de CRM-context is achtergrondkennis, geen gespreksstof.",
-              "Stel GEEN vragen en houd het gesprek niet gaande vanuit jouw kant. Antwoord, help en rond af. Alleen een korte verduidelijkingsvraag als je de vraag van de klant anders echt niet kunt beantwoorden.",
-              "De receptenpagina op nutritionworks.online noem je ALLEEN wanneer de klant zelf om recepten, maaltijd-ideeën of inspiratie vraagt. Nooit uit jezelf.",
-            ].join("\n")
-          : "";
-        // Language lock, injected into the system prompt via the
-        // {{language_lock}} dynamic variable (v43+ prompt). For Dutch the
-        // template messages are used verbatim; for every other language Emma
-        // writes native-quality text, never literal translations.
-        const languageName =
-          LANGUAGE_NAMES[conversationLanguage] || "Nederlands";
-        const languageLock =
-          conversationLanguage === "nl" || !conversationLanguage
-            ? [
-                "GESPREKSTAAL: Nederlands.",
-                "Je schrijft ELK bericht uitsluitend in het Nederlands. De vaste voorbeeldberichten in deze prompt gebruik je letterlijk zoals ze er staan. Wissel nooit zelf van taal.",
+
+        const rawText = extractOutputText(response);
+        const parsed = safeJsonParse(rawText);
+
+        diag("OPENAI_REQUEST_COMPLETE", {
+          duration_ms: Date.now() - openaiStartMs,
+          raw_text_size_bytes: typeof rawText === "string" ? rawText.length : 0,
+          parsed_ok: Boolean(parsed && typeof parsed === "object"),
+        });
+
+        if (!parsed || typeof parsed !== "object") {
+          console.error("OPENAI EXTRACTION ERROR: ongeldige JSON output", rawText);
+          return emptyResult;
+        }
+
+        return {
+           goal_update: cleanText(parsed.goal_update),
+           objections_update: cleanText(parsed.objections_update),
+           last_summary_update: cleanText(parsed.last_summary_update),
+           current_phase_update: normalizePhaseName(parsed.current_phase_update),
+           interested_in_program_update: normalizeProgramName(parsed.interested_in_program_update),
+           interested_in_control_update: normalizeBinaryFlag(parsed.interested_in_control_update),
+           purchased_program_update: normalizeProgramName(parsed.purchased_program_update),
+           has_control_update: normalizeBinaryFlag(parsed.has_control_update),
+        };
+      } catch (error) {
+        diag("OPENAI_REQUEST_ERROR", {
+           duration_ms: Date.now() - openaiStartMs,
+           error_message: error?.message || String(error),
+        });
+        console.error("OPENAI EXTRACTION ERROR:", error?.message || error);
+        return emptyResult;
+      } finally {
+        clearTimeout(timer);
+      }
+  }
+
+  /* ----------------------------- ELEVENLABS CHAT ---------------------------- */
+
+  async function getElevenReply({
+    userId,
+    conversationLanguage,
+    customerCountry,
+    message,
+    customerStatus,
+    currentPhase,
+    goal,
+    objections,
+    lastSummary,
+    interestedInProgram,
+    interestedInControl,
+    purchasedProgram,
+    hasControl,
+    recentMessages,
+    agentId,
+    requestId,
+    requestStartMs,
+  }) {
+    const diag = (event, extra = {}) => {
+       const now = Date.now();
+       console.log(
+         JSON.stringify(
+           {
+              diag: true,
+              request_id: requestId,
+              event,
+              elapsed_ms: requestStartMs ? now - requestStartMs : null,
+              timestamp_ms: now,
+              ...extra,
+           },
+           null,
+           2
+         )
+      );
+   };
+
+   return await new Promise((resolve) => {
+      const wsUrl = `wss://api.elevenlabs.io/v1/convai/conversation?agent_id=${encodeURIComponent(
+         agentId
+      )}`;
+
+      let finalReply = "";
+      let firstPartLogged = false;
+      let settled = false;
+      let timeout = null;
+      let ws = null;
+      const wsStartMs = Date.now();
+
+      diag("ELEVENLABS_WS_CONNECT_ATTEMPT", { ws_url: wsUrl });
+
+      const settle = (reply) => {
+         if (settled) return;
+         settled = true;
+         resolve(cleanReplyText(reply) || FALLBACK_REPLY);
+      };
+
+      try {
+         ws = new WebSocket(wsUrl);
+
+         timeout = setTimeout(() => {
+           diag("ELEVENLABS_WS_TIMEOUT", {
+              ws_duration_ms: Date.now() - wsStartMs,
+              partial_reply_length: finalReply.length,
+           });
+           console.error("ELEVENLABS TIMEOUT: geen reply binnen deadline");
+           try {
+              ws.close();
+           } catch {}
+           settle(finalReply || FALLBACK_REPLY);
+         }, ELEVEN_TIMEOUT_MS);
+
+         ws.on("open", () => {
+           diag("ELEVENLABS_WS_OPEN", {
+              ws_open_after_ms: Date.now() - wsStartMs,
+           });
+           // Coaching mode is injected INTO the system prompt via the
+           // {{coaching_banner}} dynamic variable (first line of the v42+ prompt).
+           // A contextual update alone proved too weak against the sales flow in
+           // the core prompt; a dynamic variable is substituted directly into the
+           // system prompt text, the strongest possible position.
+           const validatedCustomer = isCustomerStatusValidated(
+              customerStatus,
+              recentMessages
+           );
+           const coachingBanner = validatedCustomer
+              ? [
+                  "!!! DEZE KLANT IS GEVALIDEERD KLANT — JE BENT 100% COACH !!!",
+                  "Geen verkoop, geen prijzen, geen programma's, geen upsells en geen checkout-links, tenzij de klant er expliciet zelf om vraagt (bijvoorbeeld naar een specifiek product of als reactie op een broadcast-bericht).",
+                  "Vraag NOOIT of de klant de website of de programma's al heeft bekeken.",
+                  'Zeg NOOIT "welkom terug", "goed dat je er weer bent", "goed om je weer te horen" of iets vergelijkbaars. Begin ALTIJD direct met je antwoord.',
+                  "Beantwoord ALLEEN het bericht van dit moment. Haal NIET zelf eerdere onderwerpen, doelen of gesprekken aan— de CRM-context is achtergrondkennis, geen gespreksstof.",
+                  "Stel GEEN vragen en houd het gesprek niet gaande vanuit jouw kant. Antwoord, help en rond af. Alleen een korte verduidelijkingsvraag als je de vraag van de klant anders echt niet kunt beantwoorden.",
+                  "De receptenpagina op nutritionworks.online noem je ALLEEN wanneer de klant zelf om recepten, maaltijd-ideeën of inspiratie vraagt. Nooit uit jezelf.",
+                ].join("\n")
+              : "";
+           // Language lock, injected into the system prompt via the
+           // {{language_lock}} dynamic variable (v43+ prompt). For Dutch the
+           // template messages are used verbatim; for every other language Emma
+           // writes native-quality text, never literal translations.
+           const languageName =
+              LANGUAGE_NAMES[conversationLanguage] || "Nederlands";
+           const languageLock =
+              conversationLanguage === "nl" || !conversationLanguage
+                ? [
+                    "GESPREKSTAAL: Nederlands.",
+                    "Je schrijft ELK bericht uitsluitend in het Nederlands. De vaste voorbeeldberichten in deze prompt gebruik je letterlijk zoals ze er staan. Wissel nooit zelf van taal.",
+                  ].join("\n")
+                : [
+                    `CONVERSATION LANGUAGE: ${languageName}.`,
+                    `You write EVERY message exclusively in ${languageName}, natural and native-speaker quality.`,
+                    "Never translate the Dutch template messages literally: they define structure, content, emojis and linksonly. Write them the way a native speaker would naturally phrase them.",
+                    "Never switch languages on your own; the server controls the conversation language.",
+                  ].join("\n");
+           const countryLine =
+            conversationLanguage === "nl" || !conversationLanguage
+              ? `KLANTLAND: ${customerCountry || "UNKNOWN"} — gebruik ALTIJD de prijzen van dit land (tabel 4.1b). Bij UNKNOWN gebruik je de prijzen in ponden, zonder het land als UK te behandelen.`
+              : `CUSTOMER COUNTRY: ${customerCountry || "UNKNOWN"} — ALWAYS use this country's prices (table 4.1b). For UNKNOWN use pound prices without treating the country as UK.`;
+         const languageLockFull = `${languageLock}\n${countryLine}`;
+         // Per-turn hard guards, injected into the system prompt via the
+         // {{turn_guards}} dynamic variable. Flags inside the JSON context
+         // proved too weak (Emma re-pasted the website block after a side
+         // question); guards at the top of the system prompt stick.
+         const guardWebsiteSent = hasPatternBeenSent(
+            recentMessages,
+            PLAIN_WEBSITE_LINK_PATTERN
+         );
+         const guardTestimonialsSent = hasPatternBeenSent(
+            recentMessages,
+            TESTIMONIALS_LINK_PATTERN
+         );
+         const guardProgrammaInfoSent = hasPatternBeenSent(
+            recentMessages,
+            PROGRAMMA_INFO_LINK_PATTERN
+         );
+         const guardCheckoutSent = hasCheckoutLinkBeenSent(recentMessages);
+         const guardPriceMentioned = hasPriceBeenMentioned(recentMessages);
+         const guardLines = [];
+         if (guardWebsiteSent) {
+            guardLines.push(
+              'De website-link en het freebies-blok zijn AL gestuurd. Stuur ze NIET opnieuw uit jezelf — verwijs in woordennaar "de pagina die ik je stuurde". Alleen opnieuw sturen als de klant er expliciet om vraagt (bijvoorbeeld link kwijt),en dan alleen de kale link zonder freebies-blok. In coaching-modus mag de link alleen gedeeld worden als recepten-tool wanneer de klant zelf om recepten of inspiratie vraagt.'
+            );
+         }
+         if (guardTestimonialsSent) {
+            guardLines.push(
+              "De testimonials-link is AL gedeeld. Stuur hem NIET opnieuw, ook niet bij twijfel of bezwaar (sectie 8.4 en 8.6) — dezelfde link twee keer sturen voelt automatisch. Verwijs in woorden naar de resultaten en vraag gerust of de klantze al heeft kunnen bekijken. Twijfelt de klant vooral over WELK programma past: stuur dan de programma-uitleg pagina https://nutritionworks.online/#programma-info (mits die nog niet gedeeld is). Alleen als de klant expliciet om de testimonials-link vraagt, stuur je hem opnieuw."
+            );
+         }
+         if (guardProgrammaInfoSent) {
+            guardLines.push(
+              "De programma-uitleg link is AL gedeeld. NIET opnieuw sturen, tenzij de klant er expliciet om vraagt."
+            );
+         }
+         if (guardCheckoutSent) {
+            guardLines.push(
+              "Er is AL een checkout-link gestuurd. Geen nieuwe checkout-link, tenzij de klant er expliciet om vraagt of een andere keuze maakt."
+            );
+         }
+         if (guardPriceMentioned) {
+            guardLines.push(
+              "De prijs is AL genoemd. Niet herhalen, tenzij de klant ernaar vraagt."
+            );
+         }
+         if (hasReceivedTasteAnswer(recentMessages)) {
+            guardLines.push(
+              "De smaak is AL door de klant gegeven — vraag er NOOIT meer naar. Pak het antwoord uit de gespreksgeschiedenis."
+            );
+         }
+         if (hasReceivedControlAnswer(recentMessages)) {
+            guardLines.push(
+              "De Control-vraag is AL beantwoord — vraag er NOOIT meer naar. Zijn product en smaak bekend: stuur NU directde juiste checkout-link (sectie 5.3)."
+            );
+         } else if (
+            hasAskedTaste(recentMessages) &&
+            hasReceivedTasteAnswer(recentMessages) &&
+            (customerCountry || "").toUpperCase() !== "PT"
+         ) {
+            guardLines.push(
+              "De smaak is bekend, maar de Control-vraag is nog NIET beantwoord. Stuur GEEN checkout-link en neem Control niet aan. Vraag uitsluitend kort: 'Wil je Control erbij doen?' Pas na een duidelijk ja of nee mag de checkout-link wordengestuurd."
+            );
+         }
+         if ((customerCountry || "").toUpperCase() === "PT") {
+            guardLines.push(
+              "Deze klant zit in Portugal: Control is daar NIET beschikbaar. Sla de Control-upsell volledig over en verkoopnooit Control aan deze klant."
+            );
+         }
+         // France runs its own checkout flow. This guard is keyed on
+         // customer_country only (phone prefix), never on conversation_language:
+         // a French-speaking Belgian stays on the Belgian flow.
+         if ((customerCountry || "").toUpperCase() === "FR") {
+            guardLines.push(
+              [
+                 "Deze klant zit in FRANKRIJK. De Frankrijk-flow geldt:",
+                 "- Gebruik UITSLUITEND de checkout-links uit tabel 4.1c (die eindigen op -4x-fr). Gebruik NOOIT de universele links uit tabel 4.1, tenzij de klant zelf expliciet vraagt om alles in een keer te betalen.",
+                 "- Betalen gaat in 4 maandtermijnen met creditcard. Noem NOOIT Klarna en noem NOOIT 3 termijnen.",
+                 "- Noem prijzen alleen in het formaat 'EUR X x4'. Noem NOOIT een totaalbedrag en reken het totaal nooit voor de klant uit.",
+                 "- De 10% korting en de 2,50 euro termijnkosten zitten al in het bedrag. Noem ze niet uit jezelf.",
+                 "- Het is technisch een abonnement. Begin daar NOOIT zelf over. Vraagt de klant ernaar: eerlijk bevestigen,kort uitleggen dat het in het Juice Plus account met een paar klikken opgezegd wordt, en dat er anders na 4 maanden automatisch een nieuwe bestelling volgt.",
+                 "- SEPA nooit aanraden of uit jezelf noemen. Alleen kort feitelijk uitleggen als de klant er expliciet naarvraagt.",
+                 "- Alle programma's duren 4 maanden, ook Basic. Noem NOOIT 3 maanden en gebruik NOOIT het verhaal dat de capsules de vierde maand zijn.",
+                 "- Vraagt de klant of 90 porties genoeg is voor 4 maanden: antwoord ja, elke keer in je eigen woorden en nooit met een vaste zin.",
               ].join("\n")
-            : [
-                `CONVERSATION LANGUAGE: ${languageName}.`,
-                `You write EVERY message exclusively in ${languageName}, natural and native-speaker quality.`,
-                "Never translate the Dutch template messages literally: they define structure, content, emojis and links only. Write them the way a native speaker would naturally phrase them.",
-                "Never switch languages on your own; the server controls the conversation language.",
-              ].join("\n");
-        const countryLine =
-          conversationLanguage === "nl" || !conversationLanguage
-            ? `KLANTLAND: ${customerCountry || "UNKNOWN"} — gebruik ALTIJD de prijzen van dit land (tabel 4.1b). Bij UNKNOWN gebruik je de prijzen in ponden, zonder het land als UK te behandelen.`
-            : `CUSTOMER COUNTRY: ${customerCountry || "UNKNOWN"} — ALWAYS use this country's prices (table 4.1b). For UNKNOWN use pound prices without treating the country as UK.`;
-        const languageLockFull = `${languageLock}\n${countryLine}`;
-        // Per-turn hard guards, injected into the system prompt via the
-        // {{turn_guards}} dynamic variable. Flags inside the JSON context
-        // proved too weak (Emma re-pasted the website block after a side
-        // question); guards at the top of the system prompt stick.
-        const guardWebsiteSent = hasPatternBeenSent(
-          recentMessages,
-          PLAIN_WEBSITE_LINK_PATTERN
-        );
-        const guardTestimonialsSent = hasPatternBeenSent(
-          recentMessages,
-          TESTIMONIALS_LINK_PATTERN
-        );
-        const guardProgrammaInfoSent = hasPatternBeenSent(
-          recentMessages,
-          PROGRAMMA_INFO_LINK_PATTERN
-        );
-        const guardCheckoutSent = hasCheckoutLinkBeenSent(recentMessages);
-        const guardPriceMentioned = hasPriceBeenMentioned(recentMessages);
-        const guardLines = [];
-        if (guardWebsiteSent) {
-          guardLines.push(
-            'De website-link en het freebies-blok zijn AL gestuurd. Stuur ze NIET opnieuw uit jezelf — verwijs in woorden naar "de pagina die ik je stuurde". Alleen opnieuw sturen als de klant er expliciet om vraagt (bijvoorbeeld link kwijt), en dan alleen de kale link zonder freebies-blok. In coaching-modus mag de link alleen gedeeld worden als recepten-tool wanneer de klant zelf om recepten of inspiratie vraagt.'
-          );
-        }
-        if (guardTestimonialsSent) {
-          guardLines.push(
-            "De testimonials-link is AL gedeeld. Stuur hem NIET opnieuw, ook niet bij twijfel of bezwaar (sectie 8.4 en 8.6) — dezelfde link twee keer sturen voelt automatisch. Verwijs in woorden naar de resultaten en vraag gerust of de klant ze al heeft kunnen bekijken. Twijfelt de klant vooral over WELK programma past: stuur dan de programma-uitleg pagina https://nutritionworks.online/#programma-info (mits die nog niet gedeeld is). Alleen als de klant expliciet om de testimonials-link vraagt, stuur je hem opnieuw."
-          );
-        }
-        if (guardProgrammaInfoSent) {
-          guardLines.push(
-            "De programma-uitleg link is AL gedeeld. NIET opnieuw sturen, tenzij de klant er expliciet om vraagt."
-          );
-        }
-        if (guardCheckoutSent) {
-          guardLines.push(
-            "Er is AL een checkout-link gestuurd. Geen nieuwe checkout-link, tenzij de klant er expliciet om vraagt of een andere keuze maakt."
-          );
-        }
-        if (guardPriceMentioned) {
-          guardLines.push(
-            "De prijs is AL genoemd. Niet herhalen, tenzij de klant ernaar vraagt."
-          );
-        }
-        // Stap 2-gate (v51). De checklist met vinkjes mag pas wanneer zowel het
-        // doel als de grootste huidige uitdaging bekend zijn (sectie 3.2). Is de
-        // uitdaging nog onbekend en is de lijst nog niet gestuurd, dan blokkeren
-        // we hem hier -- promptniveau alleen bleek te zwak.
-        if (
-          !hasChecklistBeenSent(recentMessages) &&
-          !isChallengeKnown({
+            );
+         } else {
+            // Counterpart to the France guard above. The France 4-instalment
+            // links and pricing live in the system prompt for every turn, so a
+            // customer outside France asking for 4 monthly payments (which the
+            // Dutch market genuinely used to offer) could otherwise pull Emma
+            // toward a "-4x-fr" link that does not work in their country.
+            guardLines.push(
+              "Deze klant zit NIET in Frankrijk. Betalen in 4 maandtermijnen bestaat hier NIET en de checkout-links uit tabel 4.1c (die eindigen op -4x-fr) mag je NOOIT sturen. Vraagt de klant om 4 termijnen, bijvoorbeeld omdat dat vroeger in Nederland kon: zeg kort en eerlijk dat dat niet meer kan en bied Klarna in 3 termijnen aan. Beloof nooit dat je het nakijkt of regelt, en noem Frankrijk of andere markten niet."
+            );
+         }
+         const turnGuards =
+            guardLines.length > 0
+              ? ["HARDE REGELS VOOR DEZE BEURT:", ...guardLines].join("\n")
+              : "";
+
+         const contextBlock = buildContextBlock({
+            conversation_language: conversationLanguage,
+            customer_country: customerCountry,
+            customer_status: customerStatus,
+            current_phase: currentPhase,
             goal,
             objections,
-            lastSummary,
-            messages: recentMessages,
-            currentMessage: message,
-          })
-        ) {
-          guardLines.push(
-            "De grootste huidige UITDAGING van de klant is nog NIET bekend. Stuur deze beurt GEEN checklist met vinkjes (✅) en GEEN suggestielijst. Let op: 'ik hou het niet vol', 'het lukt me niet' of 'ik val steeds terug' is GEEN uitdaging — dat is het probleem opnieuw benoemd. De uitdaging is de REDEN daarachter (bijvoorbeeld: geen tijd, 's avonds snacken, stress, ploegendienst, koken voor het gezin). Reageer warm en persoonlijk op wat ze vertelde en stel PRECIES ÉÉN korte vraag naar die reden, bijvoorbeeld: 'Wat maakt het afvallen op dit moment vooral lastig voor je? 💚'. Eén vraag, verder niets."
-          );
-        }
-        // Aangekondigd vertrek (v51). De klant heeft net gezegd dat ze weg
-        // moet. Emma neemt kort afscheid en stelt GEEN vraag meer -- een vraag
-        // aan iemand die vertrekt blijft onbeantwoord liggen en voelt dwingend.
-        if (isAbsenceAnnouncement(message)) {
-          guardLines.push(
-            "De klant zegt in dit bericht dat ze WEG MOET of later terugkomt. Reageer met EEN korte, warme afsluiting: begrip tonen, iets aardigs wensen voor waar ze heen gaat, en zeggen dat jullie verdergaan wanneer het haar uitkomt. Stel GEEN enkele vraag, herhaal GEEN eerdere vraag, stuur GEEN link en vat NIETS samen. Twee korte zinnen is genoeg. Zeg ook niet dat je 'op haar wacht' of dat je 'iets klaarzet'."
-          );
-        }
-        if (hasReceivedTasteAnswer(recentMessages)) {
-          guardLines.push(
-            "De smaak is AL door de klant gegeven — vraag er NOOIT meer naar. Pak het antwoord uit de gespreksgeschiedenis."
-          );
-        }
-        if (hasReceivedControlAnswer(recentMessages)) {
-          guardLines.push(
-            "De Control-vraag is AL beantwoord — vraag er NOOIT meer naar. Zijn product en smaak bekend: stuur NU direct de juiste checkout-link (sectie 5.3)."
-          );
-        } else if (
-          hasAskedTaste(recentMessages) &&
-          hasReceivedTasteAnswer(recentMessages) &&
-          (customerCountry || "").toUpperCase() !== "PT"
-        ) {
-          guardLines.push(
-            "De smaak is bekend, maar de Control-vraag is nog NIET beantwoord. Stuur GEEN checkout-link en neem Control niet aan. Vraag uitsluitend kort: 'Wil je Control erbij doen?' Pas na een duidelijk ja of nee mag de checkout-link worden gestuurd."
-          );
-        }
-        if ((customerCountry || "").toUpperCase() === "PT") {
-          guardLines.push(
-            "Deze klant zit in Portugal: Control is daar NIET beschikbaar. Sla de Control-upsell volledig over en verkoop nooit Control aan deze klant."
-          );
-        }
-        // France runs its own checkout flow. This guard is keyed on
-        // customer_country only (phone prefix), never on conversation_language:
-        // a French-speaking Belgian stays on the Belgian flow.
-        if ((customerCountry || "").toUpperCase() === "FR") {
-          guardLines.push(
-            [
-              "Deze klant zit in FRANKRIJK. De Frankrijk-flow geldt:",
-              "- Gebruik UITSLUITEND de checkout-links uit tabel 4.1c (die eindigen op -4x-fr). Gebruik NOOIT de universele links uit tabel 4.1, tenzij de klant zelf expliciet vraagt om alles in een keer te betalen.",
-              "- Betalen gaat in 4 maandtermijnen met creditcard. Noem NOOIT Klarna en noem NOOIT 3 termijnen.",
-              "- Noem prijzen alleen in het formaat 'EUR X x4'. Noem NOOIT een totaalbedrag en reken het totaal nooit voor de klant uit.",
-              "- De 10% korting en de 2,50 euro termijnkosten zitten al in het bedrag. Noem ze niet uit jezelf.",
-              "- Het is technisch een abonnement. Begin daar NOOIT zelf over. Vraagt de klant ernaar: eerlijk bevestigen, kort uitleggen dat het in het Juice Plus account met een paar klikken opgezegd wordt, en dat er anders na 4 maanden automatisch een nieuwe bestelling volgt.",
-              "- SEPA nooit aanraden of uit jezelf noemen. Alleen kort feitelijk uitleggen als de klant er expliciet naar vraagt.",
-              "- Alle programma's duren 4 maanden, ook Basic. Noem NOOIT 3 maanden en gebruik NOOIT het verhaal dat de capsules de vierde maand zijn.",
-              "- Vraagt de klant of 90 porties genoeg is voor 4 maanden: antwoord ja, elke keer in je eigen woorden en nooit met een vaste zin.",
-            ].join("\n")
-          );
-        } else {
-          // Counterpart to the France guard above. The France 4-instalment
-          // links and pricing live in the system prompt for every turn, so a
-          // customer outside France asking for 4 monthly payments (which the
-          // Dutch market genuinely used to offer) could otherwise pull Emma
-          // toward a "-4x-fr" link that does not work in their country.
-          guardLines.push(
-            "Deze klant zit NIET in Frankrijk. Betalen in 4 maandtermijnen bestaat hier NIET en de checkout-links uit tabel 4.1c (die eindigen op -4x-fr) mag je NOOIT sturen. Vraagt de klant om 4 termijnen, bijvoorbeeld omdat dat vroeger in Nederland kon: zeg kort en eerlijk dat dat niet meer kan en bied Klarna in 3 termijnen aan. Beloof nooit dat je het nakijkt of regelt, en noem Frankrijk of andere markten niet."
-          );
-        }
-        const turnGuards =
-          guardLines.length > 0
-            ? ["HARDE REGELS VOOR DEZE BEURT:", ...guardLines].join("\n")
-            : "";
-        const contextBlock = buildContextBlock({
-          conversation_language: conversationLanguage,
-          customer_country: customerCountry,
-          customer_status: customerStatus,
-          current_phase: currentPhase,
-          goal,
-          objections,
-          last_summary: lastSummary,
-          interested_in_program: interestedInProgram,
-          interested_in_control: interestedInControl,
-          purchased_program: purchasedProgram,
-          has_control: hasControl,
-          recent_messages: recentMessages,
-          latest_user_message: message,
-        });
+            last_summary: lastSummary,
+            interested_in_program: interestedInProgram,
+            interested_in_control: interestedInControl,
+            purchased_program: purchasedProgram,
+            has_control: hasControl,
+            recent_messages: recentMessages,
+            latest_user_message: message,
+         });
 
-        diag("ELEVENLABS_WS_CONTEXT_PREPARED", {
-          context_block_size_bytes: contextBlock.length,
-          message_length: typeof message === "string" ? message.length : 0,
-          turn_guards_active: guardLines.length,
-        });
+         diag("ELEVENLABS_WS_CONTEXT_PREPARED", {
+            context_block_size_bytes: contextBlock.length,
+            message_length: typeof message === "string" ? message.length : 0,
+            turn_guards_active: guardLines.length,
+         });
 
-        ws.send(
-          JSON.stringify({
-            type: "conversation_initiation_client_data",
-            conversation_config_override: {
-              conversation: { text_only: true },
-            },
-            dynamic_variables: {
-              coaching_banner: coachingBanner,
-              language_lock: languageLockFull,
-              turn_guards: turnGuards,
-            },
-            user_id: userId,
-          })
-        );
+         ws.send(
+            JSON.stringify({
+              type: "conversation_initiation_client_data",
+              conversation_config_override: {
+                 conversation: { text_only: true },
+              },
+              dynamic_variables: {
+                 coaching_banner: coachingBanner,
+                 language_lock: languageLockFull,
+                 turn_guards: turnGuards,
+              },
+              user_id: userId,
+            })
+         );
 
-        ws.send(
-          JSON.stringify({
-            type: "contextual_update",
-            text: contextBlock,
-          })
-        );
+         ws.send(
+            JSON.stringify({
+              type: "contextual_update",
+              text: contextBlock,
+            })
+         );
+         ws.send(
+            JSON.stringify({
+              type: "user_message",
+              text: message,
+            })
+         );
 
-        ws.send(
-          JSON.stringify({
-            type: "user_message",
-            text: message,
-          })
-        );
+         diag("ELEVENLABS_WS_MESSAGES_SENT");
+       });
 
-        diag("ELEVENLABS_WS_MESSAGES_SENT");
-      });
+       ws.on("message", (raw) => {
+           let data = null;
 
-      ws.on("message", (raw) => {
-        let data = null;
+           try {
+             data = JSON.parse(raw.toString());
+           } catch {
+             return;
+           }
 
-        try {
-          data = JSON.parse(raw.toString());
-        } catch {
-          return;
-        }
+           if (data.type === "agent_chat_response_part") {
+             const partType = data.text_response_part?.type;
+             const partText = data.text_response_part?.text || "";
 
-        if (data.type === "agent_chat_response_part") {
-          const partType = data.text_response_part?.type;
-          const partText = data.text_response_part?.text || "";
+               if (partType === "start" || partType === "delta") {
+                 if (!firstPartLogged) {
+                   firstPartLogged = true;
+                   diag("ELEVENLABS_WS_FIRST_PART", {
+                     first_part_after_ms: Date.now() - wsStartMs,
+                     first_part_type: partType,
+                   });
+                 }
+                 finalReply += partText;
+               }
+           }
 
-          if (partType === "start" || partType === "delta") {
-            if (!firstPartLogged) {
-              firstPartLogged = true;
-              diag("ELEVENLABS_WS_FIRST_PART", {
-                first_part_after_ms: Date.now() - wsStartMs,
-                first_part_type: partType,
-              });
+           if (data.type === "agent_response") {
+             clearTimeout(timeout);
+
+               diag("ELEVENLABS_WS_AGENT_RESPONSE", {
+                 ws_duration_ms: Date.now() - wsStartMs,
+                 reply_length: typeof data.agent_response_event?.agent_response === "string"
+                   ? data.agent_response_event.agent_response.length
+                   : 0,
+                 streamed_reply_length: finalReply.length,
+               });
+
+               try {
+                 ws.close();
+               } catch {}
+
+               const reply =
+                 cleanReplyText(data.agent_response_event?.agent_response) ||
+                 cleanReplyText(finalReply) ||
+                 FALLBACK_REPLY;
+
+               settle(reply);
+           }
+         });
+
+         ws.on("error", (err) => {
+           diag("ELEVENLABS_WS_ERROR", {
+             ws_duration_ms: Date.now() - wsStartMs,
+             error_message: err?.message || String(err),
+           });
+           console.error("ELEVENLABS WS ERROR:", err?.message || err);
+           clearTimeout(timeout);
+           settle(finalReply || FALLBACK_REPLY);
+         });
+
+          ws.on("close", () => {
+            diag("ELEVENLABS_WS_CLOSE", {
+              ws_duration_ms: Date.now() - wsStartMs,
+              settled_before_close: settled,
+            });
+            clearTimeout(timeout);
+            if (!settled) {
+              settle(finalReply || FALLBACK_REPLY);
             }
-            finalReply += partText;
-          }
-        }
-
-        if (data.type === "agent_response") {
-          clearTimeout(timeout);
-
-          diag("ELEVENLABS_WS_AGENT_RESPONSE", {
-            ws_duration_ms: Date.now() - wsStartMs,
-            reply_length: typeof data.agent_response_event?.agent_response === "string"
-              ? data.agent_response_event.agent_response.length
-              : 0,
-            streamed_reply_length: finalReply.length,
           });
-
-          try {
-            ws.close();
-          } catch {}
-
-          const reply =
-            cleanReplyText(data.agent_response_event?.agent_response) ||
-            cleanReplyText(finalReply) ||
-            FALLBACK_REPLY;
-
-          settle(reply);
-        }
-      });
-
-      ws.on("error", (err) => {
-        diag("ELEVENLABS_WS_ERROR", {
-          ws_duration_ms: Date.now() - wsStartMs,
-          error_message: err?.message || String(err),
-        });
-        console.error("ELEVENLABS WS ERROR:", err?.message || err);
-        clearTimeout(timeout);
-        settle(finalReply || FALLBACK_REPLY);
-      });
-
-      ws.on("close", () => {
-        diag("ELEVENLABS_WS_CLOSE", {
-          ws_duration_ms: Date.now() - wsStartMs,
-          settled_before_close: settled,
-        });
-        clearTimeout(timeout);
-        if (!settled) {
+        } catch (error) {
+          diag("ELEVENLABS_OUTER_ERROR", {
+            error_message: error?.message || String(error),
+          });
+          console.error("ELEVENLABS OUTER ERROR:", error?.message || error);
+          if (timeout) clearTimeout(timeout);
           settle(finalReply || FALLBACK_REPLY);
         }
       });
-    } catch (error) {
-      diag("ELEVENLABS_OUTER_ERROR", {
-        error_message: error?.message || String(error),
-      });
-      console.error("ELEVENLABS OUTER ERROR:", error?.message || error);
-      if (timeout) clearTimeout(timeout);
-      settle(finalReply || FALLBACK_REPLY);
-    }
+  }
+
+  /* -------------------------------- ROUTES -------------------------------- */
+
+  app.get("/health", (_req, res) => {
+    return res.json({ ok: true });
   });
-}
 
-/* -------------------------------- ROUTES -------------------------------- */
-
-app.get("/health", (_req, res) => {
-  return res.json({ ok: true });
-});
-
-app.post("/chat", async (req, res) => {
-  // Diagnostic logging setup: every request gets a unique ID and a start timestamp
-  // so we can reconstruct exactly what happened, in what order, and how long each
-  // step took. All diagnostic log lines include diag:true so they can be filtered
-  // in Render's log search.
-  const requestId = randomUUID();
+  app.post("/chat", async (req, res) => {
+    // Diagnostic logging setup: every request gets a unique ID and a start timestamp
+    // so we can reconstruct exactly what happened, in what order, and how long each
+    // step took. All diagnostic log lines include diag:true so they can be filtered
+    // in Render's log search.
+    const requestId = randomUUID();
   const requestStartMs = Date.now();
   const requestBodySize = (() => {
     try {
@@ -2451,21 +2001,21 @@ app.post("/chat", async (req, res) => {
   })();
 
   const diag = (event, extra = {}) => {
-    const now = Date.now();
-    console.log(
-      JSON.stringify(
-        {
-          diag: true,
-          request_id: requestId,
-          event,
-          elapsed_ms: now - requestStartMs,
-          timestamp_ms: now,
-          ...extra,
-        },
-        null,
-        2
-      )
-    );
+     const now = Date.now();
+     console.log(
+        JSON.stringify(
+          {
+             diag: true,
+             request_id: requestId,
+             event,
+             elapsed_ms: now - requestStartMs,
+             timestamp_ms: now,
+             ...extra,
+          },
+          null,
+          2
+        )
+     );
   };
 
   diag("REQUEST_START", {
@@ -2491,6 +2041,7 @@ app.post("/chat", async (req, res) => {
   } = req.body ?? {};
 
   const agentId = cleanText(process.env.ELEVENLABS_AGENT_ID);
+
   const normalizedUserId = cleanText(user_id);
   const normalizedMessage = cleanText(message);
   const normalizedCustomerStatus = cleanText(customer_status);
@@ -2531,220 +2082,185 @@ app.post("/chat", async (req, res) => {
     customer_status: normalizedCustomerStatus,
     current_phase: normalizedCurrentPhase,
     recent_messages_count: Array.isArray(recent_messages) ? recent_messages.length : 0,
-  });
+   });
 
-  const sendDiagResponse = (label, responseObject) => {
-    let responseSize = -1;
-    try {
-      responseSize = JSON.stringify(responseObject).length;
-    } catch {}
-    diag("REQUEST_END", {
-      exit_label: label,
-      total_duration_ms: Date.now() - requestStartMs,
-      response_size_bytes: responseSize,
-      reply_length:
-        typeof responseObject?.reply === "string"
-          ? responseObject.reply.length
-          : 0,
-    });
-    return res.json(responseObject);
-  };
+   const sendDiagResponse = (label, responseObject) => {
+      let responseSize = -1;
+      try {
+        responseSize = JSON.stringify(responseObject).length;
+      } catch {}
+      diag("REQUEST_END", {
+        exit_label: label,
+        total_duration_ms: Date.now() - requestStartMs,
+        response_size_bytes: responseSize,
+        reply_length:
+           typeof responseObject?.reply === "string"
+             ? responseObject.reply.length
+             : 0,
+      });
+      return res.json(responseObject);
+   };
 
-  console.log("CHAT HIT");
-  console.log(
-    JSON.stringify(
-      {
-        user_id: normalizedUserId,
-        message_preview: clamp(normalizedMessage, 120),
-        customer_status: normalizedCustomerStatus,
-        current_phase: normalizedCurrentPhase,
-        has_goal: Boolean(normalizedGoal),
-        has_objections: Boolean(normalizedObjections),
-        has_last_summary: Boolean(normalizedLastSummary),
-      },
-      null,
-      2
-    )
-  );
+   console.log("CHAT HIT");
+   console.log(
+      JSON.stringify(
+        {
+           user_id: normalizedUserId,
+           message_preview: clamp(normalizedMessage, 120),
+           customer_status: normalizedCustomerStatus,
+           current_phase: normalizedCurrentPhase,
+           has_goal: Boolean(normalizedGoal),
+           has_objections: Boolean(normalizedObjections),
+           has_last_summary: Boolean(normalizedLastSummary),
+        },
+        null,
+        2
+      )
+   );
 
-  if (!normalizedUserId) {
-    console.error("REQUEST ERROR: user_id ontbreekt");
-    return sendDiagResponse("fallback_reply", buildResponse({ send_reply: true, reply: FALLBACK_REPLY, language: conversationLanguage }));
-  }
+   if (!normalizedUserId) {
+      console.error("REQUEST ERROR: user_id ontbreekt");
+      return sendDiagResponse("fallback_reply", buildResponse({ send_reply: true, reply: FALLBACK_REPLY, language: conversationLanguage }));
+   }
 
-  if (!normalizedMessage) {
-    console.error("REQUEST ERROR: message ontbreekt");
-    return sendDiagResponse("fallback_reply", buildResponse({ send_reply: true, reply: FALLBACK_REPLY, language: conversationLanguage }));
-  }
+   if (!normalizedMessage) {
+      console.error("REQUEST ERROR: message ontbreekt");
+      return sendDiagResponse("fallback_reply", buildResponse({ send_reply: true, reply: FALLBACK_REPLY, language: conversationLanguage }));
+   }
 
-  const normalizedRecentMessages = sanitizeAndPrepareRecentMessages(
-    recent_messages,
-    normalizedMessage
-  );
+   const normalizedRecentMessages = sanitizeAndPrepareRecentMessages(
+      recent_messages,
+      normalizedMessage
+   );
 
-  // Language switching for known customers: ONLY an explicit request
-  // ("can we speak English?", "auf Deutsch bitte") switches the language,
-  // at any point in the conversation, and re-locks it. There is deliberately
-  // no statistical switching — writing style alone never changes the
-  // conversation language.
-  if (storedLanguage) {
-    const explicitRequest = detectExplicitLanguageRequest(normalizedMessage);
-    if (explicitRequest && explicitRequest !== conversationLanguage) {
-      conversationLanguage = explicitRequest;
-      languageUpdate = explicitRequest;
-    }
-  }
+   // Language switching for known customers: ONLY an explicit request
+   // ("can we speak English?", "auf Deutsch bitte") switches the language,
+   // at any point in the conversation, and re-locks it. There is deliberately
+   // no statistical switching — writing style alone never changes the
+   // conversation language.
+   if (storedLanguage) {
+      const explicitRequest = detectExplicitLanguageRequest(normalizedMessage);
+      if (explicitRequest && explicitRequest !== conversationLanguage) {
+        conversationLanguage = explicitRequest;
+        languageUpdate = explicitRequest;
+      }
+   }
 
-  console.log(
-    JSON.stringify(
-      {
-        event: "PROCESSING_MESSAGE",
-        user_id: normalizedUserId,
-        final_message_preview: clamp(normalizedMessage, 300),
+   console.log(
+      JSON.stringify(
+        {
+           event: "PROCESSING_MESSAGE",
+           user_id: normalizedUserId,
+           final_message_preview: clamp(normalizedMessage, 300),
+           recent_messages_count: normalizedRecentMessages.length,
+           has_whatsapp_group_link: hasWhatsappGroupLinkBeenSent(normalizedRecentMessages),
+           last_roles: normalizedRecentMessages.slice(-5).map((m) => m.role),
+        },
+        null,
+        2
+      )
+   );
+
+   // NEW USER FAST PATH: when context is fully empty (no customer_status,
+   // no history, no summary) we send the hardcoded welcome reply directly.
+   // Emma is intentionally NOT invoked here — that prevents her from
+   // misinterpreting opt-in triggers like "coach-Jelle" as a customer telling
+   // her about a previous coach. Source attribution (Airtable Bron) is handled
+   // entirely by Make/Airtable downstream from the original message body.
+   if (
+      isNewUser({
+        recentMessages: normalizedRecentMessages,
+        lastSummary: normalizedLastSummary,
+     })
+   ) {
+     diag("NEW_USER_WELCOME", {
+        first_message_preview: clamp(normalizedMessage, 120),
+        customer_status_received: normalizedCustomerStatus,
+        language: conversationLanguage,
+     });
+     return sendDiagResponse(
+        "new_user_welcome",
+        buildResponse({
+           send_reply: true,
+           reply: WELCOME_MESSAGES[conversationLanguage] || WELCOME_MESSAGE,
+           language: conversationLanguage,
+           language_update: languageUpdate,
+        })
+     );
+   }
+
+   if (!agentId) {
+     console.error("CONFIG ERROR: ELEVENLABS_AGENT_ID ontbreekt");
+     return sendDiagResponse("fallback_reply", buildResponse({ send_reply: true, reply: FALLBACK_REPLY, language: conversationLanguage }));
+   }
+
+   try {
+     const alreadyValidated = isCustomerStatusValidated(
+        normalizedCustomerStatus,
+        normalizedRecentMessages
+     );
+
+     diag("ELEVENLABS_DISPATCH", {
+        already_validated: alreadyValidated,
+        customer_status_passed: alreadyValidated ? "customer" : normalizedCustomerStatus,
+        current_phase_passed: alreadyValidated ? "coaching" : normalizedCurrentPhase,
         recent_messages_count: normalizedRecentMessages.length,
-        has_whatsapp_group_link: hasWhatsappGroupLinkBeenSent(normalizedRecentMessages),
-        last_roles: normalizedRecentMessages.slice(-5).map((m) => m.role),
-      },
-      null,
-      2
-    )
-  );
+     });
 
-  // NEW USER FAST PATH: when context is fully empty (no customer_status,
-  // no history, no summary) we send the hardcoded welcome reply directly.
-  // Emma is intentionally NOT invoked here — that prevents her from
-  // misinterpreting opt-in triggers like "coach-Jelle" as a customer telling
-  // her about a previous coach. Source attribution (Airtable Bron) is handled
-  // entirely by Make/Airtable downstream from the original message body.
-  if (
-    isNewUser({
-      recentMessages: normalizedRecentMessages,
-      lastSummary: normalizedLastSummary,
-    })
-  ) {
-    diag("NEW_USER_WELCOME", {
-      first_message_preview: clamp(normalizedMessage, 120),
-      customer_status_received: normalizedCustomerStatus,
-      language: conversationLanguage,
-    });
-    return sendDiagResponse(
-      "new_user_welcome",
-      buildResponse({
-        send_reply: true,
-        reply: WELCOME_MESSAGES[conversationLanguage] || WELCOME_MESSAGE,
-        language: conversationLanguage,
-        language_update: languageUpdate,
-      })
-    );
-  }
+     // Start both calls in parallel. We only block on ElevenLabs (the customer-facing reply);
+     // OpenAI extraction runs alongside and is awaited briefly later with a grace timeout
+     // so it cannot push the total response time past ManyChat's webhook timeout.
+     const replyPromise = getElevenReply({
+        userId: normalizedUserId,
+        conversationLanguage,
+        customerCountry,
+        message: normalizedMessage,
+        customerStatus: alreadyValidated
+           ? "customer"
+           : normalizedCustomerStatus,
+        currentPhase: alreadyValidated
+           ? "coaching"
+           : normalizedCurrentPhase,
+        goal: normalizedGoal,
+        objections: normalizedObjections,
+        lastSummary: normalizedLastSummary,
+        interestedInProgram: normalizedInterestedInProgram,
+        interestedInControl: normalizedInterestedInControl,
+        purchasedProgram: normalizedPurchasedProgram,
+        hasControl: normalizedHasControl,
+        recentMessages: normalizedRecentMessages,
+        agentId,
+        requestId,
+        requestStartMs,
+     });
 
-  // -------------------------------------------------------------------------
-  // Afsluiting tijdens een lopende afwezigheid (v51)
-  // -------------------------------------------------------------------------
-  // De klant is AFWEZIG (zie getActiveAbsence) en stuurt nog een kale
-  // bevestiging: "ok", "dankjewel", een duimpje. Dat is geen nieuwe
-  // gespreksbeurt maar een punt achter de vorige. Emma sluit af met een groen
-  // hart en hervat het gesprek NIET -- zij is immers nog steeds weg.
-  //
-  // Twee voorwaarden, allebei structureel:
-  //   1. de afwezigheid loopt nog (geen inhoudelijk bericht sinds het vertrek,
-  //      en binnen het tijdvenster van 30 minuten)
-  //   2. dit bericht is een kale bevestiging zonder eigen inhoud
-  //
-  // Er wordt NIET gekeken naar hoe Emma afscheid nam -- dat varieert te veel.
-  const activeAbsence = getActiveAbsence(normalizedRecentMessages, Date.now());
-  if (activeAbsence && isPureAcknowledgement(normalizedMessage)) {
-    diag("CLOSING_HEART_DURING_ABSENCE", {
-      user_message: clamp(normalizedMessage, 60),
-      departure_message: clamp(activeAbsence.message_text, 60),
-      minutes_since_departure: activeAbsence._time
-        ? Math.round((Date.now() - activeAbsence._time) / 60000)
-        : null,
-      window_minutes: Math.round(ABSENCE_WINDOW_MS / 60000),
-    });
-    return sendDiagResponse(
-      "closing_heart_during_absence",
-      buildResponse({
-        send_reply: true,
-        reply: CLOSING_HEART,
-        language: conversationLanguage,
-        language_update: languageUpdate,
-      })
-    );
-  }
+     const extractionPromise = getStructuredUpdates({
+        message: normalizedMessage,
+        customerStatus: alreadyValidated
+           ? "customer"
+           : normalizedCustomerStatus,
+        currentPhase: alreadyValidated
+           ? "coaching"
+           : normalizedCurrentPhase,
+        currentGoal: normalizedGoal,
+        currentObjections: normalizedObjections,
+        currentLastSummary: normalizedLastSummary,
+        currentInterestedInProgram: normalizedInterestedInProgram,
+        currentInterestedInControl: normalizedInterestedInControl,
+        currentPurchasedProgram: normalizedPurchasedProgram,
+        currentHasControl: normalizedHasControl,
+        recentMessages: normalizedRecentMessages,
+        requestId,
+        requestStartMs,
+     });
 
-  if (!agentId) {
-    console.error("CONFIG ERROR: ELEVENLABS_AGENT_ID ontbreekt");
-    return sendDiagResponse("fallback_reply", buildResponse({ send_reply: true, reply: FALLBACK_REPLY, language: conversationLanguage }));
-  }
+     const replyResult = await replyPromise.then(
+        (value) => ({ status: "fulfilled", value }),
+        (reason) => ({ status: "rejected", reason })
+     );
 
-  try {
-    const alreadyValidated = isCustomerStatusValidated(
-      normalizedCustomerStatus,
-      normalizedRecentMessages
-    );
-
-    diag("ELEVENLABS_DISPATCH", {
-      already_validated: alreadyValidated,
-      customer_status_passed: alreadyValidated ? "customer" : normalizedCustomerStatus,
-      current_phase_passed: alreadyValidated ? "coaching" : normalizedCurrentPhase,
-      recent_messages_count: normalizedRecentMessages.length,
-    });
-
-    // Start both calls in parallel. We only block on ElevenLabs (the customer-facing reply);
-    // OpenAI extraction runs alongside and is awaited briefly later with a grace timeout
-    // so it cannot push the total response time past ManyChat's webhook timeout.
-    const replyPromise = getElevenReply({
-      userId: normalizedUserId,
-      conversationLanguage,
-      customerCountry,
-      message: normalizedMessage,
-      customerStatus: alreadyValidated
-        ? "customer"
-        : normalizedCustomerStatus,
-      currentPhase: alreadyValidated
-        ? "coaching"
-        : normalizedCurrentPhase,
-      goal: normalizedGoal,
-      objections: normalizedObjections,
-      lastSummary: normalizedLastSummary,
-      interestedInProgram: normalizedInterestedInProgram,
-      interestedInControl: normalizedInterestedInControl,
-      purchasedProgram: normalizedPurchasedProgram,
-      hasControl: normalizedHasControl,
-      recentMessages: normalizedRecentMessages,
-      agentId,
-      requestId,
-      requestStartMs,
-    });
-
-    const extractionPromise = getStructuredUpdates({
-      message: normalizedMessage,
-      customerStatus: alreadyValidated
-        ? "customer"
-        : normalizedCustomerStatus,
-      currentPhase: alreadyValidated
-        ? "coaching"
-        : normalizedCurrentPhase,
-      currentGoal: normalizedGoal,
-      currentObjections: normalizedObjections,
-      currentLastSummary: normalizedLastSummary,
-      currentInterestedInProgram: normalizedInterestedInProgram,
-      currentInterestedInControl: normalizedInterestedInControl,
-      currentPurchasedProgram: normalizedPurchasedProgram,
-      currentHasControl: normalizedHasControl,
-      recentMessages: normalizedRecentMessages,
-      requestId,
-      requestStartMs,
-    });
-
-    const replyResult = await replyPromise.then(
-      (value) => ({ status: "fulfilled", value }),
-      (reason) => ({ status: "rejected", reason })
-    );
-
-    diag("ELEVENLABS_DONE", {
-      status: replyResult.status,
+     diag("ELEVENLABS_DONE", {
+        status: replyResult.status,
       reply_length:
         replyResult.status === "fulfilled" && typeof replyResult.value === "string"
           ? replyResult.value.length
@@ -2765,18 +2281,18 @@ app.post("/chat", async (req, res) => {
     }
 
     console.log(
-      JSON.stringify(
-        {
-          event: "ELEVENLABS_RAW_REPLY",
-          user_id: normalizedUserId,
-          raw_reply_preview: clamp(
-            replyResult.status === "fulfilled" ? replyResult.value : "",
-            400
-          ),
-        },
-        null,
-        2
-      )
+       JSON.stringify(
+         {
+            event: "ELEVENLABS_RAW_REPLY",
+            user_id: normalizedUserId,
+            raw_reply_preview: clamp(
+              replyResult.status === "fulfilled" ? replyResult.value : "",
+              400
+            ),
+         },
+         null,
+         2
+       )
     );
 
     reply = stripForbiddenReplyPhrases(cleanReplyText(reply));
@@ -2787,16 +2303,16 @@ app.post("/chat", async (req, res) => {
     // "ja", and never send a combo checkout-link until the customer explicitly
     // answers the Control question.
     const tasteKnownForCheckout = hasReceivedTasteAnswer([
-      ...normalizedRecentMessages,
-      { role: "user", message_text: normalizedMessage },
+       ...normalizedRecentMessages,
+       { role: "user", message_text: normalizedMessage },
     ]);
     const controlAnsweredForCheckout = hasReceivedControlAnswer([
-      ...normalizedRecentMessages,
-      { role: "user", message_text: normalizedMessage },
+       ...normalizedRecentMessages,
+       { role: "user", message_text: normalizedMessage },
     ]);
     const tasteWasAskedForCheckout = hasAskedTaste(normalizedRecentMessages);
     const checkoutAlreadySentForCheckout = hasCheckoutLinkBeenSent(
-      normalizedRecentMessages
+       normalizedRecentMessages
     );
 
     if (
@@ -2809,8 +2325,8 @@ app.post("/chat", async (req, res) => {
       isTasteOnlyCheckoutAnswer(normalizedMessage)
     ) {
       reply = controlFollowUpForLanguage(
-        conversationLanguage,
-        normalizedMessage
+         conversationLanguage,
+         normalizedMessage
       );
     }
 
@@ -2820,7 +2336,7 @@ app.post("/chat", async (req, res) => {
     if (
       hasPatternBeenSent(normalizedRecentMessages, PLAIN_WEBSITE_LINK_PATTERN) &&
       !/\b(website|site|link|pagina|recept|recepten|inspiratie|kwijt|nogmaals|opnieuw|stuur)\b/i.test(
-        normalizedMessage
+         normalizedMessage
       )
     ) {
       reply = stripRepeatedWebsiteBlock(reply);
@@ -2831,24 +2347,24 @@ app.post("/chat", async (req, res) => {
     // response goes back to Make fast. The OpenAI call keeps running in
     // the background; its result for this turn is simply discarded.
     const POST_REPLY_EXTRACTION_GRACE_MS = Number(
-      process.env.POST_REPLY_EXTRACTION_GRACE_MS || 3000
+       process.env.POST_REPLY_EXTRACTION_GRACE_MS || 3000
     );
-    const extractionRaceStartMs = Date.now();
 
+    const extractionRaceStartMs = Date.now();
     const extractionResult = await Promise.race([
       extractionPromise.then(
-        (value) => ({ status: "fulfilled", value }),
-        (reason) => ({ status: "rejected", reason })
+         (value) => ({ status: "fulfilled", value }),
+         (reason) => ({ status: "rejected", reason })
       ),
       new Promise((resolve) =>
-        setTimeout(
-          () =>
-            resolve({
-              status: "rejected",
-              reason: "post_reply_grace_timeout",
-            }),
-          POST_REPLY_EXTRACTION_GRACE_MS
-        )
+         setTimeout(
+           () =>
+             resolve({
+               status: "rejected",
+               reason: "post_reply_grace_timeout",
+             }),
+           POST_REPLY_EXTRACTION_GRACE_MS
+         )
       ),
     ]);
 
@@ -2877,8 +2393,8 @@ app.post("/chat", async (req, res) => {
 
     if (extractionResult.status === "rejected") {
       console.error(
-        "OPENAI EXTRACTION SKIPPED OR FAILED:",
-        extractionResult.reason
+         "OPENAI EXTRACTION SKIPPED OR FAILED:",
+         extractionResult.reason
       );
     }
 
@@ -2887,11 +2403,11 @@ app.post("/chat", async (req, res) => {
     // still says "lead", push customer_status back to "customer" so the record
     // catches up. Same for current_phase moving to "coaching".
     const whatsappLinkInCurrentReply = /chat\.whatsapp\.com/i.test(
-      cleanText(reply)
+       cleanText(reply)
     );
     const whatsappLinkSentNowOrEarlier =
-      whatsappLinkInCurrentReply ||
-      hasWhatsappGroupLinkBeenSent(normalizedRecentMessages);
+       whatsappLinkInCurrentReply ||
+       hasWhatsappGroupLinkBeenSent(normalizedRecentMessages);
 
     // A user is considered a validated customer as soon as they have shared
     // a valid order number, regardless of whether Emma has sent the WhatsApp
@@ -2901,13 +2417,12 @@ app.post("/chat", async (req, res) => {
     // of a valid JP-pattern order number in the user's messages is the
     // single source of truth: order number = customer = coaching mode.
     const userHasOrderNumber = userMessagesContainOrderNumber(
-      normalizedRecentMessages,
-      normalizedMessage
+       normalizedRecentMessages,
+       normalizedMessage
     );
 
     const validatedNow =
       alreadyValidated || whatsappLinkInCurrentReply || userHasOrderNumber;
-
     // Coaching mode: deterministically remove trailing questions (the prompt
     // rule alone proved insufficient in production).
     if (validatedNow) {
@@ -2928,84 +2443,84 @@ app.post("/chat", async (req, res) => {
 
     // Server-side derivation of product fields (deterministic, replaces the
     // extractor output for purchased_program, has_control, interested_in_program
-    // and interested_in_control).
-    const derivedPurchase = derivePurchaseFields({
-      recentMessages: normalizedRecentMessages,
-      currentUserMessage: normalizedMessage,
-      currentReply: reply,
-      whatsappGroupLinkSentNowOrEarlier: whatsappLinkSentNowOrEarlier,
-    });
+     // and interested_in_control).
+     const derivedPurchase = derivePurchaseFields({
+        recentMessages: normalizedRecentMessages,
+        currentUserMessage: normalizedMessage,
+        currentReply: reply,
+        whatsappGroupLinkSentNowOrEarlier: whatsappLinkSentNowOrEarlier,
+     });
 
-    // customer_status is purely server-side (order control + self-healing).
-    // current_phase can come from the extractor, but self-healing overrides it
-    // to "coaching" once the customer is validated.
-    const finalCustomerStatusUpdate = selfHealCustomerStatus;
-    const finalCurrentPhaseUpdate =
-      selfHealCurrentPhase || extraction.current_phase_update;
+     // customer_status is purely server-side (order control + self-healing).
+     // current_phase can come from the extractor, but self-healing overrides it
+     // to "coaching" once the customer is validated.
+     const finalCustomerStatusUpdate = selfHealCustomerStatus;
+     const finalCurrentPhaseUpdate =
+        selfHealCurrentPhase || extraction.current_phase_update;
 
-    // Product fields: code-side derivation always wins over the extractor.
-    // We only write a non-empty value (so we never overwrite a previously
-    // correct Airtable value with an empty string).
-    const finalInterestedInProgramUpdate = derivedPurchase.interested_in_program;
-    const finalInterestedInControlUpdate = derivedPurchase.interested_in_control;
-    const finalPurchasedProgramUpdate = derivedPurchase.purchased_program;
-    const finalHasControlUpdate = derivedPurchase.has_control;
+     // Product fields: code-side derivation always wins over the extractor.
+     // We only write a non-empty value (so we never overwrite a previously
+     // correct Airtable value with an empty string).
+     const finalInterestedInProgramUpdate = derivedPurchase.interested_in_program;
+     const finalInterestedInControlUpdate = derivedPurchase.interested_in_control;
+     const finalPurchasedProgramUpdate = derivedPurchase.purchased_program;
+     const finalHasControlUpdate = derivedPurchase.has_control;
 
-    console.log(
-      JSON.stringify(
-        {
-          event: "FINAL_REPLY_SENT",
-          user_id: normalizedUserId,
-          final_reply_preview: clamp(reply, 400),
-          goal_update_preview: clamp(extraction.goal_update, 200),
-          objections_update_preview: clamp(extraction.objections_update, 200),
-          last_summary_update_preview: clamp(extraction.last_summary_update, 200),
-          customer_status_update_preview: finalCustomerStatusUpdate,
-          current_phase_update_preview: finalCurrentPhaseUpdate,
-          interested_in_program_update_preview: finalInterestedInProgramUpdate,
-          interested_in_control_update_preview: finalInterestedInControlUpdate,
-          purchased_program_update_preview: finalPurchasedProgramUpdate,
-          has_control_update_preview: finalHasControlUpdate,
-          language: conversationLanguage,
-          language_update_preview: languageUpdate,
-          derived_purchase_validated: derivedPurchase.validated,
-          extractor_purchased_program_raw: extraction.purchased_program_update,
-          extractor_has_control_raw: extraction.has_control_update,
-          extractor_interested_in_program_raw: extraction.interested_in_program_update,
-          extractor_interested_in_control_raw: extraction.interested_in_control_update,
-        },
-        null,
-        2
-      )
-    );
+     console.log(
+        JSON.stringify(
+           {
+              event: "FINAL_REPLY_SENT",
+              user_id: normalizedUserId,
+              final_reply_preview: clamp(reply, 400),
+              goal_update_preview: clamp(extraction.goal_update, 200),
+              objections_update_preview: clamp(extraction.objections_update, 200),
+              last_summary_update_preview: clamp(extraction.last_summary_update, 200),
+              customer_status_update_preview: finalCustomerStatusUpdate,
+              current_phase_update_preview: finalCurrentPhaseUpdate,
+              interested_in_program_update_preview: finalInterestedInProgramUpdate,
+              interested_in_control_update_preview: finalInterestedInControlUpdate,
+              purchased_program_update_preview: finalPurchasedProgramUpdate,
+              has_control_update_preview: finalHasControlUpdate,
+              language: conversationLanguage,
+              language_update_preview: languageUpdate,
+              derived_purchase_validated: derivedPurchase.validated,
+              extractor_purchased_program_raw: extraction.purchased_program_update,
+              extractor_has_control_raw: extraction.has_control_update,
+              extractor_interested_in_program_raw: extraction.interested_in_program_update,
+              extractor_interested_in_control_raw: extraction.interested_in_control_update,
+           },
+           null,
+           2
+        )
+     );
 
-    return sendDiagResponse(
-      "normal_flow",
-      buildResponse({
-        send_reply: true,
-        reply,
-        goal_update: extraction.goal_update,
-        objections_update: extraction.objections_update,
-        last_summary_update: extraction.last_summary_update,
-        customer_status_update: finalCustomerStatusUpdate,
-        current_phase_update: finalCurrentPhaseUpdate,
-        interested_in_program_update: finalInterestedInProgramUpdate,
-        interested_in_control_update: finalInterestedInControlUpdate,
-        purchased_program_update: finalPurchasedProgramUpdate,
-        has_control_update: finalHasControlUpdate,
-        language: conversationLanguage,
-        language_update: languageUpdate,
-      })
-    );
-  } catch (error) {
-    diag("SERVER_ERROR", {
-      error_message: error?.message || String(error),
-    });
-    console.error("SERVER ERROR:", error?.message || error);
-    return sendDiagResponse("server_error_fallback", buildResponse({ send_reply: true, reply: FALLBACK_REPLY, language: conversationLanguage }));
-  }
+     return sendDiagResponse(
+        "normal_flow",
+        buildResponse({
+           send_reply: true,
+           reply,
+           goal_update: extraction.goal_update,
+           objections_update: extraction.objections_update,
+           last_summary_update: extraction.last_summary_update,
+           customer_status_update: finalCustomerStatusUpdate,
+           current_phase_update: finalCurrentPhaseUpdate,
+           interested_in_program_update: finalInterestedInProgramUpdate,
+           interested_in_control_update: finalInterestedInControlUpdate,
+           purchased_program_update: finalPurchasedProgramUpdate,
+           has_control_update: finalHasControlUpdate,
+           language: conversationLanguage,
+           language_update: languageUpdate,
+        })
+     );
+   } catch (error) {
+     diag("SERVER_ERROR", {
+        error_message: error?.message || String(error),
+     });
+     console.error("SERVER ERROR:", error?.message || error);
+     return sendDiagResponse("server_error_fallback", buildResponse({ send_reply: true, reply: FALLBACK_REPLY, language: conversationLanguage }));
+   }
 });
 
 app.listen(PORT, () => {
-  console.log(`Server draait op poort ${PORT}`);
+   console.log(`Server draait op poort ${PORT}`);
 });
