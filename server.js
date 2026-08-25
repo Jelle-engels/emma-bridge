@@ -188,6 +188,196 @@ function hasPatternBeenSent(messages, pattern) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Stap 2-gate: de checklist mag pas als doel EN uitdaging bekend zijn (v51)
+// ---------------------------------------------------------------------------
+// Sectie 3.2 van de prompt eist twee dingen voordat de checklist met vinkjes
+// gestuurd mag worden: het DOEL en de GROOTSTE HUIDIGE UITDAGING. In de praktijk
+// stuurde Emma de lijst al na alleen een doel ("ik wil afvallen, maar ik hou het
+// niet vol"), omdat het letterlijke voorbeeld in de prompt zwaarder woog dan de
+// regel erboven. Deze guard zet dat server-side vast.
+
+// Herkent de checklist in een Emma-bericht: minstens twee vinkjes.
+const CHECKLIST_PATTERN = /(?:✅[^\n]*\n?){2,}/;
+
+function hasChecklistBeenSent(messages) {
+  return messages.some(
+    (msg) => msg.role === "emma" && CHECKLIST_PATTERN.test(msg.message_text || "")
+  );
+}
+
+// "Ik hou het niet vol" / "het lukt me niet" is GEEN uitdaging -- dat is het
+// probleem opnieuw benoemen. De echte uitdaging is de reden daarachter (tijd,
+// avondeten, motivatie, ploegendienst, stress, sociale druk, ...).
+//
+// Deze lijst dekt bewust alleen de duidelijke gevallen. Bij twijfel geldt de
+// uitdaging als ONBEKEND en stelt Emma de vervolgvraag -- dat is de veilige kant:
+// één extra vraag kost niets, een te vroege checklist kost vertrouwen.
+const RESTATED_PROBLEM_PATTERN = new RegExp(
+  [
+    // NL
+    "hou(?:d)? het niet vol",
+    "niet vol ?houden",
+    "lukt (?:me |mij )?niet",
+    "krijg het niet voor elkaar",
+    "kom er niet doorheen",
+    "val steeds terug",
+    "blijf hangen",
+    "geen resultaat",
+    "werkt niet (?:bij|voor) me",
+    // FR
+    "je (?:n')?arrive pas",
+    "je (?:ne )?tiens pas",
+    "je craque",
+    "je reprends? (?:tout|du poids)",
+    "[çc]a (?:ne )?marche pas",
+    "aucun r[ée]sultat",
+    "je (?:re)?commence toujours",
+    // EN
+    "can'?t (?:keep|stick|maintain|do) it",
+    "cannot keep it up",
+    "i (?:always )?give up",
+    "i keep (?:failing|slipping|falling off)",
+    "doesn'?t work for me",
+    "no results?",
+    "gain it (?:all )?back",
+    // DE
+    "halte (?:es )?nicht durch",
+    "schaffe (?:es )?nicht",
+    "klappt (?:bei mir )?nicht",
+    "nehme (?:alles )?wieder zu",
+    "keine ergebnisse",
+    "funktioniert (?:bei mir )?nicht",
+    // IT
+    "non (?:ci )?riesco",
+    "non resisto",
+    "mollo sempre",
+    "riprendo (?:tutto|peso)",
+    "non funziona",
+    "nessun risultato",
+    // ES
+    "no (?:lo )?consigo",
+    "no aguanto",
+    "siempre lo dejo",
+    "recupero (?:todo|el peso)",
+    "no funciona",
+    "ning[úu]n resultado",
+    // PL
+    "nie (?:daj[ęe] rady|potrafi[ęe]|wytrzymuj[ęe])",
+    "zawsze (?:si[ęe] poddaj[ęe]|rezygnuj[ęe])",
+    "nie dzia[łl]a",
+    "brak (?:efekt[óo]w|rezultat[óo]w)",
+    // PT
+    "n[ãa]o (?:consigo|aguento)",
+    "desisto sempre",
+    "volto (?:sempre )?a (?:engordar|ganhar)",
+    "n[ãa]o (?:resulta|funciona)",
+    "sem resultados?",
+  ].join("|"),
+  "i"
+);
+
+// Concrete obstakels die WEL als uitdaging tellen.
+const REAL_CHALLENGE_PATTERN = new RegExp(
+  "\\b(?:" +
+    [
+      // Taalonafhankelijk / internationaal
+      "stress\\w*",
+      "yo-?yo",
+      "jojo",
+      "burn-?out",
+      "menopauz\\w*",
+      "hormo\\w*",
+      "diabet\\w*",
+      "sport\\w*",
+      "budget",
+      "snack\\w*",
+      // NL
+      "geen tijd|te druk|werk\\w*|ploegendienst\\w*|nachtdienst\\w*|avond\\w*",
+      "snoep\\w*|zoet\\w*|trek\\b|honger\\w*|emotie\\w*|emo-?eten|verdriet",
+      "kinderen|gezin|alleen ?staand\\w*|beweeg\\w*|bewegen|beweging",
+      "blessure\\w*|medicat\\w*|schildklier\\w*|overgang|slaap\\w*|slecht slapen",
+      "moe\\b|moeheid|vermoeid\\w*|energie|geld|koken|kook\\w*|restaurant\\w*",
+      "uit eten|sociaal|sociale|feest\\w*|vakantie\\w*|discipline|motivatie",
+      "structuur|planning|gewoonte\\w*",
+      // FR
+      "pas le temps|trop occup[ée]\\w*|travail\\w*|boulot|horaires?|nuit",
+      "le soir|grignot\\w*|sucr[ée]\\w*|fringale\\w*|faim|[ée]motion\\w*",
+      "enfants?|famille|c[ée]libataire|bouge\\w*|activit[ée] physique",
+      "blessure\\w*|m[ée]dicament\\w*|thyro[ïi]de|sommeil|dor[sm]\\w*|fatigu[ée]\\w*",
+      "[ée]nergie|argent|cuisin\\w*|restaurant\\w*|social\\w*|f[êe]te\\w*",
+      "vacances|discipline|motivation|organisation|habitude\\w*",
+      // EN
+      "no time|too busy|work\\w*|shift\\w*|night shift|evenings?",
+      "snacking|sweets?|sugar|craving\\w*|hungry|hunger|emotional eating",
+      "kids|children|family|single (?:mum|mom|parent)|exercis\\w*|moving",
+      "injur\\w*|medicat\\w*|thyroid|sleep\\w*|tired\\w*|fatigue|energy",
+      "money|cooking|eating out|social|part(?:y|ies)|holidays?|vacation",
+      "discipline|motivation|routine|habits?",
+      // DE
+      "keine zeit|zu besch[äa]ftigt|arbeit\\w*|schicht\\w*|nachtschicht|abends?",
+      "naschen|s[üu][ßs]\\w*|hei[ßs]hunger|hunger|emotional\\w*",
+      "kinder|familie|alleinerziehend\\w*|bewegung|sport",
+      "verletzung\\w*|medikament\\w*|schilddr[üu]se|schlaf\\w*|m[üu]de|energie",
+      "geld|kochen|essen gehen|sozial\\w*|feier\\w*|urlaub|disziplin",
+      "motivation|struktur|gewohnheit\\w*",
+      // IT
+      "non ho tempo|troppo impegnat\\w*|lavoro|turni?|sera|serale",
+      "spuntin\\w*|dolc\\w*|zucchero|voglia|fame|emotiv\\w*",
+      "figli|famiglia|single|movimento|attivit[àa] fisica",
+      "infortuni\\w*|farmac\\w*|tiroide|sonno|dormire|stanc\\w*|energia",
+      "soldi|cucina\\w*|mangiare fuori|social\\w*|fest\\w*|vacanz\\w*",
+      "disciplina|motivazione|abitudin\\w*",
+      // ES
+      "no tengo tiempo|muy ocupad\\w*|trabajo|turnos?|noche|por la tarde",
+      "picar|dulce\\w*|az[úu]car|antojo\\w*|hambre|emocional",
+      "hijos|familia|madre soltera|ejercicio|moverme",
+      "lesi[óo]n\\w*|medicament\\w*|tiroides|sue[ñn]o|dormir|cansad\\w*|energ[íi]a",
+      "dinero|cocinar|comer fuera|social\\w*|fiesta\\w*|vacaciones",
+      "disciplina|motivaci[óo]n|rutina|h[áa]bito\\w*",
+      // PL
+      "nie mam czasu|zaj[ęe]t\\w*|praca|prac[ęy]|zmian\\w*|wieczor\\w*",
+      "podjada\\w*|s[łl]odycz\\w*|cukier|g[łl][óo]d|emocj\\w*",
+      "dzieci|rodzin\\w*|ruch|[ćc]wicz\\w*",
+      "kontuzj\\w*|lek(?:i|arstw)\\w*|tarczyc\\w*|sen\\b|spa[ćc]|zm[ęe]czon\\w*|energi\\w*",
+      "pieni[ąa]dz\\w*|gotowa\\w*|jedzenie na mie[śs]cie|towarzysk\\w*",
+      "imprez\\w*|wakacj\\w*|dyscyplin\\w*|motywacj\\w*|nawyk\\w*",
+      // PT
+      "n[ãa]o tenho tempo|muito ocupad\\w*|trabalho|turnos?|[àa] noite",
+      "petisc\\w*|doce\\w*|a[çc][úu]car|vontade de comer|fome|emocional",
+      "filhos|fam[íi]lia|m[ãa]e solteira|exerc[íi]cio|mexer",
+      "les[ãa]o|medicament\\w*|tire[óo]ide|sono|dormir|cansad\\w*|energia",
+      "dinheiro|cozinha\\w*|comer fora|social|festa\\w*|f[ée]rias",
+      "disciplina|motiva[çc][ãa]o|rotina|h[áa]bito\\w*",
+    ].join("|") +
+    ")",
+  "i"
+);
+
+// Is de grootste huidige uitdaging bekend? Kijkt naar de CRM-velden en naar wat
+// de klant zelf in het gesprek heeft geschreven.
+function isChallengeKnown({ goal, objections, lastSummary, messages, currentMessage }) {
+  const userText = [
+    ...(Array.isArray(messages) ? messages : [])
+      .filter((msg) => msg.role === "user")
+      .map((msg) => msg.message_text || ""),
+    currentMessage || "",
+  ].join(" ");
+
+  const crmText = [goal || "", objections || "", lastSummary || ""].join(" ");
+  const combined = cleanText(`${crmText} ${userText}`);
+  if (!combined) return false;
+
+  // Een concreet obstakel telt altijd.
+  if (REAL_CHALLENGE_PATTERN.test(combined)) return true;
+
+  // Alleen een herhaling van het probleem telt niet.
+  if (RESTATED_PROBLEM_PATTERN.test(combined)) return false;
+
+  // Geen van beide herkend: behandel de uitdaging als onbekend.
+  return false;
+}
+
 // Deterministic removal of forbidden phrases the prompt alone could not
 // suppress reliably: "welcome back" openers and "are you still there?"
 // chasers. Applied to every reply.
@@ -1963,6 +2153,24 @@ async function getElevenReply({
         if (guardPriceMentioned) {
           guardLines.push(
             "De prijs is AL genoemd. Niet herhalen, tenzij de klant ernaar vraagt."
+          );
+        }
+        // Stap 2-gate (v51). De checklist met vinkjes mag pas wanneer zowel het
+        // doel als de grootste huidige uitdaging bekend zijn (sectie 3.2). Is de
+        // uitdaging nog onbekend en is de lijst nog niet gestuurd, dan blokkeren
+        // we hem hier -- promptniveau alleen bleek te zwak.
+        if (
+          !hasChecklistBeenSent(recentMessages) &&
+          !isChallengeKnown({
+            goal,
+            objections,
+            lastSummary,
+            messages: recentMessages,
+            currentMessage: message,
+          })
+        ) {
+          guardLines.push(
+            "De grootste huidige UITDAGING van de klant is nog NIET bekend. Stuur deze beurt GEEN checklist met vinkjes (✅) en GEEN suggestielijst. Let op: 'ik hou het niet vol', 'het lukt me niet' of 'ik val steeds terug' is GEEN uitdaging — dat is het probleem opnieuw benoemd. De uitdaging is de REDEN daarachter (bijvoorbeeld: geen tijd, 's avonds snacken, stress, ploegendienst, koken voor het gezin). Reageer warm en persoonlijk op wat ze vertelde en stel PRECIES ÉÉN korte vraag naar die reden, bijvoorbeeld: 'Wat maakt het afvallen op dit moment vooral lastig voor je? 💚'. Eén vraag, verder niets."
           );
         }
         // Aangekondigd vertrek (v51). De klant heeft net gezegd dat ze weg
