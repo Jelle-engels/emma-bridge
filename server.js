@@ -1968,7 +1968,7 @@ async function getElevenReply({
         // Aangekondigd vertrek (v51). De klant heeft net gezegd dat ze weg
         // moet. Emma neemt kort afscheid en stelt GEEN vraag meer -- een vraag
         // aan iemand die vertrekt blijft onbeantwoord liggen en voelt dwingend.
-        if (isAbsenceAnnouncement(currentUserMessage)) {
+        if (isAbsenceAnnouncement(message)) {
           guardLines.push(
             "De klant zegt in dit bericht dat ze WEG MOET of later terugkomt. Reageer met EEN korte, warme afsluiting: begrip tonen, iets aardigs wensen voor waar ze heen gaat, en zeggen dat jullie verdergaan wanneer het haar uitkomt. Stel GEEN enkele vraag, herhaal GEEN eerdere vraag, stuur GEEN link en vat NIETS samen. Twee korte zinnen is genoeg. Zeg ook niet dat je 'op haar wacht' of dat je 'iets klaarzet'."
           );
