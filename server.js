@@ -8,6 +8,7 @@ import { franc } from "franc-min";
 dotenv.config();
 
 const app = express();
+
 // Accept JSON bodies (Make scenarios that already work).
 app.use(express.json({ limit: "1mb" }));
 // Also accept application/x-www-form-urlencoded bodies. ManyChat (via Make)
@@ -31,7 +32,22 @@ const MAX_GOAL_CHARS = Number(process.env.MAX_GOAL_CHARS || 300);
 const MAX_OBJECTIONS_CHARS = Number(process.env.MAX_OBJECTIONS_CHARS || 400);
 const MAX_SHORT_FIELD_CHARS = Number(process.env.MAX_SHORT_FIELD_CHARS || 30);
 
-const NO_REPLY = "__NO_REPLY__";
+// De marker die ManyChat vóór de External Request in emma_reply zet. De
+// Condition-stap in de ManyChat-flow luidt "emma_reply isn't
+// WACHTEN_OP_ANTWOORD": staat de marker er nog, dan neemt de flow de rode tak
+// en wordt er niets naar de klant gestuurd. Deze constante bestaat nog voor
+// dat mechanisme, maar wordt op dit moment nergens als reply gebruikt.
+const NO_REPLY = "WACHTEN_OP_ANTWOORD";
+
+// Afsluitend bericht na een aangekondigd vertrek (v51).
+// De klant heeft gezegd dat ze weg moest, Emma heeft afscheid genomen, en er
+// komt alleen nog een "Ok" / "Merci" / duimpje binnen. Daar hoort geen nieuw
+// gesprek op te volgen, maar ook geen stilte: een enkel groen hart sluit de
+// uitwisseling netjes af. Het laatste bericht is van Emma, er staat geen vraag
+// open, en de klant kan zonder ongemak weggaan.
+//
+// Bewust taalonafhankelijk: een emoji leest in alle zeven talen hetzelfde.
+const CLOSING_HEART = "\u{1F49A}";
 
 const FALLBACK_REPLY =
   "Er ging iets mis met mijn antwoord, kun je je bericht nog een keer sturen";
@@ -62,39 +78,47 @@ const WELCOME_MESSAGES = {
   // kilo-aantal expliciet als optioneel. "Gratis" staat er bewust in: het haalt
   // de belangrijkste onuitgesproken drempel weg voordat die ontstaat.
   fr:
-    "Coucou ! \u{1F60A} Super que tu aies r\u00e9pondu !\n\n" +
-    "Tu souhaites perdre du poids ? Je serais ravie de t\u2019aider \u00e0 y arriver.\n\n" +
-    "J\u2019ai d\u00e9j\u00e0 accompagn\u00e9 des milliers de femmes et d\u2019hommes avec de tr\u00e8s beaux r\u00e9sultats, et surtout sans le fameux effet yo-yo tant redout\u00e9 !\n\n" +
-    "La plupart avaient pourtant d\u00e9j\u00e0 essay\u00e9 plein de choses, sans obtenir les r\u00e9sultats qu\u2019ils esp\u00e9raient.\n\n" +
-    "Est-ce que je peux te demander ce que tu as d\u00e9j\u00e0 essay\u00e9 ?",
+    "Coucou ! \u{1F60A} Super que tu aies répondu !\n\n" +
+    "Tu souhaites perdre du poids ? Je serais ravie de t’aider à y arriver.\n\n" +
+    "J’ai déjà accompagné des milliers de femmes et d’hommes avec de très beaux résultats, et surtout sans le fameux effet yo-yo tant redouté !\n\n" +
+    "La plupart avaient pourtant déjà essayé plein de choses, sans obtenir les résultats qu’ils espéraient.\n\n" +
+    "Est-ce que je peux te demander ce que tu as déjà essayé ?",
   de:
     "Hallo, ich bin Emma \u{1F60A}\n\n" +
     "Ich helfe jeden Tag Menschen dabei, ihre Gesundheitsziele zu erreichen, und denke gern gemeinsam mit dir nach \u{1F917}\n\n" +
     "Wir haben bereits Zehntausenden Menschen geholfen und ich glaube, dass ich auch dir gut helfen kann \u{1F49A}\n\n" +
-    "Erz\u00e4hl mal, was w\u00fcrdest du am allerliebsten ver\u00e4ndern? \u{1F49A}\n\n" +
-    "Du kannst so ausf\u00fchrlich oder so kurz antworten, wie du m\u00f6chtest. Alles ist in Ordnung \u{1F917}\n\n" +
-    "Erz\u00e4hl zum Beispiel etwas \u00fcber dein Ziel, woran du gerade scheiterst oder was du schon ausprobiert hast.",
+    "Erzähl mal, was würdest du am allerliebsten verändern? \u{1F49A}\n\n" +
+    "Du kannst so ausführlich oder so kurz antworten, wie du möchtest. Alles ist in Ordnung \u{1F917}\n\n" +
+    "Erzähl zum Beispiel etwas über dein Ziel, woran du gerade scheiterst oder was du schon ausprobiert hast.",
   it:
     "Ciao, sono Emma \u{1F60A}\n\n" +
     "Ogni giorno aiuto le persone a raggiungere i loro obiettivi di salute e mi fa piacere ragionare insieme a te \u{1F917}\n\n" +
-    "Abbiamo gi\u00e0 aiutato decine di migliaia di persone e penso di poter aiutare bene anche te \u{1F49A}\n\n" +
-    "Dimmi, quale cambiamento vorresti vedere pi\u00f9 di ogni altra cosa? \u{1F49A}\n\n" +
+    "Abbiamo già aiutato decine di migliaia di persone e penso di poter aiutare bene anche te \u{1F49A}\n\n" +
+    "Dimmi, quale cambiamento vorresti vedere più di ogni altra cosa? \u{1F49A}\n\n" +
     "Puoi rispondere in modo dettagliato oppure molto breve. Va bene tutto \u{1F917}\n\n" +
-    "Per esempio, puoi raccontarmi il tuo obiettivo, ci\u00f2 che ti sta bloccando o cosa hai gi\u00e0 provato.",
+    "Per esempio, puoi raccontarmi il tuo obiettivo, ciò che ti sta bloccando o cosa hai già provato.",
   es:
     "Hola, soy Emma \u{1F60A}\n\n" +
-    "Cada d\u00eda ayudo a personas a alcanzar sus objetivos de salud y me gusta pensar contigo en lo que necesitas \u{1F917}\n\n" +
-    "Ya hemos ayudado a decenas de miles de personas y creo que tambi\u00e9n puedo ayudarte bien a ti \u{1F49A}\n\n" +
-    "Cu\u00e9ntame, \u00bfqu\u00e9 es lo que m\u00e1s te gustar\u00eda cambiar? \u{1F49A}\n\n" +
-    "Puedes responder con todo el detalle que quieras o de forma muy breve. Todo est\u00e1 bien \u{1F917}\n\n" +
-    "Por ejemplo, puedes contarme cu\u00e1l es tu objetivo, qu\u00e9 te est\u00e1 frenando o qu\u00e9 has probado hasta ahora.",
+    "Cada día ayudo a personas a alcanzar sus objetivos de salud y me gusta pensar contigo en lo que necesitas \u{1F917}\n\n" +
+    "Ya hemos ayudado a decenas de miles de personas y creo que también puedo ayudarte bien a ti \u{1F49A}\n\n" +
+    "Cuéntame, ¿qué es lo que más te gustaría cambiar? \u{1F49A}\n\n" +
+    "Puedes responder con todo el detalle que quieras o de forma muy breve. Todo está bien \u{1F917}\n\n" +
+    "Por ejemplo, puedes contarme cuál es tu objetivo, qué te está frenando o qué has probado hasta ahora.",
   pl:
-    "Cze\u015b\u0107, jestem Emma \u{1F60A}\n\n" +
-    "Ka\u017cdego dnia pomagam ludziom osi\u0105ga\u0107 cele zdrowotne i ch\u0119tnie zastanowi\u0119 si\u0119 razem z Tob\u0105, co b\u0119dzie najlepsze \u{1F917}\n\n" +
-    "Pomogli\u015bmy ju\u017c dziesi\u0105tkom tysi\u0119cy os\u00f3b i my\u015bl\u0119, \u017ce Tobie te\u017c mog\u0119 dobrze pom\u00f3c \u{1F49A}\n\n" +
-    "Powiedz, co najbardziej chcia\u0142aby\u015b zmieni\u0107? \u{1F49A}\n\n" +
-    "Mo\u017cesz odpowiedzie\u0107 bardzo szczeg\u00f3\u0142owo albo kr\u00f3tko. Ka\u017cda odpowied\u017a jest w porz\u0105dku \u{1F917}\n\n" +
-    "Mo\u017cesz na przyk\u0142ad opisa\u0107 sw\u00f3j cel, to, co Ci\u0119 teraz blokuje, albo czego ju\u017c pr\u00f3bowa\u0142a\u015b.",
+    "Cześć, jestem Emma \u{1F60A}\n\n" +
+    "Każdego dnia pomagam ludziom osiągać cele zdrowotne i chętnie zastanowię się razem z Tobą, co będzie najlepsze \u{1F917}\n\n" +
+    "Pomogliśmy już dziesiątkom tysięcy osób i myślę, że Tobie też mogę dobrze pomóc \u{1F49A}\n\n" +
+    "Powiedz, co najbardziej chciałabyś zmienić? \u{1F49A}\n\n" +
+    "Możesz odpowiedzieć bardzo szczegółowo albo krótko. Każda odpowiedź jest w porządku \u{1F917}\n\n" +
+    "Możesz na przykład opisać swój cel, to, co Cię teraz blokuje, albo czego już próbowałaś.",
+  // Europees Portugees (tu-vorm), zelfde opzet als de andere talen.
+  pt:
+    "Olá, sou a Emma \u{1F60A}\n\n" +
+    "Todos os dias ajudo pessoas a alcançar os seus objetivos de saúde e gosto de pensar contigo no que precisas \u{1F917}\n\n" +
+    "Já ajudámos dezenas de milhares de pessoas e acredito que também te posso ajudar \u{1F49A}\n\n" +
+    "Conta-me, o que é que mais gostarias de mudar? \u{1F49A}\n\n" +
+    "Podes responder com todo o detalhe que quiseres ou de forma muito breve. Está tudo bem \u{1F917}\n\n" +
+    "Por exemplo, podes contar-me qual é o teu objetivo, o que te está a travar ou o que já experimentaste.",
 };
 
 const openai = process.env.OPENAI_API_KEY
@@ -140,9 +164,9 @@ function cleanReplyText(value) {
     .replace(/\r/g, "\n")
     // Remove AI-tell dashes. " — " / " – " between words become a comma;
     // a dash glued to text becomes nothing; a leading "- " bullet is kept.
-    .replace(/\s+[\u2014\u2013]\s+/g, ", ")
-    .replace(/(\S)[\u2014\u2013](\S)/g, "$1 $2")
-    .replace(/[\u2014\u2013]/g, "")
+    .replace(/\s+[—–]\s+/g, ", ")
+    .replace(/(\S)[—–](\S)/g, "$1 $2")
+    .replace(/[—–]/g, "")
     .replace(/[ \t]+\n/g, "\n")
     .replace(/\n[ \t]+/g, "\n")
     .replace(/[ \t]{2,}/g, " ")
@@ -170,10 +194,12 @@ function hasPatternBeenSent(messages, pattern) {
 function stripForbiddenReplyPhrases(value) {
   const text = cleanReplyText(value);
   if (!text) return text;
+
   // Emojis often end a sentence without punctuation, so they count as
   // sentence boundaries in these patterns.
   const B = "\\n.!?\\u{2600}-\\u{27BF}\\u{1F300}-\\u{1FAFF}";
   const E = "[.!?\\u2026\\u{2600}-\\u{27BF}\\u{1F300}-\\u{1FAFF}]*";
+
   let out = text
     // "Welkom terug!", "Welkom terug 💚 ..." — strip the phrase/sentence
     .replace(new RegExp(`(^|\\n)\\s*welkom terug[^${B}]*${E}\\s*`, "giu"), "$1")
@@ -186,7 +212,25 @@ function stripForbiddenReplyPhrases(value) {
       "$1"
     )
     // Any sentence containing "ben je er nog"
-    .replace(new RegExp(`[^${B}]*ben je er nog[^${B}]*\\??\\s*`, "giu"), "");
+    .replace(new RegExp(`[^${B}]*ben je er nog[^${B}]*\\??\\s*`, "giu"), "")
+    // Anderstalige "welkom terug"-varianten (v51). De Nederlandse regel hierboven
+    // ving deze niet af, waardoor Emma in het Frans alsnog "C'est super que tu
+    // sois de retour" opende. Zelfde verbod, nu in alle 7 talen.
+    .replace(
+      new RegExp(
+        `(^|\\n)\\s*(?:c'est\\s+)?(?:super|g[ée]nial|chouette|ravie?|contente?)\\s+(?:que\\s+)?(?:tu\\s+sois|de\\s+te\\s+revoir)[^${B}]*de\\s+retour[^${B}]*${E}\\s*`,
+        "giu"
+      ),
+      "$1"
+    )
+    .replace(
+      new RegExp(
+        `(^|\\n)\\s*(?:welcome back|good to (?:have|hear from) you again|great to hear from you again|willkommen zur[üu]ck|sch[öo]n,? dass du wieder da bist|bentornat[ao]|che bello (?:ri)?sentirti|bienvenid[ao] de (?:nuevo|vuelta)|qu[ée] bueno (?:volver a saber de ti|tenerte de vuelta)|witaj z powrotem|mi[łl]o (?:ci[ęe]) znowu|bem-?vind[ao] de volta|que bom (?:que est[áa]s de volta|voltar a saber de ti)|ainda bem que voltaste)[^${B}]*${E}\\s*`,
+        "giu"
+      ),
+      "$1"
+    );
+
   out = cleanReplyText(out);
   return out || text;
 }
@@ -205,11 +249,13 @@ function stripTrailingCoachingQuestions(value) {
   ) {
     return text;
   }
+
   const sentenceSplit = (p) =>
     (p.match(/[^.!?\n]+[.!?…]*[^\w\n.!?]*/gu) || [p]).map((s) => s.trim()).filter(Boolean);
   const paragraphs = text.split("\n\n").map((p) => p.trim()).filter(Boolean);
   const totalSentences = () =>
     paragraphs.reduce((n, p) => n + sentenceSplit(p).length, 0);
+
   let changed = true;
   while (changed && paragraphs.length > 0 && totalSentences() > 1) {
     changed = false;
@@ -225,6 +271,7 @@ function stripTrailingCoachingQuestions(value) {
       changed = true;
     }
   }
+
   const out = cleanReplyText(paragraphs.join("\n\n"));
   return out || text;
 }
@@ -235,6 +282,7 @@ function stripTrailingCoachingQuestions(value) {
 function stripRepeatedWebsiteBlock(value) {
   const text = cleanReplyText(value);
   if (!text || !PLAIN_WEBSITE_LINK_PATTERN.test(text)) return text;
+
   const paragraphs = text.split("\n\n").filter((p) => {
     if (TESTIMONIALS_LINK_PATTERN.test(p) || PROGRAMMA_INFO_LINK_PATTERN.test(p)) {
       return true;
@@ -246,6 +294,7 @@ function stripRepeatedWebsiteBlock(value) {
     if ((p.match(/\u{2705}/gu) || []).length >= 2) return false;
     return true;
   });
+
   const out = cleanReplyText(paragraphs.join("\n\n"));
   return (
     out || "Alles over de programma's staat op de pagina die ik je eerder stuurde \u{1F49A}"
@@ -361,6 +410,7 @@ const LANGUAGE_NAMES = {
   it: "Italian",
   es: "Spanish",
   pl: "Polish",
+  pt: "Portuguese",
 };
 
 // Country calling code -> language. Checked longest-prefix-first so "1"
@@ -375,6 +425,7 @@ const PHONE_PREFIX_LANGUAGE = {
   "41": "de",
   "39": "it",
   "34": "es",
+  "351": "pt",
   "48": "pl",
   "44": "en",
   "353": "en",
@@ -391,6 +442,7 @@ const FRANC_TO_LANGUAGE = {
   ita: "it",
   spa: "es",
   pol: "pl",
+  por: "pt",
 };
 
 function normalizeLanguage(value) {
@@ -452,6 +504,11 @@ const EXPLICIT_LANGUAGE_REQUEST_PATTERNS = [
     pattern:
       /\b(po polsku|nie m[oó]wi[eę] po (holendersku|niderlandzku)|m[oó]wisz po polsku)\b/i,
   },
+  {
+    language: "pt",
+    pattern:
+      /\b(em portugu[eê]s|portugu[eê]s,? por favor|n[aã]o falo (holand[eê]s|neerland[eê]s)|falas portugu[eê]s|fala portugu[eê]s|continuar em portugu[eê]s)\b/i,
+  },
 ];
 
 function detectExplicitLanguageRequest(text) {
@@ -497,7 +554,6 @@ function detectLanguageFromText(text) {
   if (!iso3 || iso3 === "und") return "";
   return FRANC_TO_LANGUAGE[iso3] || "other";
 }
-
 
 /* -------------------------- MESSAGE NORMALIZATION ------------------------- */
 
@@ -691,6 +747,122 @@ function isTasteOnlyCheckoutAnswer(text) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Aangekondigd vertrek (v51)
+// ---------------------------------------------------------------------------
+// Situatie die dit oplost: de klant zegt midden in het gesprek dat ze weg moet
+// ("je vais au kine", "ik moet weg"). Emma sluit correct af met "tot later".
+// De klant bevestigt dat met "Ok" -- en Emma las dat tot nu toe als een nieuwe
+// gespreksbeurt en hervatte met "wat leuk dat je terug bent", terwijl de klant
+// net vertrokken was.
+//
+// Dit staat los van de "welkom terug"-regel elders in dit bestand: die dekt
+// LANGE stiltes tussen sessies. Dit dekt een aangekondigd vertrek BINNEN een
+// lopend gesprek.
+
+// Zegt de klant in dit bericht dat ze weg moet / later terugkomt?
+// Bewust smal gehouden: alleen expliciete vertreksignalen, in alle 7 talen.
+const ABSENCE_ANNOUNCEMENT_PATTERN = new RegExp(
+  [
+    // NL
+    "ik moet (?:er ?vandoor|weg|gaan|stoppen|afsluiten)",
+    "moet (?:even|nu) weg",
+    "ben (?:zo|straks|later) (?:terug|weer terug)",
+    "spreek je (?:later|straks|morgen)",
+    "tot (?:later|straks|morgen|zo)",
+    // FR
+    "je (?:dois|vais) (?:y aller|partir|filer)",
+    "je suis oblig[ée]+e? d[e']\\s*(?:partir|quitter|y aller)",
+    "je vais (?:au|chez|a la|à la)\\s",
+    "je reviens",
+    "[àa] (?:plus tard|toute|tout de suite|demain)",
+    "je te (?:redis|recontacte|rappelle)",
+    // EN
+    "i (?:have to|need to|gotta|must) (?:go|run|leave|head off)",
+    "talk (?:to you )?(?:later|soon|tomorrow)",
+    "be(?: right)? back",
+    "brb\\b",
+    // DE
+    "ich muss (?:los|weg|gehen|aufh[öo]ren)",
+    "bis (?:sp[äa]ter|gleich|morgen)",
+    "melde mich (?:sp[äa]ter|wieder)",
+    // IT
+    "devo (?:andare|scappare)",
+    "a (?:dopo|pi[ùu] tardi|domani)",
+    "torno (?:dopo|pi[ùu] tardi)",
+    // ES
+    "tengo que (?:irme|marcharme|salir)",
+    "hasta (?:luego|ma[ñn]ana|ahora)",
+    "vuelvo (?:luego|m[áa]s tarde)",
+    // PL
+    "musz[ęe] (?:i[śs][ćc]|leci[ćc]|ko[ńn]czy[ćc])",
+    "do (?:zobaczenia|p[óo][źz]niej)",
+    "wracam (?:p[óo][źz]niej|za chwil)",
+    // PT
+    "tenho (?:de|que) (?:ir|sair|desligar)",
+    "vou (?:ter que ir|indo|sair)",
+    "at[ée] (?:logo|j[áa]|mais tarde|amanh[ãa])",
+    "j[áa] volto",
+    "volto (?:mais tarde|logo)",
+    "falamos (?:mais tarde|logo|amanh[ãa])",
+  ].join("|"),
+  "i"
+);
+
+function isAbsenceAnnouncement(text) {
+  const normalized = cleanText(text);
+  if (!normalized) return false;
+  return ABSENCE_ANNOUNCEMENT_PATTERN.test(normalized);
+}
+
+// Puur bevestigend bericht zonder eigen inhoud: "ok", "merci", een duimpje.
+// Dat is geen gespreksbeurt maar een punt achter de vorige beurt.
+//
+// BEWUST NIET IN DEZE LIJST: ja/nee/oui/non/yes/no/si/tak. Dat lijken
+// bevestigingen, maar het zijn ANTWOORDEN. Staat er ergens nog een open vraag
+// (bijvoorbeeld de Control-upsell), dan is "Oui" een koopsignaal en geen punt
+// achter het gesprek. Die mogen we nooit inslikken.
+const PURE_ACKNOWLEDGEMENT_WORD =
+  "(?:ok(?:e|ay|é|ee)?|oke|d'accord|daccord|dacc|entendu|parfait|tr[èe]s bien|merci(?:\\s+beaucoup)?|bedankt|dank je(?:\\s+wel)?|thanks|thank you|danke(?:\\s+sch[öo]n)?|grazie|gracias|dzi[ęe]kuj[ęe]|prima|top|bien s[ûu]r|va bene|super|obrigad[ao]|est[áa] bem|combinado)";
+
+// Eén of meer bevestigingswoorden achter elkaar: "Ok", "Ok merci", "Merci !!".
+const PURE_ACKNOWLEDGEMENT_PATTERN = new RegExp(
+  `^\\s*${PURE_ACKNOWLEDGEMENT_WORD}(?:[\\s,.!…]+${PURE_ACKNOWLEDGEMENT_WORD})*[\\s.!,…]*$`,
+  "iu"
+);
+
+
+function isPureAcknowledgement(text) {
+  const normalized = cleanText(text);
+  if (!normalized) return false;
+  // Alleen korte berichten; alles langer bevat eigen inhoud.
+  if (normalized.length > 25) return false;
+  // Een vraagteken maakt het altijd een echte beurt.
+  if (/\?/.test(normalized)) return false;
+  // Los emoji-bericht telt ook als bevestiging.
+  if (/^[\p{Extended_Pictographic}‍️\s]+$/u.test(normalized)) {
+    return true;
+  }
+  // Emoji's achteraan negeren voor de tekstmatch ("Ok 👍").
+  const withoutEmoji = normalized
+    .replace(/[\p{Extended_Pictographic}‍️]/gu, "")
+    .trim();
+  if (!withoutEmoji) return true;
+  return PURE_ACKNOWLEDGEMENT_PATTERN.test(withoutEmoji);
+}
+
+// Heeft Emma in haar laatste bericht al afscheid genomen?
+// Zo ja, dan is een "ok" daarna een afsluiting, geen nieuwe beurt.
+const EMMA_SIGNOFF_PATTERN =
+  /(?:tot (?:later|straks|morgen|zo)|spreek je (?:later|straks|morgen)|[àa] plus tard|[àa] toute|[àa] bient[ôo]t|bonne (?:s[ée]ance|journ[ée]e|soir[ée]e)|talk (?:to you )?(?:later|soon)|speak (?:to you )?(?:later|soon)|bis (?:sp[äa]ter|gleich|bald)|a (?:dopo|pi[ùu] tardi)|hasta (?:luego|pronto)|do (?:zobaczenia|us[łl]yszenia)|at[ée] (?:logo|j[áa]|mais tarde)|bo[am] (?:sess[ãa]o|dia|tarde)|boa sorte|falamos (?:mais tarde|logo)|bon courage|veel succes|good luck|reprend(?:ra|rons)|on se (?:reparle|recontacte)|when you(?:'re| are) back|quand tu (?:seras|es) (?:de retour|disponible)|als je (?:terug|weer) bent)/i;
+
+function hasEmmaJustSaidGoodbye(messages) {
+  const emmaMessages = messages.filter((msg) => msg.role === "emma");
+  const last = emmaMessages[emmaMessages.length - 1];
+  if (!last) return false;
+  return EMMA_SIGNOFF_PATTERN.test(cleanText(last.message_text));
+}
+
 function controlFollowUpForLanguage(language, tasteText) {
   const taste = cleanText(tasteText).toLowerCase();
   const labels = {
@@ -701,6 +873,7 @@ function controlFollowUpForLanguage(language, tasteText) {
     it: { chocolate: "cioccolato", vanilla: "vaniglia", mix: "metà e metà" },
     es: { chocolate: "chocolate", vanilla: "vainilla", mix: "mitad y mitad" },
     pl: { chocolate: "czekolada", vanilla: "wanilia", mix: "pół na pół" },
+    pt: { chocolate: "chocolate", vanilla: "baunilha", mix: "meio a meio" },
   };
 
   const key = /chocola/.test(taste)
@@ -719,6 +892,10 @@ function controlFollowUpForLanguage(language, tasteText) {
     it: `Perfetto, ${label} segnato 🍦\n\nVuoi aggiungere Control? 💚`,
     es: `Perfecto, ${label} anotado 🍦\n\n¿Quieres añadir Control? 💚`,
     pl: `Jasne, zapisuję ${label} 🍦\n\nCzy chcesz dodać Control? 💚`,
+    // Alleen voor de volledigheid. Een Portugeestalige klant in Portugal krijgt
+    // de Control-vraag nooit (customer_country PT -> Control bestaat daar niet);
+    // deze regel is er voor het geval een pt-gesprek buiten Portugal loopt.
+    pt: `Perfeito, ${label} anotado 🍦\n\nQueres juntar o Control? 💚`,
   };
 
   return messages[lang];
@@ -946,6 +1123,7 @@ function findEmmaConfirmationMessage(messages, currentReply) {
   if (currentReply && /chat\.whatsapp\.com/i.test(cleanText(currentReply))) {
     return cleanText(currentReply);
   }
+
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
     if (
@@ -1037,7 +1215,6 @@ function deriveInterestedInControl(messages, currentUserMessage) {
   let lastEmmaControlAsk = -1;
   const emmaControlQuestionPattern =
     /control\s+(?:er\s*(?:gelijk\s+)?bij|toevoegen)|\book\s+control\b/i;
-
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
     if (msg.role === "emma" && emmaControlQuestionPattern.test(cleanText(msg.message_text))) {
@@ -1086,7 +1263,6 @@ function derivePurchaseFields({
     recentMessages,
     currentUserMessage
   );
-
   const checkoutLink = findLastEmmaCheckoutLink(recentMessages, currentReply);
   const validated = orderNumberPresent && Boolean(checkoutLink);
 
@@ -1154,6 +1330,7 @@ function detectState({
     /\b(besteld|order|ordernummer|betaald|gekocht|whatsapp.?groep|groep|toegang)\b/i.test(
       latest
     );
+
   const hasExplicitBuyingIntent =
     /\b(bestellen|starten|ik wil starten|hoe bestel|link|kopen|aanschaffen|doorgaan)\b/i.test(
       latest
@@ -1183,7 +1360,6 @@ function detectState({
 }
 
 /* --------------------------- NEW USER DETECTION --------------------------- */
-
 // A "new user" is detected when the request arrives with no prior conversation
 // — no recent_messages and no last_summary. We deliberately do NOT check
 // customer_status, because Make pre-sets it to "lead" for users routed through
@@ -1234,7 +1410,6 @@ function buildContextBlock({
 
   const lastEmmaMessages = getLastEmmaMessages(recent_messages, 3);
   const lastUserMessages = getLastUserMessages(recent_messages, 3);
-
   const websiteLinkAlreadySent = hasPatternBeenSent(
     recent_messages,
     PLAIN_WEBSITE_LINK_PATTERN
@@ -1254,7 +1429,6 @@ function buildContextBlock({
   const tasteAnswerReceived = hasReceivedTasteAnswer(recent_messages);
   const controlAnswerReceived = hasReceivedControlAnswer(recent_messages);
   const orderNumberAlreadyAsked = hasAskedOrderNumber(recent_messages);
-
   const validatedCustomer = isCustomerStatusValidated(
     customer_status,
     recent_messages
@@ -1791,6 +1965,14 @@ async function getElevenReply({
             "De prijs is AL genoemd. Niet herhalen, tenzij de klant ernaar vraagt."
           );
         }
+        // Aangekondigd vertrek (v51). De klant heeft net gezegd dat ze weg
+        // moet. Emma neemt kort afscheid en stelt GEEN vraag meer -- een vraag
+        // aan iemand die vertrekt blijft onbeantwoord liggen en voelt dwingend.
+        if (isAbsenceAnnouncement(currentUserMessage)) {
+          guardLines.push(
+            "De klant zegt in dit bericht dat ze WEG MOET of later terugkomt. Reageer met EEN korte, warme afsluiting: begrip tonen, iets aardigs wensen voor waar ze heen gaat, en zeggen dat jullie verdergaan wanneer het haar uitkomt. Stel GEEN enkele vraag, herhaal GEEN eerdere vraag, stuur GEEN link en vat NIETS samen. Twee korte zinnen is genoeg. Zeg ook niet dat je 'op haar wacht' of dat je 'iets klaarzet'."
+          );
+        }
         if (hasReceivedTasteAnswer(recentMessages)) {
           guardLines.push(
             "De smaak is AL door de klant gegeven — vraag er NOOIT meer naar. Pak het antwoord uit de gespreksgeschiedenis."
@@ -1845,7 +2027,6 @@ async function getElevenReply({
           guardLines.length > 0
             ? ["HARDE REGELS VOOR DEZE BEURT:", ...guardLines].join("\n")
             : "";
-
         const contextBlock = buildContextBlock({
           conversation_language: conversationLanguage,
           customer_country: customerCountry,
@@ -1889,6 +2070,7 @@ async function getElevenReply({
             text: contextBlock,
           })
         );
+
         ws.send(
           JSON.stringify({
             type: "user_message",
@@ -2041,7 +2223,6 @@ app.post("/chat", async (req, res) => {
   } = req.body ?? {};
 
   const agentId = cleanText(process.env.ELEVENLABS_AGENT_ID);
-
   const normalizedUserId = cleanText(user_id);
   const normalizedMessage = cleanText(message);
   const normalizedCustomerStatus = cleanText(customer_status);
@@ -2183,6 +2364,40 @@ app.post("/chat", async (req, res) => {
       buildResponse({
         send_reply: true,
         reply: WELCOME_MESSAGES[conversationLanguage] || WELCOME_MESSAGE,
+        language: conversationLanguage,
+        language_update: languageUpdate,
+      })
+    );
+  }
+
+  // -------------------------------------------------------------------------
+  // Stilte na een aangekondigd vertrek (v51)
+  // -------------------------------------------------------------------------
+  // De klant heeft gezegd dat ze weg moest, Emma heeft afscheid genomen, en nu
+  // komt er alleen nog een "Ok" / "Merci" / duimpje binnen. Dat is geen nieuwe
+  // gespreksbeurt maar een punt achter de vorige. Hier NIET antwoorden: elk
+  // antwoord zou het gesprek heropenen bij iemand die net vertrokken is.
+  //
+  // Bewust drie voorwaarden samen, zodat dit nooit een echte vraag afvangt:
+  //   1. het huidige bericht is puur bevestigend (geen inhoud, geen vraagteken)
+  //   2. Emma heeft in haar laatste bericht daadwerkelijk afscheid genomen
+  //   3. de klant heeft eerder in dit gesprek aangekondigd weg te gaan
+  if (
+    isPureAcknowledgement(normalizedMessage) &&
+    hasEmmaJustSaidGoodbye(normalizedRecentMessages) &&
+    normalizedRecentMessages.some(
+      (msg) => msg.role === "user" && isAbsenceAnnouncement(msg.message_text)
+    )
+  ) {
+    diag("CLOSING_HEART_AFTER_GOODBYE", {
+      user_message: clamp(normalizedMessage, 60),
+      reason: "pure acknowledgement after announced absence + Emma sign-off",
+    });
+    return sendDiagResponse(
+      "closing_heart_after_goodbye",
+      buildResponse({
+        send_reply: true,
+        reply: CLOSING_HEART,
         language: conversationLanguage,
         language_update: languageUpdate,
       })
@@ -2349,8 +2564,8 @@ app.post("/chat", async (req, res) => {
     const POST_REPLY_EXTRACTION_GRACE_MS = Number(
       process.env.POST_REPLY_EXTRACTION_GRACE_MS || 3000
     );
-
     const extractionRaceStartMs = Date.now();
+
     const extractionResult = await Promise.race([
       extractionPromise.then(
         (value) => ({ status: "fulfilled", value }),
@@ -2423,6 +2638,7 @@ app.post("/chat", async (req, res) => {
 
     const validatedNow =
       alreadyValidated || whatsappLinkInCurrentReply || userHasOrderNumber;
+
     // Coaching mode: deterministically remove trailing questions (the prompt
     // rule alone proved insufficient in production).
     if (validatedNow) {
