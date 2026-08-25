@@ -847,6 +847,11 @@ function sanitizeAndPrepareRecentMessages(recentMessages, currentMessage) {
       role: msg.role || "unknown",
       message_text: clamp(msg.message_text, MAX_MESSAGE_CHARS),
       timestamp: msg.timestamp || "",
+      // _time blijft behouden: getActiveAbsence gebruikt het voor het
+      // tijdvenster van de afwezigheidsstatus. Het veld wordt niet naar
+      // ElevenLabs of Airtable gestuurd -- buildContextBlock bouwt zijn eigen
+      // objecten met alleen role/timestamp/message_text.
+      _time: msg._time ?? parseTimestamp(msg.timestamp),
     }));
 }
 
@@ -1013,7 +1018,7 @@ function isAbsenceAnnouncement(text) {
 // (bijvoorbeeld de Control-upsell), dan is "Oui" een koopsignaal en geen punt
 // achter het gesprek. Die mogen we nooit inslikken.
 const PURE_ACKNOWLEDGEMENT_WORD =
-  "(?:ok(?:e|ay|é|ee)?|oke|d'accord|daccord|dacc|entendu|parfait|tr[èe]s bien|merci(?:\\s+beaucoup)?|bedankt|dank je(?:\\s+wel)?|thanks|thank you|danke(?:\\s+sch[öo]n)?|grazie|gracias|dzi[ęe]kuj[ęe]|prima|top|bien s[ûu]r|va bene|super|obrigad[ao]|est[áa] bem|combinado)";
+  "(?:ok(?:e|ay|é|ee)?|oke|d'accord|daccord|dacc|entendu|parfait|tr[èe]s bien|merci(?:\\s+beaucoup)?|bedankt|dank ?je ?wel|dank ?je|dank ?u ?wel|dankjewel|dankje|dank|thanks|thank you|thx|danke(?:\\s+sch[öo]n)?|vielen dank|grazie(?:\\s+mille)?|gracias|muchas gracias|dzi[ęe]kuj[ęe]|dzi[ęe]ki|prima|top|fijn|mooi|helder|duidelijk|bien s[ûu]r|va bene|super|obrigad[ao]|est[áa] bem|combinado)";
 
 // Eén of meer bevestigingswoorden achter elkaar: "Ok", "Ok merci", "Merci !!".
 const PURE_ACKNOWLEDGEMENT_PATTERN = new RegExp(
@@ -1041,16 +1046,71 @@ function isPureAcknowledgement(text) {
   return PURE_ACKNOWLEDGEMENT_PATTERN.test(withoutEmoji);
 }
 
-// Heeft Emma in haar laatste bericht al afscheid genomen?
-// Zo ja, dan is een "ok" daarna een afsluiting, geen nieuwe beurt.
-const EMMA_SIGNOFF_PATTERN =
-  /(?:tot (?:later|straks|morgen|zo)|spreek je (?:later|straks|morgen)|[àa] plus tard|[àa] toute|[àa] bient[ôo]t|bonne (?:s[ée]ance|journ[ée]e|soir[ée]e)|talk (?:to you )?(?:later|soon)|speak (?:to you )?(?:later|soon)|bis (?:sp[äa]ter|gleich|bald)|a (?:dopo|pi[ùu] tardi)|hasta (?:luego|pronto)|do (?:zobaczenia|us[łl]yszenia)|at[ée] (?:logo|j[áa]|mais tarde)|bo[am] (?:sess[ãa]o|dia|tarde)|boa sorte|falamos (?:mais tarde|logo)|bon courage|veel succes|good luck|reprend(?:ra|rons)|on se (?:reparle|recontacte)|when you(?:'re| are) back|quand tu (?:seras|es) (?:de retour|disponible)|als je (?:terug|weer) bent)/i;
+// ---------------------------------------------------------------------------
+// Afwezigheidsstatus (v51) -- structuur, geen woordenlijst
+// ---------------------------------------------------------------------------
+// De klant heeft in dit gesprek gezegd dat ze weg moest. Vanaf dat moment geldt
+// ze als AFWEZIG, en blijft dat, tot een van deze twee dingen gebeurt:
+//
+//   1. ze stuurt een bericht met echte inhoud (een vraag, een keuze, een
+//      verhaal) -- dan is ze terug;
+//   2. er is meer dan ABSENCE_WINDOW_MS verstreken sinds het vertreksignaal --
+//      dan pakt Emma het gesprek gewoon weer op.
+//
+// Er wordt bewust NIET gekeken naar hoe Emma afscheid nam. Zij varieert haar
+// formulering met opzet (de prompt verbiedt vaste sjablonen), dus elke
+// woordenlijst daarvoor loopt per definitie achter. De gespreksstructuur is
+// stabiel, de woorden niet.
 
-function hasEmmaJustSaidGoodbye(messages) {
-  const emmaMessages = messages.filter((msg) => msg.role === "emma");
-  const last = emmaMessages[emmaMessages.length - 1];
-  if (!last) return false;
-  return EMMA_SIGNOFF_PATTERN.test(cleanText(last.message_text));
+const ABSENCE_WINDOW_MS = Number(
+  process.env.ABSENCE_WINDOW_MS || 30 * 60 * 1000
+);
+
+// Is dit bericht van de klant "echte inhoud"? Alles wat geen kale bevestiging
+// en geen vertreksignaal is, telt als terugkomen in het gesprek.
+function isSubstantiveUserMessage(text) {
+  const value = cleanText(text);
+  if (!value) return false;
+  if (isPureAcknowledgement(value)) return false;
+  if (isAbsenceAnnouncement(value)) return false;
+  return true;
+}
+
+// Bepaalt of de klant op DIT moment als afwezig geldt.
+// Geeft het vertreksignaal terug (of null), zodat de aanroeper kan loggen waarom.
+function getActiveAbsence(messages, nowMs) {
+  const list = Array.isArray(messages) ? messages : [];
+
+  // Zoek het LAATSTE vertreksignaal van de klant.
+  let departureIndex = -1;
+  for (let i = list.length - 1; i >= 0; i -= 1) {
+    const msg = list[i];
+    if (msg.role === "user" && isAbsenceAnnouncement(msg.message_text)) {
+      departureIndex = i;
+      break;
+    }
+  }
+  if (departureIndex === -1) return null;
+
+  const departure = list[departureIndex];
+
+  // Heeft de klant NA het vertrek al iets inhoudelijks gestuurd? Dan is ze terug.
+  for (let i = departureIndex + 1; i < list.length; i += 1) {
+    const msg = list[i];
+    if (msg.role === "user" && isSubstantiveUserMessage(msg.message_text)) {
+      return null;
+    }
+  }
+
+  // Tijdvenster: na ABSENCE_WINDOW_MS pakt Emma het gesprek gewoon weer op.
+  // Ontbreekt de timestamp, dan valt de afwezigheid terug op de inhoudsregel
+  // hierboven -- dat is de veilige kant (Emma zwijgt liever te lang dan te kort).
+  const departureTime = departure._time;
+  if (departureTime && Number.isFinite(nowMs)) {
+    if (nowMs - departureTime > ABSENCE_WINDOW_MS) return null;
+  }
+
+  return departure;
 }
 
 function controlFollowUpForLanguage(language, tasteText) {
@@ -2579,30 +2639,31 @@ app.post("/chat", async (req, res) => {
   }
 
   // -------------------------------------------------------------------------
-  // Stilte na een aangekondigd vertrek (v51)
+  // Afsluiting tijdens een lopende afwezigheid (v51)
   // -------------------------------------------------------------------------
-  // De klant heeft gezegd dat ze weg moest, Emma heeft afscheid genomen, en nu
-  // komt er alleen nog een "Ok" / "Merci" / duimpje binnen. Dat is geen nieuwe
-  // gespreksbeurt maar een punt achter de vorige. Hier NIET antwoorden: elk
-  // antwoord zou het gesprek heropenen bij iemand die net vertrokken is.
+  // De klant is AFWEZIG (zie getActiveAbsence) en stuurt nog een kale
+  // bevestiging: "ok", "dankjewel", een duimpje. Dat is geen nieuwe
+  // gespreksbeurt maar een punt achter de vorige. Emma sluit af met een groen
+  // hart en hervat het gesprek NIET -- zij is immers nog steeds weg.
   //
-  // Bewust drie voorwaarden samen, zodat dit nooit een echte vraag afvangt:
-  //   1. het huidige bericht is puur bevestigend (geen inhoud, geen vraagteken)
-  //   2. Emma heeft in haar laatste bericht daadwerkelijk afscheid genomen
-  //   3. de klant heeft eerder in dit gesprek aangekondigd weg te gaan
-  if (
-    isPureAcknowledgement(normalizedMessage) &&
-    hasEmmaJustSaidGoodbye(normalizedRecentMessages) &&
-    normalizedRecentMessages.some(
-      (msg) => msg.role === "user" && isAbsenceAnnouncement(msg.message_text)
-    )
-  ) {
-    diag("CLOSING_HEART_AFTER_GOODBYE", {
+  // Twee voorwaarden, allebei structureel:
+  //   1. de afwezigheid loopt nog (geen inhoudelijk bericht sinds het vertrek,
+  //      en binnen het tijdvenster van 30 minuten)
+  //   2. dit bericht is een kale bevestiging zonder eigen inhoud
+  //
+  // Er wordt NIET gekeken naar hoe Emma afscheid nam -- dat varieert te veel.
+  const activeAbsence = getActiveAbsence(normalizedRecentMessages, Date.now());
+  if (activeAbsence && isPureAcknowledgement(normalizedMessage)) {
+    diag("CLOSING_HEART_DURING_ABSENCE", {
       user_message: clamp(normalizedMessage, 60),
-      reason: "pure acknowledgement after announced absence + Emma sign-off",
+      departure_message: clamp(activeAbsence.message_text, 60),
+      minutes_since_departure: activeAbsence._time
+        ? Math.round((Date.now() - activeAbsence._time) / 60000)
+        : null,
+      window_minutes: Math.round(ABSENCE_WINDOW_MS / 60000),
     });
     return sendDiagResponse(
-      "closing_heart_after_goodbye",
+      "closing_heart_during_absence",
       buildResponse({
         send_reply: true,
         reply: CLOSING_HEART,
