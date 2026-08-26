@@ -896,6 +896,13 @@ function decideIntakeAction({
     recentMessages,
     TESTIMONIALS_LINK_PATTERN
   );
+  const serverChecklistDetected = hasStep2ChecklistBeenSent(recentMessages);
+  const responseType = cleanText(classification?.checklist_response_type);
+  const checklistSent =
+    classification?.checklist_sent === true || serverChecklistDetected;
+  const followUpsAsked = countNaturalIntakeFollowUps(recentMessages);
+  const postChecklistClarifications =
+    countPostChecklistClarifications(recentMessages);
 
   if (testimonialsAlreadySent) {
     return directRequest
@@ -903,21 +910,30 @@ function decideIntakeAction({
       : { action: "testimonials_already_sent", testimonials_allowed: false };
   }
 
+  // A structurally confirmed checklist is a stronger fact than an uncertain
+  // secondary classifier result. After that one-time milestone, uncertainty
+  // must never collapse the conversation into the generic hold reply. Let the
+  // primary conversational agent apply the semantic prompt rules instead.
+  if (!trusted && serverChecklistDetected) {
+    return {
+      action: "contextual_after_checklist",
+      testimonials_allowed: true,
+    };
+  }
+
   if (!trusted) {
     return { action: "hold_uncertain", testimonials_allowed: false };
   }
 
   if (classification?.intake_context_active !== true) {
+    if (serverChecklistDetected) {
+      return {
+        action: "contextual_after_checklist",
+        testimonials_allowed: true,
+      };
+    }
     return { action: "normal", testimonials_allowed: false };
   }
-
-  const responseType = cleanText(classification?.checklist_response_type);
-  const checklistSent =
-    classification?.checklist_sent === true ||
-    hasStep2ChecklistBeenSent(recentMessages);
-  const followUpsAsked = countNaturalIntakeFollowUps(recentMessages);
-  const postChecklistClarifications =
-    countPostChecklistClarifications(recentMessages);
 
   // Once the checklist has been sent, goal and challenge are no longer hard
   // gates. The customer's answer to that checklist decides whether intake is
@@ -944,7 +960,13 @@ function decideIntakeAction({
         : { action: "clarify_checklist", testimonials_allowed: false };
     }
 
-    return { action: "hold_intake", testimonials_allowed: false };
+    // The checklist is known to have been sent, but the secondary classifier
+    // supplied no usable semantic label. Deferring to Emma is safer and more
+    // natural than replacing her answer with a dead-end thank-you message.
+    return {
+      action: "contextual_after_checklist",
+      testimonials_allowed: true,
+    };
   }
 
   if (responseType === "question_or_objection") {
@@ -3229,6 +3251,16 @@ function buildIntakeTurnGuard({ decision, classification }) {
   const commonHold =
     "Stuur deze beurt GEEN testimonials-link en ga nog niet naar Stap 3.";
 
+  if (action === "contextual_after_checklist") {
+    return [
+      "Het verplichte Stap 2-checklistbericht is aantoonbaar al verstuurd. Herhaal de checklist niet en stel niet alsnog een aparte formele vraag naar doel of uitdaging.",
+      "Beoordeel het nieuwste klantbericht nu zelf contextueel vanuit het volledige gesprek, zonder woordenlijst of vaste formulering.",
+      "Voegt de klant inhoudelijk informatie toe, bevestigt die een checklistpunt, blijkt dat er niets relevants meer toe te voegen is, of kan of wil de klant niet verder toelichten: rond Stap 2 organisch af en stuur nu het vaste testimonialbericht.",
+      "Is het uitsluitend een losse bevestiging zonder inhoud en is nog geen verduidelijking gesteld: stel maximaal één korte natuurlijke verduidelijkingsvraag, zonder de checklist te herhalen.",
+      "Bevat het bericht een actuele vraag of bezwaar: beantwoord dat eerst. Stuur nooit alleen een algemeen bedankje waardoor het gesprek stilvalt.",
+    ].join("\n");
+  }
+
   if (
     action === "allow_testimonials" ||
     action === "allow_testimonials_resend"
@@ -4138,7 +4170,12 @@ app.post("/chat", async (req, res) => {
     direct_testimonials_request:
       pauseClassification.direct_testimonials_request,
     intake_confidence: pauseClassification.intake_confidence,
+    intake_classifier_trusted: ["high", "medium"].includes(
+      cleanText(pauseClassification.intake_confidence)
+    ),
     intake_action: intakeDecision.action,
+    primary_agent_contextual_fallback:
+      intakeDecision.action === "contextual_after_checklist",
     testimonials_allowed: intakeDecision.testimonials_allowed,
   });
 
