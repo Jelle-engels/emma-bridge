@@ -21,6 +21,15 @@ const PORT = process.env.PORT || 3000;
 
 const ELEVEN_TIMEOUT_MS = Number(process.env.ELEVEN_TIMEOUT_MS || 20000);
 const OPENAI_TIMEOUT_MS = Number(process.env.OPENAI_TIMEOUT_MS || 12000);
+const PAUSE_CLASSIFIER_TIMEOUT_MS = Number(
+  process.env.PAUSE_CLASSIFIER_TIMEOUT_MS || 5000
+);
+const CHECKOUT_CLASSIFIER_TIMEOUT_MS = Number(
+  process.env.CHECKOUT_CLASSIFIER_TIMEOUT_MS || 6000
+);
+const PAUSE_MIN_RESUME_MS = Number(
+  process.env.PAUSE_MIN_RESUME_MS || 30 * 60 * 1000
+);
 
 const MAX_CONTEXT_MESSAGES = Number(process.env.MAX_CONTEXT_MESSAGES || 30);
 const EXTRACTOR_CONTEXT_MESSAGES = Number(process.env.EXTRACTOR_CONTEXT_MESSAGES || 20);
@@ -33,8 +42,20 @@ const MAX_SHORT_FIELD_CHARS = Number(process.env.MAX_SHORT_FIELD_CHARS || 30);
 
 const NO_REPLY = "__NO_REPLY__";
 
-const FALLBACK_REPLY =
-  "Er ging iets mis met mijn antwoord, kun je je bericht nog een keer sturen";
+const FALLBACK_REPLIES = {
+  nl: "Er ging iets mis met mijn antwoord. Kun je je bericht nog een keer sturen?",
+  en: "Something went wrong with my reply. Could you send your message again?",
+  fr: "Un problème est survenu avec ma réponse. Peux-tu renvoyer ton message ?",
+  de: "Bei meiner Antwort ist etwas schiefgegangen. Kannst du deine Nachricht noch einmal senden?",
+  it: "Si è verificato un problema con la mia risposta. Puoi inviare di nuovo il tuo messaggio?",
+  es: "Ha ocurrido un problema con mi respuesta. ¿Puedes enviar tu mensaje de nuevo?",
+  pt: "Ocorreu um problema com a minha resposta. Podes enviar novamente a tua mensagem?",
+  pl: "Wystąpił problem z moją odpowiedzią. Czy możesz wysłać wiadomość jeszcze raz?",
+};
+
+function fallbackReplyForLanguage(language) {
+  return FALLBACK_REPLIES[language] || FALLBACK_REPLIES.en;
+}
 
 const WELCOME_MESSAGE =
   "Hallo, ik ben Emma 😊\n\n" +
@@ -43,6 +64,16 @@ const WELCOME_MESSAGE =
   "Vertel eens, waar zou jij het allerliefst verandering in willen zien? 💚\n\n" +
   "Je mag zo uitgebreid of juist zo kort antwoorden als je wilt. Alles is goed 🤗\n\n" +
   "Vertel bijvoorbeeld iets over je doel, waar je tegenaan loopt of wat je al geprobeerd hebt.";
+
+// This opening belongs to the French MARKET, not to the French language.
+// It is selected only for customer_country FR. A French-speaking Belgian
+// receives the regular welcome below in French and stays in the Belgian flow.
+const FRANCE_WELCOME_MESSAGE =
+  "Coucou ! \u{1F60A} Super que tu aies répondu !\n\n" +
+  "Tu souhaites perdre du poids ? Je serais ravie de t’aider à y arriver.\n\n" +
+  "J’ai déjà accompagné des milliers de femmes et d’hommes avec de très beaux résultats, et surtout sans le fameux effet yo-yo tant redouté !\n\n" +
+  "La plupart avaient pourtant déjà essayé plein de choses, sans obtenir les résultats qu’ils espéraient.\n\n" +
+  "Est-ce que je peux te demander ce que tu as déjà essayé ?";
 
 // One hardcoded welcome message per supported language. This message never
 // touches the LLM, so the most-seen message is guaranteed correct in every
@@ -56,17 +87,13 @@ const WELCOME_MESSAGES = {
     "Tell me, what would you most like to see change? \u{1F49A}\n\n" +
     "You can answer in as much or as little detail as you like. Anything is fine \u{1F917}\n\n" +
     "For example, tell me about your goal, what you're struggling with, or what you've already tried.",
-  // Frankrijk heeft een eigen openingsbericht, geschreven op conversie.
-  // Opzet: sociale bewijskracht eerst, dan een lage-drempelvraag naar doel EN
-  // grootste obstakel (samen precies de Stap 2-gate uit de prompt), met het
-  // kilo-aantal expliciet als optioneel. "Gratis" staat er bewust in: het haalt
-  // de belangrijkste onuitgesproken drempel weg voordat die ontstaat.
   fr:
-    "Coucou ! \u{1F60A} Super que tu aies r\u00e9pondu !\n\n" +
-    "Tu souhaites perdre du poids ? Je serais ravie de t\u2019aider \u00e0 y arriver.\n\n" +
-    "J\u2019ai d\u00e9j\u00e0 accompagn\u00e9 des milliers de femmes et d\u2019hommes avec de tr\u00e8s beaux r\u00e9sultats, et surtout sans le fameux effet yo-yo tant redout\u00e9 !\n\n" +
-    "La plupart avaient pourtant d\u00e9j\u00e0 essay\u00e9 plein de choses, sans obtenir les r\u00e9sultats qu\u2019ils esp\u00e9raient.\n\n" +
-    "Est-ce que je peux te demander ce que tu as d\u00e9j\u00e0 essay\u00e9 ?",
+    "Bonjour, je suis Emma \u{1F60A}\n\n" +
+    "J’aide chaque jour des personnes à atteindre leurs objectifs de santé et je serais ravie de réfléchir avec toi à ce qui pourrait te convenir \u{1F917}\n\n" +
+    "Nous avons déjà aidé des dizaines de milliers de personnes et je pense pouvoir aussi bien t’aider \u{1F49A}\n\n" +
+    "Dis-moi, qu’aimerais-tu le plus voir changer ? \u{1F49A}\n\n" +
+    "Tu peux répondre de façon très détaillée ou très brièvement. Tout me va \u{1F917}\n\n" +
+    "Tu peux par exemple me parler de ton objectif, de ce qui te bloque ou de ce que tu as déjà essayé.",
   de:
     "Hallo, ich bin Emma \u{1F60A}\n\n" +
     "Ich helfe jeden Tag Menschen dabei, ihre Gesundheitsziele zu erreichen, und denke gern gemeinsam mit dir nach \u{1F917}\n\n" +
@@ -88,6 +115,13 @@ const WELCOME_MESSAGES = {
     "Cu\u00e9ntame, \u00bfqu\u00e9 es lo que m\u00e1s te gustar\u00eda cambiar? \u{1F49A}\n\n" +
     "Puedes responder con todo el detalle que quieras o de forma muy breve. Todo est\u00e1 bien \u{1F917}\n\n" +
     "Por ejemplo, puedes contarme cu\u00e1l es tu objetivo, qu\u00e9 te est\u00e1 frenando o qu\u00e9 has probado hasta ahora.",
+  pt:
+    "Ol\u00e1, sou a Emma \u{1F60A}\n\n" +
+    "Todos os dias ajudo pessoas a alcan\u00e7ar os seus objetivos de sa\u00fade e gosto de pensar contigo no que pode funcionar melhor para ti \u{1F917}\n\n" +
+    "J\u00e1 ajud\u00e1mos dezenas de milhares de pessoas e acredito que tamb\u00e9m te posso ajudar \u{1F49A}\n\n" +
+    "Conta-me, o que gostarias mesmo de mudar? \u{1F49A}\n\n" +
+    "Podes responder com o detalhe que quiseres ou de forma muito breve. Est\u00e1 tudo bem \u{1F917}\n\n" +
+    "Por exemplo, podes contar-me qual \u00e9 o teu objetivo, o que te est\u00e1 a impedir de avan\u00e7ar ou o que j\u00e1 tentaste.",
   pl:
     "Cze\u015b\u0107, jestem Emma \u{1F60A}\n\n" +
     "Ka\u017cdego dnia pomagam ludziom osi\u0105ga\u0107 cele zdrowotne i ch\u0119tnie zastanowi\u0119 si\u0119 razem z Tob\u0105, co b\u0119dzie najlepsze \u{1F917}\n\n" +
@@ -96,6 +130,62 @@ const WELCOME_MESSAGES = {
     "Mo\u017cesz odpowiedzie\u0107 bardzo szczeg\u00f3\u0142owo albo kr\u00f3tko. Ka\u017cda odpowied\u017a jest w porz\u0105dku \u{1F917}\n\n" +
     "Mo\u017cesz na przyk\u0142ad opisa\u0107 sw\u00f3j cel, to, co Ci\u0119 teraz blokuje, albo czego ju\u017c pr\u00f3bowa\u0142a\u015b.",
 };
+
+const FRANCE_WELCOME_MESSAGES = {
+  nl:
+    "Hoi! 😊 Super dat je hebt gereageerd!\n\n" +
+    "Wil je graag afvallen? Ik help je heel graag om dat voor elkaar te krijgen.\n\n" +
+    "Ik heb al duizenden vrouwen en mannen begeleid met prachtige resultaten, en vooral zonder het gevreesde jojo-effect.\n\n" +
+    "De meesten hadden daarvoor al van alles geprobeerd, zonder de resultaten te behalen waarop ze hoopten.\n\n" +
+    "Mag ik vragen wat jij al hebt geprobeerd?",
+  en:
+    "Hi! 😊 It's great that you replied!\n\n" +
+    "Would you like to lose weight? I'd be very happy to help you achieve that.\n\n" +
+    "I've already supported thousands of women and men with wonderful results, most importantly without the dreaded yo-yo effect.\n\n" +
+    "Most of them had already tried all sorts of things without getting the results they hoped for.\n\n" +
+    "May I ask what you've already tried?",
+  fr: FRANCE_WELCOME_MESSAGE,
+  de:
+    "Hallo! 😊 Schön, dass du geantwortet hast!\n\n" +
+    "Möchtest du abnehmen? Ich würde dir sehr gern dabei helfen.\n\n" +
+    "Ich habe bereits Tausende Frauen und Männer mit großartigen Ergebnissen begleitet, vor allem ohne den gefürchteten Jo-Jo-Effekt.\n\n" +
+    "Die meisten hatten vorher schon vieles ausprobiert, ohne die erhofften Ergebnisse zu erzielen.\n\n" +
+    "Darf ich fragen, was du bereits ausprobiert hast?",
+  it:
+    "Ciao! 😊 Che bello che hai risposto!\n\n" +
+    "Vorresti perdere peso? Sarei davvero felice di aiutarti a riuscirci.\n\n" +
+    "Ho già seguito migliaia di donne e uomini con risultati splendidi e soprattutto senza il temuto effetto yo-yo.\n\n" +
+    "La maggior parte aveva già provato tante cose senza ottenere i risultati sperati.\n\n" +
+    "Posso chiederti che cosa hai già provato?",
+  es:
+    "¡Hola! 😊 ¡Qué bien que hayas respondido!\n\n" +
+    "¿Te gustaría perder peso? Estaré encantada de ayudarte a conseguirlo.\n\n" +
+    "Ya he acompañado a miles de mujeres y hombres con resultados preciosos y, sobre todo, sin el temido efecto rebote.\n\n" +
+    "La mayoría ya había probado muchas cosas sin conseguir los resultados que esperaba.\n\n" +
+    "¿Puedo preguntarte qué has probado hasta ahora?",
+  pt:
+    "Olá! 😊 Que bom teres respondido!\n\n" +
+    "Gostarias de perder peso? Terei todo o gosto em ajudar-te a conseguir isso.\n\n" +
+    "Já acompanhei milhares de mulheres e homens com excelentes resultados e, sobretudo, sem o tão receado efeito ioiô.\n\n" +
+    "A maioria já tinha tentado várias coisas sem alcançar os resultados que esperava.\n\n" +
+    "Posso perguntar-te o que já tentaste?",
+  pl:
+    "Cześć! 😊 Super, że odpisałaś!\n\n" +
+    "Chcesz schudnąć? Z przyjemnością pomogę Ci osiągnąć ten cel.\n\n" +
+    "Pomogłam już tysiącom kobiet i mężczyzn osiągnąć świetne rezultaty, przede wszystkim bez obawianego efektu jo-jo.\n\n" +
+    "Większość z nich próbowała wcześniej wielu rzeczy, ale nie uzyskała oczekiwanych rezultatów.\n\n" +
+    "Czy mogę zapytać, czego już próbowałaś?",
+};
+
+function welcomeMessageFor(conversationLanguage, customerCountry) {
+  if ((customerCountry || "").toUpperCase() === "FR") {
+    return (
+      FRANCE_WELCOME_MESSAGES[conversationLanguage] ||
+      FRANCE_WELCOME_MESSAGES.en
+    );
+  }
+  return WELCOME_MESSAGES[conversationLanguage] || WELCOME_MESSAGES.en;
+}
 
 const openai = process.env.OPENAI_API_KEY
   ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
@@ -187,8 +277,25 @@ function stripForbiddenReplyPhrases(value) {
     )
     // Any sentence containing "ben je er nog"
     .replace(new RegExp(`[^${B}]*ben je er nog[^${B}]*\\??\\s*`, "giu"), "");
+
+  const multilingualForbiddenPatterns = [
+    /(^|\n)\s*welcome back[^\n.!?]*[.!?…]*\s*/giu,
+    /(^|\n)\s*(?:glad|good|nice) (?:to have you back|to hear from you again)[^\n.!?]*[.!?…]*\s*/giu,
+    /(^|\n)\s*bon retour[^\n.!?]*[.!?…]*\s*/giu,
+    /(^|\n)\s*(?:contente?|heureuse?) de (?:te revoir|avoir de tes nouvelles)[^\n.!?]*[.!?…]*\s*/giu,
+    /(^|\n)\s*willkommen zur[uü]ck[^\n.!?]*[.!?…]*\s*/giu,
+    /(^|\n)\s*sch[oö]n,? wieder von dir zu h[oö]ren[^\n.!?]*[.!?…]*\s*/giu,
+    /(^|\n)\s*bentornat[oa][^\n.!?]*[.!?…]*\s*/giu,
+    /(^|\n)\s*bienvenid[oa] de nuevo[^\n.!?]*[.!?…]*\s*/giu,
+    /(^|\n)\s*bem-vind[oa] de volta[^\n.!?]*[.!?…]*\s*/giu,
+    /(^|\n)\s*witaj ponownie[^\n.!?]*[.!?…]*\s*/giu,
+    /(^|[\n.!?]\s*)[^\n.!?]*(?:are you still there|tu es toujours l[aà]|bist du noch da|sei ancora l[iì]|sigues ah[ií]|ainda est[aá]s a[ií]|jeste[sś] jeszcze)[^\n.!?]*\??\s*/giu,
+  ];
+  for (const pattern of multilingualForbiddenPatterns) {
+    out = out.replace(pattern, "$1");
+  }
   out = cleanReplyText(out);
-  return out || text;
+  return out || "💚";
 }
 
 // Coaching mode: strip trailing question sentences so Emma cannot keep the
@@ -199,9 +306,8 @@ function stripTrailingCoachingQuestions(value) {
   const text = cleanReplyText(value);
   if (!text) return text;
   if (
-    /tr\.ee\/bestellen-|nederland of belgi|welke smaak|chocolade|vanille|half[-\s]?half|\bcontrol\b|ordernummer/i.test(
-      text
-    )
+    CHECKOUT_SHORTLINK_PATTERN.test(text) ||
+    /nederland of belgi|welke smaak|which (?:complete )?flavou?r|quel(?:le)? (?:parfum|saveur)|welche geschmacksrichtung|quale gusto|qu[eé] sabor|qual (?:é )?o sabor|kt[oó]ry smak|chocola(?:de|te)|chocolate|chocolat|schokolade|cioccolato|czekolad[ao]|vanille|vanilla|vaniglia|vainilla|baunilha|wanili[ao]|half[-\s]?(?:and[-\s]?)?half|moiti[eé][-\s]moiti[eé]|halb[-\s]halb|met[aà] e met[aà]|mitad y mitad|meio[-\s]?a[-\s]?meio|metade[-\s]?metade|p[oó][łl] na p[oó][łl]|\bcontrol\b|ordernummer|order number|num[eé]ro de commande|bestellnummer|numero d['’]ordine|n[uú]mero (?:da encomenda|do pedido|del pedido)|numer zam[oó]wienia/i.test(text)
   ) {
     return text;
   }
@@ -229,10 +335,21 @@ function stripTrailingCoachingQuestions(value) {
   return out || text;
 }
 
+const WEBSITE_REFERENCE_REPLIES = {
+  nl: "Alles over de programma's staat op de pagina die ik je eerder stuurde 💚",
+  en: "Everything about the programmes is on the page I sent you earlier 💚",
+  fr: "Toutes les informations sur les programmes se trouvent sur la page que je t’ai envoyée plus tôt 💚",
+  de: "Alles zu den Programmen findest du auf der Seite, die ich dir vorher geschickt habe 💚",
+  it: "Tutte le informazioni sui programmi sono nella pagina che ti ho inviato prima 💚",
+  es: "Toda la información sobre los programas está en la página que te envié antes 💚",
+  pt: "Toda a informação sobre os programas está na página que te enviei anteriormente 💚",
+  pl: "Wszystkie informacje o programach znajdziesz na stronie, którą wysłałam Ci wcześniej 💚",
+};
+
 // Removes a repeated Stap 4 website/freebies block from a reply. Only
 // called when the website link was already sent earlier AND the customer's
 // current message does not explicitly ask for it.
-function stripRepeatedWebsiteBlock(value) {
+function stripRepeatedWebsiteBlock(value, language = "nl") {
   const text = cleanReplyText(value);
   if (!text || !PLAIN_WEBSITE_LINK_PATTERN.test(text)) return text;
   const paragraphs = text.split("\n\n").filter((p) => {
@@ -240,15 +357,15 @@ function stripRepeatedWebsiteBlock(value) {
       return true;
     }
     if (PLAIN_WEBSITE_LINK_PATTERN.test(p)) return false;
-    if (/op deze pagina vind je/i.test(p)) return false;
-    if (/volledig gratis/i.test(p)) return false;
-    if (/kijk welk programma je aanspreekt/i.test(p)) return false;
+    if (/op deze pagina vind je|on this page you(?:'ll| will) find|sur cette page,? tu trouveras|auf dieser seite findest du|in questa pagina trovi|en esta p[aá]gina encontrar[aá]s|nesta p[aá]gina encontras|na tej stronie znajdziesz/i.test(p)) return false;
+    if (/volledig gratis|completely free|enti[eè]rement gratuits?|v[oö]llig kostenlos|completamente gratuit[io]|totalmente gratis|całkowicie bezpłatn/i.test(p)) return false;
+    if (/kijk welk programma je aanspreekt|see which programme appeals|regarde quel programme|schau,? welches programm|guarda quale programma|mira qu[eé] programa|v[eê] qual programa|zobacz,? kt[oó]ry program/i.test(p)) return false;
     if ((p.match(/\u{2705}/gu) || []).length >= 2) return false;
     return true;
   });
   const out = cleanReplyText(paragraphs.join("\n\n"));
   return (
-    out || "Alles over de programma's staat op de pagina die ik je eerder stuurde \u{1F49A}"
+    out || WEBSITE_REFERENCE_REPLIES[language] || WEBSITE_REFERENCE_REPLIES.en
   );
 }
 
@@ -268,8 +385,8 @@ function normalizeComparableText(value) {
 
 function normalizeBinaryFlag(value) {
   const v = cleanText(value).toLowerCase();
-  if (v === "ja" || v === "yes" || v === "wel" || v === "true") return "ja";
-  if (v === "nee" || v === "no" || v === "niet" || v === "false") return "nee";
+  if (["ja", "yes", "wel", "oui", "si", "sì", "sí", "sim", "tak", "true"].includes(v)) return "ja";
+  if (["nee", "no", "niet", "non", "nein", "não", "nao", "nie", "false"].includes(v)) return "nee";
   return "";
 }
 
@@ -351,7 +468,7 @@ function buildResponse({
 
 /* ------------------------------- LANGUAGE -------------------------------- */
 
-const SUPPORTED_LANGUAGES = ["nl", "en", "fr", "de", "it", "es", "pl"];
+const SUPPORTED_LANGUAGES = ["nl", "en", "fr", "de", "it", "es", "pt", "pl"];
 
 const LANGUAGE_NAMES = {
   nl: "Nederlands",
@@ -360,6 +477,7 @@ const LANGUAGE_NAMES = {
   de: "German",
   it: "Italian",
   es: "Spanish",
+  pt: "Portuguese (Portugal)",
   pl: "Polish",
 };
 
@@ -375,6 +493,7 @@ const PHONE_PREFIX_LANGUAGE = {
   "41": "de",
   "39": "it",
   "34": "es",
+  "351": "pt",
   "48": "pl",
   "44": "en",
   "353": "en",
@@ -390,6 +509,7 @@ const FRANC_TO_LANGUAGE = {
   deu: "de",
   ita: "it",
   spa: "es",
+  por: "pt",
   pol: "pl",
 };
 
@@ -448,6 +568,11 @@ const EXPLICIT_LANGUAGE_REQUEST_PATTERNS = [
       /\b(en espa[nñ]ol|espa[nñ]ol,? por favor|no hablo (holand[eé]s|neerland[eé]s)|hablas espa[nñ]ol|continuar en espa[nñ]ol)\b/i,
   },
   {
+    language: "pt",
+    pattern:
+      /\b(em portugu[eê]s|portugu[eê]s,? por favor|n[aã]o falo (holand[eê]s|neerland[eê]s)|falas portugu[eê]s|podemos falar (?:em )?portugu[eê]s|continuar em portugu[eê]s)\b/i,
+  },
+  {
     language: "pl",
     pattern:
       /\b(po polsku|nie m[oó]wi[eę] po (holendersku|niderlandzku)|m[oó]wisz po polsku)\b/i,
@@ -465,7 +590,8 @@ function detectExplicitLanguageRequest(text) {
 
 // Country calling code -> customer country for PRICING. The checkout links
 // are universal; this only determines which price table row Emma quotes.
-// Unknown prefix / BSUID -> "UK" (business decision: UK prices as fallback).
+// Unknown prefix / BSUID stays UNKNOWN; the prompt uses pound prices as its
+// display fallback without pretending the customer is in the UK.
 const PHONE_PREFIX_COUNTRY = {
   "31": "NL",
   "32": "BE",
@@ -498,6 +624,40 @@ function detectLanguageFromText(text) {
   return FRANC_TO_LANGUAGE[iso3] || "other";
 }
 
+// Belgium has two supported conversation languages while its phone prefix can
+// supply only one default. Confident text detection therefore outranks the +32
+// default. A few unmistakable short greetings cover the first-message cases
+// that are too short for franc-min; this affects language only, never market.
+function detectBelgianLanguageFromText(text) {
+  const detected = detectLanguageFromText(text);
+  if (detected === "fr" || detected === "nl") return detected;
+
+  const value = cleanText(text).toLowerCase();
+  if (/^(?:bonjour|bonsoir|coucou|salut)(?:\b|[!,.])/i.test(value)) return "fr";
+  if (/^(?:hallo|hoi|goedemorgen|goedemiddag|goedenavond)(?:\b|[!,.])/i.test(value)) {
+    return "nl";
+  }
+  return "";
+}
+
+// Before Portuguese was supported, +351 contacts could be stored as English
+// (unsupported-language fallback) or Dutch (short-message fallback). Repair
+// only those legacy defaults when a Portuguese-market customer is now
+// confidently writing Portuguese. Explicit language requests still win.
+function shouldMigrateLegacyPortugueseLanguage({
+  storedLanguage,
+  customerCountry,
+  explicitRequest,
+  textLanguage,
+}) {
+  return (
+    customerCountry === "PT" &&
+    ["en", "nl"].includes(storedLanguage) &&
+    !explicitRequest &&
+    textLanguage === "pt"
+  );
+}
+
 
 /* -------------------------- MESSAGE NORMALIZATION ------------------------- */
 
@@ -516,6 +676,16 @@ function normalizeRole(role) {
 function parseTimestamp(value) {
   const raw = cleanText(value);
   if (!raw) return null;
+
+  if (/^\d{10}$/.test(raw)) {
+    const seconds = Number(raw);
+    return Number.isFinite(seconds) ? seconds * 1000 : null;
+  }
+
+  if (/^\d{13}$/.test(raw)) {
+    const milliseconds = Number(raw);
+    return Number.isFinite(milliseconds) ? milliseconds : null;
+  }
 
   const t = Date.parse(raw);
   return Number.isFinite(t) ? t : null;
@@ -594,15 +764,184 @@ function sanitizeAndPrepareRecentMessages(recentMessages, currentMessage) {
     currentMessage
   );
 
-  return withoutCurrentMessage
-    .filter((msg) => msg.message_text)
-    .slice(-MAX_CONTEXT_MESSAGES)
+  const withText = withoutCurrentMessage.filter((msg) => msg.message_text);
+  const recentWindow = withText.slice(-MAX_CONTEXT_MESSAGES);
+  // Keep critical one-time link messages even when a long conversation has
+  // pushed them outside the normal context window. The checkout link encodes
+  // the complete selection baseline; the testimonials link must remain visible
+  // so it can never be sent as a first-time link twice.
+  const latestCheckoutMessage = [...withText]
+    .reverse()
+    .find((msg) => msg.role === "emma" && hasCheckoutLinkBeenSent([msg]));
+  const latestTestimonialsMessage = [...withText]
+    .reverse()
+    .find(
+      (msg) =>
+        msg.role === "emma" &&
+        hasPatternBeenSent([msg], TESTIMONIALS_LINK_PATTERN)
+    );
+  const missingPinnedMessages = [
+    latestCheckoutMessage,
+    latestTestimonialsMessage,
+  ]
+    .filter(Boolean)
+    .filter((msg) => !recentWindow.includes(msg))
+    .sort((a, b) => withText.indexOf(a) - withText.indexOf(b));
+  const contextWindow = [...missingPinnedMessages, ...recentWindow];
+
+  return contextWindow
     .map((msg) => ({
       role: msg.role || "unknown",
       message_text: clamp(msg.message_text, MAX_MESSAGE_CHARS),
       timestamp: msg.timestamp || "",
     }));
 }
+
+/* -------------------- CONTEXTUAL CONVERSATION PAUSES -------------------- */
+
+// INTAKE PURE LOGIC START
+function decideIntakeAction({
+  classification,
+  recentMessages,
+  validatedCustomer = false,
+}) {
+  if (validatedCustomer) {
+    return { action: "normal", testimonials_allowed: false };
+  }
+
+  const confidence = cleanText(classification?.intake_confidence);
+  const trusted = confidence === "high" || confidence === "medium";
+  const directRequest =
+    classification?.direct_testimonials_request === true && trusted;
+  const testimonialsAlreadySent = hasPatternBeenSent(
+    recentMessages,
+    TESTIMONIALS_LINK_PATTERN
+  );
+
+  if (testimonialsAlreadySent) {
+    return directRequest
+      ? { action: "allow_testimonials_resend", testimonials_allowed: true }
+      : { action: "testimonials_already_sent", testimonials_allowed: false };
+  }
+
+  if (!trusted) {
+    return { action: "hold_uncertain", testimonials_allowed: false };
+  }
+
+  if (classification?.intake_context_active !== true) {
+    return { action: "normal", testimonials_allowed: false };
+  }
+
+  const responseType = cleanText(classification?.checklist_response_type);
+  const checklistSent = classification?.checklist_sent === true;
+
+  // When the customer cannot or does not want to explain the missing context,
+  // the mandatory checklist becomes a gentle discovery aid instead of an
+  // interrogation. It still does not make testimonials ready by itself.
+  if (!checklistSent && responseType === "cannot_elaborate") {
+    return { action: "send_checklist_support", testimonials_allowed: false };
+  }
+
+  if (classification?.goal_context_clear !== true) {
+    return { action: "ask_goal", testimonials_allowed: false };
+  }
+
+  if (classification?.challenge_context_clear !== true) {
+    return { action: "ask_challenge", testimonials_allowed: false };
+  }
+
+  if (!checklistSent) {
+    return { action: "send_checklist", testimonials_allowed: false };
+  }
+
+  if (
+    responseType === "meaningful_details" ||
+    responseType === "explicit_no_more"
+  ) {
+    return { action: "allow_testimonials", testimonials_allowed: true };
+  }
+
+  if (responseType === "bare_acknowledgement") {
+    return { action: "clarify_checklist", testimonials_allowed: false };
+  }
+
+  if (responseType === "question_or_objection") {
+    return { action: "answer_and_hold", testimonials_allowed: false };
+  }
+
+  if (responseType === "cannot_elaborate") {
+    return { action: "hold_without_pressure", testimonials_allowed: false };
+  }
+
+  return { action: "hold_intake", testimonials_allowed: false };
+}
+// INTAKE PURE LOGIC END
+
+// PAUSE PURE LOGIC START
+function getPauseAnchorTimestampMs(classification, recentMessages) {
+  const anchorId = cleanText(classification?.pause_anchor_id);
+  const match = anchorId.match(/^history_(\d+)$/);
+  if (!match) return null;
+
+  const classifierHistory = recentMessages.slice(-20);
+  const index = Number(match[1]) - 1;
+  if (!Number.isInteger(index) || index < 0 || index >= classifierHistory.length) {
+    return null;
+  }
+
+  return parseTimestamp(classifierHistory[index]?.timestamp);
+}
+
+function decidePauseAction(classification, recentMessages, nowMs = Date.now()) {
+  const anchorTimestampMs = getPauseAnchorTimestampMs(
+    classification,
+    recentMessages
+  );
+  const elapsedMs = Number.isFinite(anchorTimestampMs)
+    ? Math.max(0, nowMs - anchorTimestampMs)
+    : null;
+  const minimumResumeMs = Number.isFinite(PAUSE_MIN_RESUME_MS)
+    ? Math.max(0, PAUSE_MIN_RESUME_MS)
+    : 30 * 60 * 1000;
+  const withinMinimum = elapsedMs === null || elapsedMs < minimumResumeMs;
+  const pauseActive = classification?.pause_context_active === true;
+  const messageType = cleanText(classification?.current_message_type);
+  const confidence = cleanText(classification?.confidence);
+  const trusted = confidence === "high" || confidence === "medium";
+  const anchorMatch = cleanText(classification?.pause_anchor_id).match(
+    /^history_(\d+)$/
+  );
+  const anchorIndex = anchorMatch ? Number(anchorMatch[1]) - 1 : -1;
+  const pauseAnchorIdentified =
+    Number.isInteger(anchorIndex) &&
+    anchorIndex >= 0 &&
+    anchorIndex < recentMessages.slice(-20).length;
+
+  let action = "normal_reply";
+  if (pauseActive && trusted && messageType === "closing_acknowledgement") {
+    // Time alone never turns a closing acknowledgement into a resumed
+    // conversation. A green heart is correct both before and after 30 minutes.
+    action = "heart_only";
+  } else if (
+    trusted &&
+    pauseAnchorIdentified &&
+    withinMinimum &&
+    (messageType === "substantive" || messageType === "other")
+  ) {
+    // Real content is answered, but inside the first 30 minutes Emma may not
+    // restart or advance the sales flow on her own.
+    action = "guarded_reply";
+  }
+
+  return {
+    action,
+    elapsed_ms: elapsedMs,
+    within_minimum: withinMinimum,
+    timestamps_available: elapsedMs !== null,
+    pause_anchor_identified: pauseAnchorIdentified,
+  };
+}
+// PAUSE PURE LOGIC END
 
 function getLastEmmaMessages(messages, limit = 3) {
   return messages
@@ -619,29 +958,23 @@ function getLastUserMessages(messages, limit = 3) {
 }
 
 function hasPriceBeenMentioned(messages) {
-  // Matches any of the known SKU prices (Control, Basic, Beauty, Deluxe,
-  // Exclusive, combos, plus loose upgrade products), in either € notation
-  // or "euro" form, plus generic price phrasings.
+  // Currency notation is the strongest language-independent signal. The
+  // translated phrases cover answers that describe a price without a symbol.
   const priceRegex =
-    /€\s*\d|£\s*\d|\d\s*zł|\d+\s*euro\b|programma kost|kost in totaal|totaalprijs/i;
+    /€\s*\d|£\s*\d|\d\s*zł|\d+\s*(?:euro|euros|eur|pounds?)\b|programma kost|kost in totaal|totaalprijs|programme costs?|total price|prix (?:total|du programme)|co[uû]te|gesamtpreis|kostet insgesamt|prezzo totale|costa in totale|precio total|cuesta en total|preço total|custa no total|cena całkowita|kosztuje łącznie/i;
   return messages.some(
     (msg) => msg.role === "emma" && priceRegex.test(msg.message_text)
   );
 }
 
+const CHECKOUT_SHORTLINK_PATTERN =
+  /\btr\.ee\/(?:bestellen-(?:nl|be)-[a-z0-9-]+|(?:basic|beauty|deluxe|exclusive)-(?:van|choc|mix)(?:-control)?|control1x|(?:basic|beauty|deluxe|exclusive)-(?:van|choc|mixte|mix)(?:-control)?-4x-fr|control-4x-fr|[a-z0-9-]+-4x-fr|berries|fruit-vegtables|fruit-veg-berry|essentials-omega|omegaselection|berries-omega|superfood|fruit-veg-berry-soft|fruit-veg-soft|berries-soft)(?:\b|\/|\?|$)/i;
+
 function hasCheckoutLinkBeenSent(messages) {
-  // Matches any of the real tr.ee checkout URLs. Covers Control, all 4 program
-  // SKUs, all program+Control combos, loose upgrade products (Berry caps,
-  // Fruit/Vegetable caps, Berry+Fruit/Vegetable combos), extra products
-  // (Omega, Complete Bars, Superfood, Luminate, Vegetable Soup), in both
-  // Dutch and Belgian markets, plus the France 4-instalment links which all
-  // end in "-4x-fr".
   return messages.some(
     (msg) =>
       msg.role === "emma" &&
-      /tr\.ee\/(?:bestellen-(?:nl|be)-|(?:basic|beauty|deluxe|exclusive)-(?:van|choc|mix)|control1x|[a-z0-9-]+-4x-fr\b)/i.test(
-        msg.message_text
-      )
+      CHECKOUT_SHORTLINK_PATTERN.test(msg.message_text)
   );
 }
 
@@ -655,7 +988,11 @@ function hasWhatsappGroupLinkBeenSent(messages) {
 
 function hasAskedOrderNumber(messages) {
   return messages.some(
-    (msg) => msg.role === "emma" && /ordernummer/i.test(msg.message_text)
+    (msg) =>
+      msg.role === "emma" &&
+      /ordernummer|order number|num[eé]ro (?:de commande|d['’]ordine|del pedido)|bestellnummer|n[uú]mero (?:da encomenda|do pedido)|numer zam[oó]wienia/i.test(
+        msg.message_text
+      )
   );
 }
 
@@ -663,19 +1000,34 @@ function hasAskedTaste(messages) {
   return messages.some(
     (msg) =>
       msg.role === "emma" &&
-      /welke smaak|chocolade.*vanille|vanille.*chocolade|half-half|smaak complete/i.test(
+      /welke smaak|which (?:complete )?flavou?r|quel(?:le)? (?:parfum|saveur)|welche (?:complete[-\s]?)?geschmacksrichtung|quale gusto|qu[eé] sabor|qual (?:é )?o sabor|kt[oó]ry smak|smaak complete|sabor (?:do |da )?complete|(?:chocola(?:de|te)|chocolate|chocolat|schokolade|cioccolato|czekolad[ao]).{0,80}(?:vanille|vanilla|vaniglia|vainilla|baunilha|wanili[ao])|(?:vanille|vanilla|vaniglia|vainilla|baunilha|wanili[ao]).{0,80}(?:chocola(?:de|te)|chocolate|chocolat|schokolade|cioccolato|czekolad[ao])/i.test(
         msg.message_text
       )
   );
 }
 
+function normalizeTasteChoice(text) {
+  const value = cleanText(text).toLowerCase();
+  if (!value) return "";
+  if (/\b(chocolade|chocolate|chocolat|schokolade|cioccolato|czekolada|czekoladowy)\b/i.test(value)) {
+    return "chocolate";
+  }
+  if (/\b(vanille|vanilla|vaniglia|vainilla|baunilha|wanilia|waniliowy)\b/i.test(value)) {
+    return "vanilla";
+  }
+  if (
+    /\b(half[-\s]?(?:and[-\s]?)?half|mix|mixed|gemengd|moiti[eé][-\s]moiti[eé]|halb[-\s]halb|met[aà]\s+e\s+met[aà]|mitad\s+y\s+mitad|meio[-\s]a[-\s]meio|metade[-\s]metade|misto|mistura|p[oó][łl]\s+na\s+p[oó][łl])\b/i.test(
+      value
+    )
+  ) {
+    return "mix";
+  }
+  return "";
+}
+
 function hasReceivedTasteAnswer(messages) {
   return messages.some(
-    (msg) =>
-      msg.role === "user" &&
-      /\b(chocola(?:de|t)?|vanille|half[-\s]?half|half|mix|gemengd)\b/i.test(
-        msg.message_text
-      )
+    (msg) => msg.role === "user" && Boolean(normalizeTasteChoice(msg.message_text))
   );
 }
 
@@ -686,7 +1038,7 @@ function isTasteOnlyCheckoutAnswer(text) {
   // Only intercept short answers whose actual content is the taste choice.
   // Longer messages or questions about Control remain available to Emma so she
   // can answer them naturally before asking for the final yes/no choice.
-  return /^\s*(?:graag\s+)?(?:chocola(?:de|t)?|vanille|half[-\s]?half|half|mix|gemengd)(?:\s+graag)?[.!]?\s*$/i.test(
+  return /^\s*(?:(?:graag|please|s['’]il te pla[iî]t|bitte|per favore|por favor|prosz[eę])\s+)?(?:chocolade|chocolate|chocolat|schokolade|cioccolato|czekolada|czekoladowy|vanille|vanilla|vaniglia|vainilla|baunilha|wanilia|waniliowy|half[-\s]?(?:and[-\s]?)?half|mix|mixed|gemengd|moiti[eé][-\s]moiti[eé]|halb[-\s]halb|met[aà]\s+e\s+met[aà]|mitad\s+y\s+mitad|meio[-\s]a[-\s]meio|metade[-\s]metade|misto|mistura|p[oó][łl]\s+na\s+p[oó][łl])(?:\s+(?:graag|please|bitte|per favore|por favor|prosz[eę]))?\s*[.!]?\s*$/i.test(
     normalized
   );
 }
@@ -700,14 +1052,11 @@ function controlFollowUpForLanguage(language, tasteText) {
     de: { chocolate: "Schokolade", vanilla: "Vanille", mix: "halb-halb" },
     it: { chocolate: "cioccolato", vanilla: "vaniglia", mix: "metà e metà" },
     es: { chocolate: "chocolate", vanilla: "vainilla", mix: "mitad y mitad" },
+    pt: { chocolate: "chocolate", vanilla: "baunilha", mix: "meio a meio" },
     pl: { chocolate: "czekolada", vanilla: "wanilia", mix: "pół na pół" },
   };
 
-  const key = /chocola/.test(taste)
-    ? "chocolate"
-    : /half|mix|gemengd/.test(taste)
-      ? "mix"
-      : "vanilla";
+  const key = normalizeTasteChoice(taste) || "vanilla";
   const lang = labels[language] ? language : "en";
   const label = labels[lang][key];
 
@@ -718,26 +1067,18 @@ function controlFollowUpForLanguage(language, tasteText) {
     de: `Alles klar, ${label} ist notiert 💚\n\nMöchtest du Control dazu nehmen? 😊`,
     it: `Perfetto, ${label} segnato 💚\n\nVuoi aggiungere Control? 😊`,
     es: `Perfecto, ${label} anotado 💚\n\n¿Quieres añadir Control? 😊`,
+    pt: `Perfeito, ${label} registado 💚\n\nQueres adicionar Control? 😊`,
     pl: `Jasne, zapisuję ${label} 💚\n\nCzy chcesz dodać Control? 😊`,
   };
 
   return messages[lang];
 }
 
-// Detects whether the user has explicitly answered Emma's "wil je Control
-// erbij?" upsell question in the checkout flow. Looks for affirmative or
-// negative responses around Control, plus standalone yes/no answers that
-// immediately follow Emma's combo question containing "Control".
+// Detects a Control answer in every supported conversation language. This is
+// a deterministic safety net around the semantic checkout classifier.
 function hasReceivedControlAnswer(messages) {
-  // Find the most recent Emma message that asks about Control.
-  // Matches several common phrasings of the upsell question:
-  //   - "Control er gelijk bij doen"
-  //   - "Control erbij doen"
-  //   - "Control er bij"
-  //   - "Control toevoegen"
-  //   - "ook Control"
   const emmaControlQuestionPattern =
-    /control\s+(?:er\s*(?:gelijk\s+)?bij|toevoegen)|\book\s+control\b/i;
+    /(?:wil je|zou je|would you|do you want|souhaites-tu|veux-tu|m[oö]chtest du|willst du|vuoi|quieres|queres|czy chcesz).{0,80}\bcontrol\b|\bcontrol\b.{0,80}(?:erbij|toevoegen|add|ajouter|hinzuf[uü]gen|dazu|aggiungere|a[nñ]adir|adicionar|doda[cć]|\?)/i;
   let lastEmmaIndexWithControlAsk = -1;
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
@@ -760,44 +1101,24 @@ function hasReceivedControlAnswer(messages) {
     if (msg.role !== "user") return false;
     const text = (msg.message_text || "").toLowerCase();
 
-    // Explicit Control yes/no
-    if (
-      /\b(ja|jazeker|graag|prima|zeker|doe maar|inderdaad|natuurlijk).{0,30}control\b/i.test(
-        text
-      )
-    )
+    const yesWords =
+      /\b(ja|jazeker|graag|prima|zeker|doe maar|inderdaad|natuurlijk|yes|yeah|sure|please|oui|d['’]accord|bien s[uû]r|si|s[iíì]|certo|claro|sim|tak|dobrze|oczywi[sś]cie)\b/i;
+    const noWords =
+      /\b(nee|geen|zonder|liever niet|laat maar|niet|no|nope|without|non|sans|nein|ohne|senza|sin|n[aã]o|sem|nie|bez)\b/i;
+    if (/\bcontrol\b/i.test(text) && (yesWords.test(text) || noWords.test(text))) {
       return true;
-    if (
-      /\bcontrol.{0,30}(ja|jazeker|graag|prima|zeker|doe maar|inderdaad|natuurlijk)\b/i.test(
-        text
-      )
-    )
-      return true;
-    if (
-      /\b(nee|geen|zonder|liever niet|laat maar).{0,30}control\b/i.test(text)
-    )
-      return true;
-    if (
-      /\bcontrol.{0,30}(nee|geen|zonder|liever niet|laat maar|niet)\b/i.test(
-        text
-      )
-    )
-      return true;
+    }
 
     // Standalone yes/no when Emma's last question contained Control
     if (lastEmmaIndexWithControlAsk >= 0) {
-      // Standalone affirmative answers (single or short combinations).
-      // The "doe\s*maa?r[ts]?" pattern matches "doe maar", "doemaar",
-      // "doe maart" (common typo with extra t), "doe mar", etc.
       if (
-        /^\s*(?:ja|jazeker|graag|prima|doe\s*maa?r[ts]?|inderdaad|natuurlijk|zeker|oke|ok|jep|yes|sure)(?:\s+(?:graag|zeker|prima|doe\s*maa?r[ts]?|natuurlijk))?\s*[\.!]?\s*$/i.test(
+        /^\s*(?:ja|jazeker|graag|prima|doe\s*maa?r[ts]?|inderdaad|natuurlijk|zeker|ok[eé]?|jep|yes|yeah|sure|please|oui|d['’]accord|bien s[uû]r|si|s[iíì]|certo|claro|sim|tak|dobrze|oczywi[sś]cie)(?:\s+(?:graag|please|zeker|prima|doe\s*maa?r[ts]?|natuurlijk|sure|por favor))?\s*[\.!]?\s*$/i.test(
           text
         )
       )
         return true;
-      // Standalone negative answers (single or short combinations)
       if (
-        /^\s*(?:nee|nope|geen|niks)(?:,?\s*(?:dank\s*je(?:\s*wel)?|bedankt|laat\s+maar|hoor|joh))?\s*[\.!]?\s*$/i.test(
+        /^\s*(?:nee|nope|geen|niks|no|non|nein|n[aã]o|nie)(?:,?\s*(?:dank\s*je(?:\s*wel)?|bedankt|thanks?|thank you|merci|danke|grazie|gracias|obrigad[oa]|dzi[eę]kuj[eę]|laat\s+maar|hoor|joh|por favor))?\s*[\.!]?\s*$/i.test(
           text
         )
       )
@@ -830,7 +1151,7 @@ const PROGRAM_PATTERN = /\b(basic|beauty|deluxe|exclusive)\b/i;
 const PROGRAM_PATTERN_GLOBAL = /\b(basic|beauty|deluxe|exclusive)\b/gi;
 const CONTROL_MENTION_PATTERN = /\bcontrol\b/i;
 const CONTROL_COMBO_PATTERN =
-  /(?:\bmet[\s-]*(?:de[\s-]*)?control|\ben[\s-]*(?:de[\s-]*)?control|\binclusief[\s-]*control|\bcontrol[\s-]*erbij|(?:^|\s|\W)\+[\s-]*control)/i;
+  /(?:\bmet[\s-]*(?:de[\s-]*)?control|\ben[\s-]*(?:de[\s-]*)?control|\binclusief[\s-]*control|\bcontrol[\s-]*erbij|\bwith[\s-]*control|\bavec[\s-]*control|\bmit[\s-]*control|\bcon[\s-]*control|\bcom[\s-]*control|\bz[\s-]*control|\binclu(?:ding|s|ant|so|ido)[\s-]*control|(?:^|\s|\W)\+[\s-]*control)/i;
 
 // Parses a tr.ee checkout URL and extracts the SKU components:
 // program (Basic/Beauty/Deluxe/Exclusive or empty for Control-only) and
@@ -851,44 +1172,76 @@ function parseCheckoutLinkSKU(url) {
   // "beauty-mixte-control-4x-fr", fail to see the "-control" that follows
   // "mixte", and return hasControl=false for a combo order.
   const franceMatch = url.match(
-    /tr\.ee\/(basic|beauty|deluxe|exclusive)-(?:van|choc|mixte|mix)(-control)?-4x-fr/i
+    /tr\.ee\/(basic|beauty|deluxe|exclusive)-(van|choc|mixte|mix)(-control)?-4x-fr/i
   );
   if (franceMatch) {
     const lower = franceMatch[1].toLowerCase();
     const program = lower.charAt(0).toUpperCase() + lower.slice(1);
-    const hasControl = Boolean(franceMatch[2]);
-    return { program, hasControl };
+    const taste = franceMatch[2].toLowerCase() === "van"
+      ? "vanilla"
+      : franceMatch[2].toLowerCase() === "choc"
+        ? "chocolate"
+        : "mix";
+    const hasControl = Boolean(franceMatch[3]);
+    return { program, taste, hasControl, paymentMode: "france_4x" };
   }
   if (/tr\.ee\/control-4x-fr(?:\b|\/|\?|$)/i.test(url)) {
-    return { program: "", hasControl: true };
+    return {
+      program: "",
+      taste: "not_required",
+      hasControl: true,
+      paymentMode: "france_4x",
+    };
   }
 
   // Universal links (2026): tr.ee/Basic-Van, tr.ee/Deluxe-Mix-Control, ...
   const universalMatch = url.match(
-    /tr\.ee\/(basic|beauty|deluxe|exclusive)-(?:van|choc|mix)(-control)?/i
+    /tr\.ee\/(basic|beauty|deluxe|exclusive)-(van|choc|mix)(-control)?/i
   );
   if (universalMatch) {
     const lower = universalMatch[1].toLowerCase();
     const program = lower.charAt(0).toUpperCase() + lower.slice(1);
-    const hasControl = Boolean(universalMatch[2]);
-    return { program, hasControl };
+    const taste = universalMatch[2].toLowerCase() === "van"
+      ? "vanilla"
+      : universalMatch[2].toLowerCase() === "choc"
+        ? "chocolate"
+        : "mix";
+    const hasControl = Boolean(universalMatch[3]);
+    return { program, taste, hasControl, paymentMode: "one_time" };
   }
   if (/tr\.ee\/control1x(?:\b|\/|\?|$)/i.test(url)) {
-    return { program: "", hasControl: true };
+    return {
+      program: "",
+      taste: "not_required",
+      hasControl: true,
+      paymentMode: "one_time",
+    };
   }
 
   // Legacy country links, kept so running conversations still validate.
   const programMatch = url.match(
-    /tr\.ee\/bestellen-(?:nl|be)-(basic|beauty|deluxe|exclusive)(?:-(?:choc|van|mix))?(-control)?/i
+    /tr\.ee\/bestellen-(?:nl|be)-(basic|beauty|deluxe|exclusive)(?:-(choc|van|mix))?(-control)?/i
   );
   if (programMatch) {
     const lower = programMatch[1].toLowerCase();
     const program = lower.charAt(0).toUpperCase() + lower.slice(1);
-    const hasControl = Boolean(programMatch[2]);
-    return { program, hasControl };
+    const taste = programMatch[2]?.toLowerCase() === "van"
+      ? "vanilla"
+      : programMatch[2]?.toLowerCase() === "choc"
+        ? "chocolate"
+        : programMatch[2]?.toLowerCase() === "mix"
+          ? "mix"
+          : "";
+    const hasControl = Boolean(programMatch[3]);
+    return { program, taste, hasControl, paymentMode: "one_time" };
   }
   if (/tr\.ee\/bestellen-(?:nl|be)-control(?:\b|\/|\?|$)/i.test(url)) {
-    return { program: "", hasControl: true };
+    return {
+      program: "",
+      taste: "not_required",
+      hasControl: true,
+      paymentMode: "one_time",
+    };
   }
 
   return null;
@@ -901,7 +1254,7 @@ function findLastEmmaCheckoutLink(messages, currentReply) {
   // in full. Otherwise the universal alternative would match its "basic-van"
   // prefix and silently drop the "-control" that follows "mixte".
   const urlRegex =
-    /(https?:\/\/tr\.ee\/(?:(?:basic|beauty|deluxe|exclusive)-(?:van|choc|mixte|mix)(?:-control)?-4x-fr|control-4x-fr|[a-z0-9-]+-4x-fr|bestellen-[a-z0-9-]+|(?:basic|beauty|deluxe|exclusive)-(?:van|choc|mix)(?:-control)?|control1x))/i;
+    /(https?:\/\/tr\.ee\/(?:(?:basic|beauty|deluxe|exclusive)-(?:van|choc|mixte|mix)(?:-control)?-4x-fr|control-4x-fr|[a-z0-9-]+-4x-fr|bestellen-[a-z0-9-]+|(?:basic|beauty|deluxe|exclusive)-(?:van|choc|mix)(?:-control)?|control1x|fruit-veg-berry-soft|fruit-veg-berry|fruit-veg-soft|fruit-vegtables|berries-omega|berries-soft|berries|essentials-omega|omegaselection|superfood))/i;
 
   if (currentReply) {
     const match = cleanText(currentReply).match(urlRegex);
@@ -917,6 +1270,643 @@ function findLastEmmaCheckoutLink(messages, currentReply) {
   }
 
   return "";
+}
+
+/* ------------------- SERVER-OWNED CHECKOUT DECISIONS -------------------- */
+
+function normalizeCheckoutProgram(value) {
+  const match = cleanText(value).match(/^(basic|beauty|deluxe|exclusive)$/i);
+  if (!match) return "";
+  const lower = match[1].toLowerCase();
+  return lower.charAt(0).toUpperCase() + lower.slice(1);
+}
+
+function normalizeCheckoutTaste(value) {
+  const normalized = cleanText(value).toLowerCase();
+  if (["vanilla", "chocolate", "mix"].includes(normalized)) return normalized;
+  return "";
+}
+
+function normalizeCheckoutControl(value) {
+  const normalized = cleanText(value).toLowerCase();
+  return ["yes", "no", "unavailable"].includes(normalized) ? normalized : "";
+}
+
+function resolveProgramCheckoutLink({
+  customerCountry,
+  program,
+  taste,
+  control,
+  paymentMode,
+}) {
+  const normalizedProgram = normalizeCheckoutProgram(program);
+  const normalizedTaste = normalizeCheckoutTaste(taste);
+  const normalizedControl = normalizeCheckoutControl(control);
+  if (!normalizedProgram || !normalizedTaste) return "";
+  if (!['yes', 'no', 'unavailable'].includes(normalizedControl)) return "";
+  if ((customerCountry || "").toUpperCase() === "PT" && normalizedControl === "yes") {
+    return "";
+  }
+
+  const withControl = normalizedControl === "yes";
+  const useFranceFourPayments =
+    (customerCountry || "").toUpperCase() === "FR" &&
+    paymentMode !== "one_time";
+
+  if (useFranceFourPayments) {
+    const programSlug = normalizedProgram.toLowerCase();
+    const tasteSlug = normalizedTaste === "vanilla"
+      ? "van"
+      : normalizedTaste === "chocolate"
+        ? "choc"
+        : normalizedProgram === "Basic" && withControl
+          ? "mix"
+          : "mixte";
+    return `https://tr.ee/${programSlug}-${tasteSlug}${withControl ? "-control" : ""}-4x-fr`;
+  }
+
+  const tasteSlug = normalizedTaste === "vanilla"
+    ? "Van"
+    : normalizedTaste === "chocolate"
+      ? "Choc"
+      : "Mix";
+  return `https://tr.ee/${normalizedProgram}-${tasteSlug}${withControl ? "-Control" : ""}`;
+}
+
+function normalizeCheckoutUrl(value) {
+  const match = cleanText(value).match(/https?:\/\/tr\.ee\/[^\s?#]+/i);
+  return match ? match[0].replace(/\/$/, "").toLowerCase() : "";
+}
+
+// CHECKOUT PURE LOGIC START
+function decideCheckoutAction({
+  classification,
+  recentMessages,
+  customerCountry,
+  validatedCustomer = false,
+}) {
+  const normal = {
+    action: "normal",
+    program: "",
+    taste: "",
+    control: "",
+    payment_mode: "",
+    checkout_link: "",
+    previous_checkout_link: "",
+  };
+
+  if (
+    !classification?.checkout_context_active ||
+    classification?.checkout_confidence === "low"
+  ) {
+    return normal;
+  }
+
+  const messageType = cleanText(classification.checkout_message_type);
+  const previousCheckoutLink = findLastEmmaCheckoutLink(recentMessages, "");
+  const previousSku = parseCheckoutLinkSKU(previousCheckoutLink);
+
+  if (messageType === "technical_cart_issue") {
+    return { ...normal, action: "technical_retry", previous_checkout_link: previousCheckoutLink };
+  }
+  if (messageType === "technical_issue_persisting") {
+    return { ...normal, action: "technical_escalate", previous_checkout_link: previousCheckoutLink };
+  }
+  if (messageType === "payment_status_uncertain") {
+    return { ...normal, action: "payment_escalate", previous_checkout_link: previousCheckoutLink };
+  }
+  if (messageType === "link_resend_request" && previousCheckoutLink) {
+    return {
+      ...normal,
+      action: "resend_link",
+      checkout_link: previousCheckoutLink,
+      previous_checkout_link: previousCheckoutLink,
+    };
+  }
+
+  // A completed purchaser is handled by coaching/support rules. Never create a
+  // replacement sales link automatically after order validation.
+  if (validatedCustomer) return normal;
+
+  if (!["selection_update", "selection_ambiguous"].includes(messageType)) {
+    return normal;
+  }
+
+  const country = (customerCountry || "UNKNOWN").toUpperCase();
+  const program =
+    normalizeCheckoutProgram(classification.checkout_program) ||
+    normalizeCheckoutProgram(previousSku?.program);
+  const taste =
+    normalizeCheckoutTaste(classification.checkout_taste) ||
+    normalizeCheckoutTaste(previousSku?.taste);
+  const classifiedControl = normalizeCheckoutControl(
+    classification.checkout_control
+  );
+
+  if (country === "PT" && classifiedControl === "yes") {
+    return {
+      ...normal,
+      action: "portugal_control_unavailable",
+      program,
+      taste,
+      control: "unavailable",
+      previous_checkout_link: previousCheckoutLink,
+    };
+  }
+
+  const control = country === "PT"
+    ? "unavailable"
+    : classifiedControl ||
+      (previousSku ? (previousSku.hasControl ? "yes" : "no") : "");
+  const paymentMode = country === "FR"
+    ? cleanText(classification.checkout_payment_mode) === "france_4x"
+      ? "france_4x"
+      : cleanText(classification.checkout_payment_mode) === "one_time"
+        ? "one_time"
+        : previousSku?.paymentMode === "one_time"
+          ? "one_time"
+          : "france_4x"
+    : "one_time";
+
+  const ambiguousField = cleanText(classification.checkout_ambiguous_field);
+  if (messageType === "selection_ambiguous" && ambiguousField !== "none") {
+    if (
+      country === "PT" &&
+      ["control", "taste_and_control"].includes(ambiguousField)
+    ) {
+      return {
+        ...normal,
+        action: taste ? "portugal_control_unavailable" : "ask_taste",
+        program,
+        taste,
+        control: "unavailable",
+        payment_mode: paymentMode,
+        previous_checkout_link: previousCheckoutLink,
+      };
+    }
+    const action = ambiguousField === "program"
+      ? "ask_program"
+      : ambiguousField === "taste"
+        ? "ask_taste"
+        : ambiguousField === "control"
+          ? "ask_control"
+          : "ask_taste_and_control";
+    return {
+      ...normal,
+      action,
+      program,
+      taste,
+      control,
+      payment_mode: paymentMode,
+      previous_checkout_link: previousCheckoutLink,
+    };
+  }
+
+  if (!program) {
+    return { ...normal, action: "ask_program", previous_checkout_link: previousCheckoutLink };
+  }
+  if (!taste && !control && country !== "PT") {
+    return {
+      ...normal,
+      action: "ask_taste_and_control",
+      program,
+      payment_mode: paymentMode,
+      previous_checkout_link: previousCheckoutLink,
+    };
+  }
+  if (!taste) {
+    return {
+      ...normal,
+      action: "ask_taste",
+      program,
+      control,
+      payment_mode: paymentMode,
+      previous_checkout_link: previousCheckoutLink,
+    };
+  }
+  if (!control) {
+    return {
+      ...normal,
+      action: "ask_control",
+      program,
+      taste,
+      payment_mode: paymentMode,
+      previous_checkout_link: previousCheckoutLink,
+    };
+  }
+
+  const checkoutLink = resolveProgramCheckoutLink({
+    customerCountry: country,
+    program,
+    taste,
+    control,
+    paymentMode,
+  });
+  if (!checkoutLink) return normal;
+
+  const selection = {
+    ...normal,
+    program,
+    taste,
+    control,
+    payment_mode: paymentMode,
+    checkout_link: checkoutLink,
+    previous_checkout_link: previousCheckoutLink,
+  };
+  if (!previousCheckoutLink) return { ...selection, action: "send_initial_link" };
+  if (normalizeCheckoutUrl(previousCheckoutLink) === normalizeCheckoutUrl(checkoutLink)) {
+    return { ...selection, action: "selection_unchanged" };
+  }
+  return { ...selection, action: "send_replacement_link" };
+}
+// CHECKOUT PURE LOGIC END
+
+function shouldClassifyCheckoutState(message, recentMessages) {
+  if (findLastEmmaCheckoutLink(recentMessages, "")) return true;
+  if (hasAskedTaste(recentMessages) || hasReceivedTasteAnswer(recentMessages)) {
+    return true;
+  }
+  const contextText = [
+    ...recentMessages.slice(-20).map((msg) => cleanText(msg.message_text)),
+    cleanText(message),
+  ].join("\n");
+  // This is only a broad scope gate for whether the semantic classifier needs
+  // to run. It never decides a checkout state or customer intent itself.
+  return /\b(basic|beauty|deluxe|exclusive|complete|control)\b/i.test(contextText);
+}
+
+const CHECKOUT_TASTE_LABELS = {
+  nl: { vanilla: "Vanille", chocolate: "Chocolade", mix: "Half-half" },
+  en: { vanilla: "Vanilla", chocolate: "Chocolate", mix: "Half-and-half" },
+  fr: { vanilla: "Vanille", chocolate: "Chocolat", mix: "Moitié-moitié" },
+  de: { vanilla: "Vanille", chocolate: "Schokolade", mix: "Halb-halb" },
+  it: { vanilla: "Vaniglia", chocolate: "Cioccolato", mix: "Metà e metà" },
+  es: { vanilla: "Vainilla", chocolate: "Chocolate", mix: "Mitad y mitad" },
+  pt: { vanilla: "Baunilha", chocolate: "Chocolate", mix: "Meio a meio" },
+  pl: { vanilla: "Wanilia", chocolate: "Czekolada", mix: "Pół na pół" },
+};
+
+function checkoutLanguage(language) {
+  return CHECKOUT_TASTE_LABELS[language] ? language : "en";
+}
+
+function formatCheckoutSelection({ language, customerCountry, program, taste, control }) {
+  const lang = checkoutLanguage(language);
+  const tasteLabel = CHECKOUT_TASTE_LABELS[lang][taste] || taste;
+  const base = `${program} ${tasteLabel}`;
+  if ((customerCountry || "").toUpperCase() === "PT" || control === "unavailable") {
+    return base;
+  }
+  const suffixes = {
+    nl: control === "yes" ? "met Control" : "zonder Control",
+    en: control === "yes" ? "with Control" : "without Control",
+    fr: control === "yes" ? "avec Control" : "sans Control",
+    de: control === "yes" ? "mit Control" : "ohne Control",
+    it: control === "yes" ? "con Control" : "senza Control",
+    es: control === "yes" ? "con Control" : "sin Control",
+    pt: control === "yes" ? "com Control" : "sem Control",
+    pl: control === "yes" ? "z Control" : "bez Control",
+  };
+  return `${base} ${suffixes[lang]}`;
+}
+
+const CHECKOUT_COPY = {
+  nl: {
+    askProgram: "Welk programma wil je bestellen: Basic, Beauty, Deluxe of Exclusive? 😊",
+    askTaste: "Welke smaak Complete wil je: chocolade, vanille of half-half? 😊",
+    askControl: "Wil je Control erbij doen? 😊",
+    askBoth: "Welke smaak Complete wil je: chocolade, vanille of half-half? En wil je Control erbij doen? 😊",
+    unchanged: (selection) => `Je huidige link klopt al voor ${selection} 💚`,
+    replacement: (selection, link) => `Natuurlijk, ik pas het voor je aan 😊\n\nDit is de juiste link voor ${selection} 💚\n\n${link}\n\nStuur me je ordernummer zodra je hebt besteld, dan zet ik alles voor je klaar 😊`,
+    resend: (link) => `Natuurlijk, hier is je checkoutlink nog een keer 💚\n\n${link}`,
+    initial: (selection, link, payment) => `Top, ik stuur je de link voor ${selection} 💚\n\n${link}${payment ? `\n\n${payment}` : ""}\n\nZodra je hebt besteld, stuur me je ordernummer even door. Dan kan ik je alle gratis extra's geven en je direct toegang geven tot onze WhatsApp groep:\n✅ 24/7 persoonlijke coaching van mij\n✅ Toegang tot besloten WhatsApp groep\n✅ Toegang tot besloten Facebook groep\n✅ Complete toolkit\n✅ Recepten\n✅ Workouts`,
+    paymentStandard: "Tijdens het uitchecken kan je in de laatste stap kiezen voor 3 termijnen via Klarna 😊",
+    paymentFrance: "Tijdens het uitchecken betaal je in 4 maandtermijnen met creditcard 😊",
+    technicalRetry: "Wat vervelend dat de checkout niet goed opent. Sluit je browser even helemaal af en klik daarna opnieuw op de link die ik je stuurde. Vaak opent het winkelwagentje dan wel goed 😊",
+    technicalEscalate: "Wat vervelend dat het nog steeds niet werkt. Onze gesprekken worden gemonitord. Een van de mensen die dit account beheert, pakt je gesprek binnen 24 uur handmatig op en komt bij je terug met een oplossing 🙏",
+    paymentEscalate: "Betaal voor de zekerheid niet opnieuw zolang niet duidelijk is of de betaling is verwerkt. Onze gesprekken worden gemonitord. Een van de mensen die dit account beheert, pakt je gesprek binnen 24 uur handmatig op en komt bij je terug met een oplossing 🙏",
+    portugalControl: "Control is in Portugal helaas niet beschikbaar, dus ik kan dat niet aan je bestelling toevoegen. Je programma en smaak kan ik natuurlijk wel voor je klaarzetten 💚",
+  },
+  en: {
+    askProgram: "Which programme would you like to order: Basic, Beauty, Deluxe or Exclusive? 😊",
+    askTaste: "Which Complete flavour would you like: chocolate, vanilla or half-and-half? 😊",
+    askControl: "Would you like to add Control? 😊",
+    askBoth: "Which Complete flavour would you like: chocolate, vanilla or half-and-half? And would you like to add Control? 😊",
+    unchanged: (selection) => `Your current link is already correct for ${selection} 💚`,
+    replacement: (selection, link) => `Of course, I'll update that for you 😊\n\nHere is the correct link for ${selection} 💚\n\n${link}\n\nSend me your order number once you've ordered and I'll get everything ready for you 😊`,
+    resend: (link) => `Of course, here is your checkout link again 💚\n\n${link}`,
+    initial: (selection, link, payment) => `Great, here is the link for ${selection} 💚\n\n${link}${payment ? `\n\n${payment}` : ""}\n\nOnce you've ordered, send me your order number. Then I can give you all the free extras and immediate access to our WhatsApp group:\n✅ Personal coaching from me 24/7\n✅ Access to the private WhatsApp group\n✅ Access to the private Facebook group\n✅ Complete toolkit\n✅ Recipes\n✅ Workouts`,
+    paymentStandard: "At checkout you can choose to pay in 3 instalments with Klarna in the final step 😊",
+    paymentFrance: "At checkout you pay in 4 monthly instalments by credit card 😊",
+    technicalRetry: "I'm sorry the checkout isn't opening properly. Close your browser completely, then click the link I sent you again. That usually makes the cart open correctly 😊",
+    technicalEscalate: "I'm sorry it still isn't working. Our conversations are monitored. One of the people managing this account will pick up your conversation manually within 24 hours and come back to you with a solution 🙏",
+    paymentEscalate: "To be safe, don't try to pay again while it's unclear whether the payment went through. Our conversations are monitored. One of the people managing this account will pick up your conversation manually within 24 hours and come back to you with a solution 🙏",
+    portugalControl: "Unfortunately, Control isn't available in Portugal, so I can't add it to your order. I can still prepare your programme and flavour for you 💚",
+  },
+  fr: {
+    askProgram: "Quel programme souhaites-tu commander : Basic, Beauty, Deluxe ou Exclusive ? 😊",
+    askTaste: "Quel parfum Complete souhaites-tu : chocolat, vanille ou moitié-moitié ? 😊",
+    askControl: "Souhaites-tu ajouter Control ? 😊",
+    askBoth: "Quel parfum Complete souhaites-tu : chocolat, vanille ou moitié-moitié ? Et souhaites-tu ajouter Control ? 😊",
+    unchanged: (selection) => `Ton lien actuel correspond déjà à ${selection} 💚`,
+    replacement: (selection, link) => `Bien sûr, je te modifie ça 😊\n\nVoici le bon lien pour ${selection} 💚\n\n${link}\n\nEnvoie-moi ton numéro de commande dès que tu as commandé et je préparerai tout pour toi 😊`,
+    resend: (link) => `Bien sûr, voici à nouveau ton lien de commande 💚\n\n${link}`,
+    initial: (selection, link, payment) => `Parfait, voici le lien pour ${selection} 💚\n\n${link}${payment ? `\n\n${payment}` : ""}\n\nDès que tu as commandé, envoie-moi ton numéro de commande. Je pourrai alors t'offrir tous les bonus et te donner immédiatement accès à notre groupe WhatsApp :\n✅ Mon coaching personnel 24 h/24 et 7 j/7\n✅ Accès au groupe WhatsApp privé\n✅ Accès au groupe Facebook privé\n✅ Boîte à outils complète\n✅ Recettes\n✅ Entraînements`,
+    paymentStandard: "Lors du paiement, tu peux choisir Klarna en 3 fois à la dernière étape 😊",
+    paymentFrance: "Lors du paiement, tu règles en 4 mensualités par carte bancaire 😊",
+    technicalRetry: "Je suis désolée que le paiement ne s'ouvre pas correctement. Ferme complètement ton navigateur, puis clique à nouveau sur le lien que je t'ai envoyé. Le panier s'ouvre généralement correctement ensuite 😊",
+    technicalEscalate: "Je suis désolée que cela ne fonctionne toujours pas. Nos conversations sont surveillées. Une personne qui gère ce compte reprendra manuellement ta conversation dans les 24 heures et reviendra vers toi avec une solution 🙏",
+    paymentEscalate: "Par précaution, ne paie pas une deuxième fois tant qu'on ne sait pas si le paiement a été traité. Nos conversations sont surveillées. Une personne qui gère ce compte reprendra manuellement ta conversation dans les 24 heures et reviendra vers toi avec une solution 🙏",
+    portugalControl: "Control n'est malheureusement pas disponible au Portugal, je ne peux donc pas l'ajouter à ta commande. Je peux bien sûr préparer ton programme et ton parfum 💚",
+  },
+  de: {
+    askProgram: "Welches Programm möchtest du bestellen: Basic, Beauty, Deluxe oder Exclusive? 😊",
+    askTaste: "Welche Complete-Geschmacksrichtung möchtest du: Schokolade, Vanille oder halb-halb? 😊",
+    askControl: "Möchtest du Control dazu nehmen? 😊",
+    askBoth: "Welche Complete-Geschmacksrichtung möchtest du: Schokolade, Vanille oder halb-halb? Und möchtest du Control dazu nehmen? 😊",
+    unchanged: (selection) => `Dein aktueller Link passt bereits zu ${selection} 💚`,
+    replacement: (selection, link) => `Natürlich, ich ändere das für dich 😊\n\nHier ist der richtige Link für ${selection} 💚\n\n${link}\n\nSchick mir deine Bestellnummer, sobald du bestellt hast, dann bereite ich alles für dich vor 😊`,
+    resend: (link) => `Natürlich, hier ist dein Checkout-Link noch einmal 💚\n\n${link}`,
+    initial: (selection, link, payment) => `Super, hier ist der Link für ${selection} 💚\n\n${link}${payment ? `\n\n${payment}` : ""}\n\nSobald du bestellt hast, schick mir bitte deine Bestellnummer. Dann erhältst du alle kostenlosen Extras und sofort Zugang zu unserer WhatsApp-Gruppe:\n✅ Persönliches Coaching von mir rund um die Uhr\n✅ Zugang zur privaten WhatsApp-Gruppe\n✅ Zugang zur privaten Facebook-Gruppe\n✅ Komplettes Toolkit\n✅ Rezepte\n✅ Workouts`,
+    paymentStandard: "Beim Bezahlen kannst du im letzten Schritt 3 Raten über Klarna wählen 😊",
+    paymentFrance: "Beim Bezahlen zahlst du in 4 Monatsraten per Kreditkarte 😊",
+    technicalRetry: "Es tut mir leid, dass sich der Checkout nicht richtig öffnet. Schließe deinen Browser vollständig und klicke danach noch einmal auf den Link, den ich dir geschickt habe. Meistens öffnet sich der Warenkorb dann richtig 😊",
+    technicalEscalate: "Es tut mir leid, dass es immer noch nicht funktioniert. Unsere Gespräche werden überwacht. Eine Person, die dieses Konto betreut, übernimmt dein Gespräch innerhalb von 24 Stunden manuell und meldet sich mit einer Lösung bei dir 🙏",
+    paymentEscalate: "Bezahle vorsichtshalber nicht noch einmal, solange unklar ist, ob die Zahlung verarbeitet wurde. Unsere Gespräche werden überwacht. Eine Person, die dieses Konto betreut, übernimmt dein Gespräch innerhalb von 24 Stunden manuell und meldet sich mit einer Lösung bei dir 🙏",
+    portugalControl: "Control ist in Portugal leider nicht erhältlich, daher kann ich es deiner Bestellung nicht hinzufügen. Dein Programm und deine Geschmacksrichtung kann ich natürlich für dich vorbereiten 💚",
+  },
+  it: {
+    askProgram: "Quale programma vuoi ordinare: Basic, Beauty, Deluxe o Exclusive? 😊",
+    askTaste: "Quale gusto Complete preferisci: cioccolato, vaniglia o metà e metà? 😊",
+    askControl: "Vuoi aggiungere Control? 😊",
+    askBoth: "Quale gusto Complete preferisci: cioccolato, vaniglia o metà e metà? E vuoi aggiungere Control? 😊",
+    unchanged: (selection) => `Il tuo link attuale è già corretto per ${selection} 💚`,
+    replacement: (selection, link) => `Certo, lo modifico per te 😊\n\nEcco il link corretto per ${selection} 💚\n\n${link}\n\nQuando hai ordinato, mandami il numero d'ordine e preparo tutto per te 😊`,
+    resend: (link) => `Certo, ecco di nuovo il tuo link per il checkout 💚\n\n${link}`,
+    initial: (selection, link, payment) => `Perfetto, ecco il link per ${selection} 💚\n\n${link}${payment ? `\n\n${payment}` : ""}\n\nQuando hai ordinato, mandami il numero d'ordine. Così posso darti tutti gli extra gratuiti e l'accesso immediato al nostro gruppo WhatsApp:\n✅ Coaching personale con me 24/7\n✅ Accesso al gruppo WhatsApp privato\n✅ Accesso al gruppo Facebook privato\n✅ Toolkit completo\n✅ Ricette\n✅ Allenamenti`,
+    paymentStandard: "Durante il checkout puoi scegliere Klarna in 3 rate nell'ultimo passaggio 😊",
+    paymentFrance: "Durante il checkout paghi in 4 rate mensili con carta di credito 😊",
+    technicalRetry: "Mi dispiace che il checkout non si apra correttamente. Chiudi completamente il browser e poi clicca di nuovo sul link che ti ho inviato. Di solito il carrello si apre correttamente 😊",
+    technicalEscalate: "Mi dispiace che continui a non funzionare. Le nostre conversazioni vengono monitorate. Una delle persone che gestisce questo account prenderà in carico manualmente la conversazione entro 24 ore e ti contatterà con una soluzione 🙏",
+    paymentEscalate: "Per sicurezza, non effettuare un altro pagamento finché non è chiaro se quello precedente è andato a buon fine. Le nostre conversazioni vengono monitorate. Una delle persone che gestisce questo account prenderà in carico manualmente la conversazione entro 24 ore e ti contatterà con una soluzione 🙏",
+    portugalControl: "Purtroppo Control non è disponibile in Portogallo, quindi non posso aggiungerlo al tuo ordine. Posso comunque preparare il programma e il gusto per te 💚",
+  },
+  es: {
+    askProgram: "¿Qué programa quieres pedir: Basic, Beauty, Deluxe o Exclusive? 😊",
+    askTaste: "¿Qué sabor de Complete quieres: chocolate, vainilla o mitad y mitad? 😊",
+    askControl: "¿Quieres añadir Control? 😊",
+    askBoth: "¿Qué sabor de Complete quieres: chocolate, vainilla o mitad y mitad? ¿Y quieres añadir Control? 😊",
+    unchanged: (selection) => `Tu enlace actual ya es correcto para ${selection} 💚`,
+    replacement: (selection, link) => `Claro, te lo cambio 😊\n\nEste es el enlace correcto para ${selection} 💚\n\n${link}\n\nEnvíame tu número de pedido cuando hayas terminado y te lo preparo todo 😊`,
+    resend: (link) => `Claro, aquí tienes de nuevo tu enlace de pago 💚\n\n${link}`,
+    initial: (selection, link, payment) => `Perfecto, aquí tienes el enlace para ${selection} 💚\n\n${link}${payment ? `\n\n${payment}` : ""}\n\nCuando hayas hecho el pedido, envíame tu número de pedido. Así podré darte todos los extras gratuitos y acceso inmediato a nuestro grupo de WhatsApp:\n✅ Asesoramiento personal conmigo 24/7\n✅ Acceso al grupo privado de WhatsApp\n✅ Acceso al grupo privado de Facebook\n✅ Kit completo\n✅ Recetas\n✅ Entrenamientos`,
+    paymentStandard: "Durante el pago puedes elegir Klarna en 3 plazos en el último paso 😊",
+    paymentFrance: "Durante el pago abonas el importe en 4 mensualidades con tarjeta de crédito 😊",
+    technicalRetry: "Siento que el proceso de pago no se abra correctamente. Cierra completamente el navegador y vuelve a pulsar el enlace que te envié. Normalmente así el carrito se abre bien 😊",
+    technicalEscalate: "Siento que siga sin funcionar. Nuestras conversaciones están supervisadas. Una de las personas que gestiona esta cuenta revisará manualmente tu conversación en un plazo de 24 horas y volverá con una solución 🙏",
+    paymentEscalate: "Para evitar problemas, no vuelvas a pagar mientras no esté claro si el pago se ha procesado. Nuestras conversaciones están supervisadas. Una de las personas que gestiona esta cuenta revisará manualmente tu conversación en un plazo de 24 horas y volverá con una solución 🙏",
+    portugalControl: "Control no está disponible en Portugal, así que no puedo añadirlo a tu pedido. Sí puedo prepararte el programa y el sabor elegidos 💚",
+  },
+  pt: {
+    askProgram: "Que programa queres encomendar: Basic, Beauty, Deluxe ou Exclusive? 😊",
+    askTaste: "Que sabor Complete queres: chocolate, baunilha ou meio a meio? 😊",
+    askControl: "Queres adicionar Control? 😊",
+    askBoth: "Que sabor Complete queres: chocolate, baunilha ou meio a meio? E queres adicionar Control? 😊",
+    unchanged: (selection) => `O teu link atual já está correto para ${selection} 💚`,
+    replacement: (selection, link) => `Claro, faço essa alteração para ti 😊\n\nEste é o link correto para ${selection} 💚\n\n${link}\n\nEnvia-me o número da encomenda assim que terminares e eu preparo tudo para ti 😊`,
+    resend: (link) => `Claro, aqui tens novamente o teu link de checkout 💚\n\n${link}`,
+    initial: (selection, link, payment) => `Perfeito, aqui tens o link para ${selection} 💚\n\n${link}${payment ? `\n\n${payment}` : ""}\n\nAssim que fizeres a encomenda, envia-me o número. Depois posso dar-te todos os extras gratuitos e acesso imediato ao nosso grupo de WhatsApp:\n✅ Acompanhamento pessoal comigo 24 horas por dia\n✅ Acesso ao grupo privado de WhatsApp\n✅ Acesso ao grupo privado de Facebook\n✅ Kit completo\n✅ Receitas\n✅ Treinos`,
+    paymentStandard: "No último passo do checkout podes escolher o pagamento em 3 prestações através da Klarna 😊",
+    paymentFrance: "No checkout, o pagamento é feito em 4 prestações mensais com cartão de crédito 😊",
+    technicalRetry: "Lamento que o checkout não esteja a abrir corretamente. Fecha completamente o navegador e depois volta a clicar no link que te enviei. Normalmente o carrinho abre corretamente dessa forma 😊",
+    technicalEscalate: "Lamento que continue sem funcionar. As nossas conversas são monitorizadas. Uma das pessoas que gere esta conta irá analisar manualmente a tua conversa no prazo de 24 horas e voltará com uma solução 🙏",
+    paymentEscalate: "Por segurança, não voltes a pagar enquanto não estiver claro se o pagamento foi processado. As nossas conversas são monitorizadas. Uma das pessoas que gere esta conta irá analisar manualmente a tua conversa no prazo de 24 horas e voltará com uma solução 🙏",
+    portugalControl: "Infelizmente, o Control não está disponível em Portugal, por isso não o posso adicionar à tua encomenda. Posso preparar o programa e o sabor para ti 💚",
+  },
+  pl: {
+    askProgram: "Który program chcesz zamówić: Basic, Beauty, Deluxe czy Exclusive? 😊",
+    askTaste: "Który smak Complete wybierasz: czekoladowy, waniliowy czy pół na pół? 😊",
+    askControl: "Czy chcesz dodać Control? 😊",
+    askBoth: "Który smak Complete wybierasz: czekoladowy, waniliowy czy pół na pół? Czy chcesz też dodać Control? 😊",
+    unchanged: (selection) => `Twój obecny link jest już właściwy dla ${selection} 💚`,
+    replacement: (selection, link) => `Oczywiście, zmienię to dla Ciebie 😊\n\nOto właściwy link dla ${selection} 💚\n\n${link}\n\nPo złożeniu zamówienia wyślij mi numer zamówienia, a wszystko dla Ciebie przygotuję 😊`,
+    resend: (link) => `Oczywiście, tutaj ponownie znajdziesz swój link do zamówienia 💚\n\n${link}`,
+    initial: (selection, link, payment) => `Świetnie, oto link dla ${selection} 💚\n\n${link}${payment ? `\n\n${payment}` : ""}\n\nPo złożeniu zamówienia wyślij mi numer zamówienia. Otrzymasz wtedy wszystkie bezpłatne dodatki i natychmiastowy dostęp do naszej grupy WhatsApp:\n✅ Moje osobiste wsparcie 24/7\n✅ Dostęp do prywatnej grupy WhatsApp\n✅ Dostęp do prywatnej grupy na Facebooku\n✅ Kompletny zestaw materiałów\n✅ Przepisy\n✅ Treningi`,
+    paymentStandard: "W ostatnim kroku płatności możesz wybrać 3 raty przez Klarna 😊",
+    paymentFrance: "Podczas płatności zapłacisz w 4 miesięcznych ratach kartą kredytową 😊",
+    technicalRetry: "Przykro mi, że strona płatności nie otwiera się prawidłowo. Zamknij całkowicie przeglądarkę, a następnie ponownie kliknij wysłany przeze mnie link. Zwykle koszyk otwiera się wtedy poprawnie 😊",
+    technicalEscalate: "Przykro mi, że nadal nie działa. Nasze rozmowy są monitorowane. Jedna z osób zarządzających tym kontem przejmie ręcznie Twoją rozmowę w ciągu 24 godzin i wróci z rozwiązaniem 🙏",
+    paymentEscalate: "Dla bezpieczeństwa nie płać ponownie, dopóki nie będzie jasne, czy płatność została przetworzona. Nasze rozmowy są monitorowane. Jedna z osób zarządzających tym kontem przejmie ręcznie Twoją rozmowę w ciągu 24 godzin i wróci z rozwiązaniem 🙏",
+    portugalControl: "Control nie jest dostępny w Portugalii, więc nie mogę dodać go do zamówienia. Mogę natomiast przygotować wybrany program i smak 💚",
+  },
+};
+
+function buildCheckoutActionReply({ decision, language, customerCountry }) {
+  const lang = checkoutLanguage(language);
+  const copy = CHECKOUT_COPY[lang];
+  if (decision.action === "ask_program") return copy.askProgram;
+  if (decision.action === "ask_taste") return copy.askTaste;
+  if (decision.action === "ask_control") return copy.askControl;
+  if (decision.action === "ask_taste_and_control") return copy.askBoth;
+  if (decision.action === "technical_retry") return copy.technicalRetry;
+  if (decision.action === "technical_escalate") return copy.technicalEscalate;
+  if (decision.action === "payment_escalate") return copy.paymentEscalate;
+  if (decision.action === "portugal_control_unavailable") return copy.portugalControl;
+  if (decision.action === "resend_link") return copy.resend(decision.checkout_link);
+
+  const selection = formatCheckoutSelection({
+    language: lang,
+    customerCountry,
+    program: decision.program,
+    taste: decision.taste,
+    control: decision.control,
+  });
+  if (decision.action === "selection_unchanged") return copy.unchanged(selection);
+  if (decision.action === "send_replacement_link") {
+    return copy.replacement(selection, decision.checkout_link);
+  }
+  if (decision.action === "send_initial_link") {
+    const payment = (customerCountry || "").toUpperCase() === "FR"
+      ? decision.payment_mode === "france_4x"
+        ? copy.paymentFrance
+        : ""
+      : copy.paymentStandard;
+    return copy.initial(selection, decision.checkout_link, payment);
+  }
+  return "";
+}
+
+const PROGRAM_CHECKOUT_URL_PATTERN =
+  /https?:\/\/tr\.ee\/(?:basic|beauty|deluxe|exclusive)-(?:van|choc|mixte|mix)(?:-control)?(?:-4x-fr)?\b/gi;
+const CONTROL_ONLY_CHECKOUT_URL_PATTERN =
+  /https?:\/\/tr\.ee\/(?:control1x|control-4x-fr)\b/gi;
+
+function hasExplicitOneTimePaymentRequest(text) {
+  return /\b(in (?:één|een) keer|alles (?:in )?(?:één|een) keer|eenmalig|one[-\s]?time|in one (?:go|payment)|pay in full|single payment|en une seule fois|paiement unique|einmalig|auf einmal|in un['’]unica soluzione|pagamento unico|en un solo pago|pago [uú]nico|de uma s[oó] vez|pagamento [uú]nico|jednorazowo|jedna płatno[sś][cć])\b/i.test(
+    cleanText(text)
+  );
+}
+
+const MARKET_AVAILABILITY_COPY = {
+  nl: (product) => `${product} is helaas niet beschikbaar in België, dus daarvoor kan ik geen checkoutlink sturen.`,
+  en: (product) => `Unfortunately, ${product} isn't available in Belgium, so I can't send a checkout link for it.`,
+  fr: (product) => `Malheureusement, ${product} n’est pas disponible en Belgique, je ne peux donc pas envoyer de lien de commande pour ce produit.`,
+  de: (product) => `${product} ist in Belgien leider nicht erhältlich, deshalb kann ich dafür keinen Checkout-Link senden.`,
+  it: (product) => `Purtroppo ${product} non è disponibile in Belgio, quindi non posso inviare un link per l’ordine.`,
+  es: (product) => `${product} no está disponible en Bélgica, así que no puedo enviar un enlace de compra para este producto.`,
+  pt: (product) => `Infelizmente, ${product} não está disponível na Bélgica, por isso não posso enviar um link de checkout para este produto.`,
+  pl: (product) => `${product} nie jest dostępny w Belgii, dlatego nie mogę wysłać linku do zamówienia tego produktu.`,
+};
+
+// Final deterministic backstop for links generated inside a normal AI reply.
+// The earlier checkout decision path already handles most ordering turns; this
+// catches any link that still reaches the final reply and verifies all required
+// choices plus the country-specific link family before it is returned.
+function enforceCheckoutLinksInReply({
+  reply,
+  classification,
+  recentMessages,
+  customerCountry,
+  language,
+  currentMessage = "",
+}) {
+  const text = cleanReplyText(reply);
+  const country = (customerCountry || "UNKNOWN").toUpperCase();
+  const lang = checkoutLanguage(language);
+  const copy = CHECKOUT_COPY[lang];
+
+  const belgiumUnavailableLink = country === "BE"
+    ? text.match(
+        /https?:\/\/tr\.ee\/(superfood|bestellen-nl-superfoods|bestellen-nl-luminate(?:15|30)|bestellen-nl-soep30)(?:\b|\/|\?|$)/i
+      )
+    : null;
+  if (belgiumUnavailableLink) {
+    const slug = belgiumUnavailableLink[1].toLowerCase();
+    const product = slug.includes("luminate")
+      ? "Luminate"
+      : slug.includes("soep30")
+        ? "Complete Vegetable Soup 30p"
+        : "Superfood";
+    const unavailableCopy =
+      MARKET_AVAILABILITY_COPY[lang] || MARKET_AVAILABILITY_COPY.en;
+    return {
+      reply: unavailableCopy(product),
+      changed: true,
+      reason: "belgium_product_unavailable",
+    };
+  }
+
+  const controlOnlyLinks = text.match(CONTROL_ONLY_CHECKOUT_URL_PATTERN) || [];
+  if (controlOnlyLinks.length > 0) {
+    if (country === "PT") {
+      return {
+        reply: copy.portugalControl,
+        changed: true,
+        reason: "portugal_control_unavailable",
+      };
+    }
+    const requestedPaymentMode = cleanText(classification?.checkout_payment_mode);
+    const oneTimeExplicit =
+      requestedPaymentMode === "one_time" ||
+      hasExplicitOneTimePaymentRequest(currentMessage);
+    const expectedControlLink = country === "FR" && !oneTimeExplicit
+      ? "https://tr.ee/control-4x-fr"
+      : "https://tr.ee/Control1x";
+    const replacedControl = text.replace(
+      CONTROL_ONLY_CHECKOUT_URL_PATTERN,
+      expectedControlLink
+    );
+    if (replacedControl !== text) {
+      return {
+        reply: replacedControl,
+        changed: true,
+        reason: "control_link_country_corrected",
+      };
+    }
+  }
+
+  const programmeLinks = text.match(PROGRAM_CHECKOUT_URL_PATTERN) || [];
+  if (programmeLinks.length === 0) {
+    return { reply: text, changed: false, reason: "no_programme_link" };
+  }
+
+  const previousCheckoutLink = findLastEmmaCheckoutLink(recentMessages, "");
+  const previousSku = parseCheckoutLinkSKU(previousCheckoutLink);
+  const programme =
+    normalizeCheckoutProgram(classification?.checkout_program) ||
+    normalizeCheckoutProgram(previousSku?.program);
+  const taste =
+    normalizeCheckoutTaste(classification?.checkout_taste) ||
+    normalizeCheckoutTaste(previousSku?.taste);
+  const classifiedControl = normalizeCheckoutControl(
+    classification?.checkout_control
+  );
+
+  if (country === "PT" && classifiedControl === "yes") {
+    return {
+      reply: copy.portugalControl,
+      changed: true,
+      reason: "portugal_control_unavailable",
+    };
+  }
+
+  const control = country === "PT"
+    ? "unavailable"
+    : classifiedControl ||
+      (previousSku ? (previousSku.hasControl ? "yes" : "no") : "");
+  const ambiguousField = cleanText(classification?.checkout_ambiguous_field);
+
+  if (!programme || ambiguousField === "program") {
+    return { reply: copy.askProgram, changed: true, reason: "program_missing" };
+  }
+  if (
+    ambiguousField === "taste_and_control" ||
+    (!taste && !control && country !== "PT")
+  ) {
+    return {
+      reply: copy.askBoth,
+      changed: true,
+      reason: "taste_and_control_missing",
+    };
+  }
+  if (!taste || ambiguousField === "taste") {
+    return { reply: copy.askTaste, changed: true, reason: "taste_missing" };
+  }
+  if ((!control || ambiguousField === "control") && country !== "PT") {
+    return { reply: copy.askControl, changed: true, reason: "control_missing" };
+  }
+
+  const paymentMode = country === "FR"
+    ? cleanText(classification?.checkout_payment_mode) === "one_time" ||
+        hasExplicitOneTimePaymentRequest(currentMessage)
+      ? "one_time"
+      : previousSku?.paymentMode === "one_time" &&
+          cleanText(classification?.checkout_payment_mode) !== "france_4x"
+        ? "one_time"
+        : "france_4x"
+    : "one_time";
+  const expectedLink = resolveProgramCheckoutLink({
+    customerCountry: country,
+    program: programme,
+    taste,
+    control,
+    paymentMode,
+  });
+
+  if (!expectedLink) {
+    return {
+      reply: country === "PT" ? copy.portugalControl : copy.askBoth,
+      changed: true,
+      reason: "expected_link_unresolved",
+    };
+  }
+
+  const corrected = text.replace(PROGRAM_CHECKOUT_URL_PATTERN, expectedLink);
+  return {
+    reply: corrected,
+    changed: corrected !== text,
+    reason: corrected !== text ? "programme_link_corrected" : "programme_link_valid",
+  };
 }
 
 function userMessagesContainOrderNumber(messages, currentUserMessage) {
@@ -1026,17 +2016,17 @@ function deriveInterestedInControl(messages, currentUserMessage) {
   // Negative answers are deliberately returned as an empty update so they can
   // never be stored as positive interest.
   const positiveWithControl =
-    /(?:\b(?:ja|jazeker|graag|prima|zeker|doe\s*maa?r[ts]?|inderdaad|natuurlijk|oke|ok|yes|sure)\b.{0,40}\bcontrol\b|\bcontrol\b.{0,40}\b(?:ja|jazeker|graag|prima|zeker|doe\s*maa?r[ts]?|inderdaad|natuurlijk|oke|ok|yes|sure|erbij|toevoegen|nemen|wil|bestellen)\b)/i;
+    /(?:\b(?:ja|jazeker|graag|prima|zeker|doe\s*maa?r[ts]?|inderdaad|natuurlijk|oke|ok|yes|yeah|sure|please|oui|d['’]accord|bien s[uû]r|si|s[iíì]|certo|claro|sim|tak|dobrze|oczywi[sś]cie)\b.{0,50}\bcontrol\b|\bcontrol\b.{0,50}\b(?:ja|jazeker|graag|prima|zeker|doe\s*maa?r[ts]?|inderdaad|natuurlijk|oke|ok|yes|yeah|sure|please|oui|d['’]accord|bien s[uû]r|si|s[iíì]|certo|claro|sim|tak|dobrze|oczywi[sś]cie|erbij|toevoegen|nemen|wil|bestellen|add|ajouter|hinzuf[uü]gen|aggiungere|a[nñ]adir|adicionar|doda[cć])\b)/i;
   const negativeWithControl =
-    /(?:\b(?:nee|geen|zonder|liever\s+niet|laat\s+maar)\b.{0,40}\bcontrol\b|\bcontrol\b.{0,40}\b(?:nee|niet|geen|zonder|liever\s+niet|laat\s+maar)\b)/i;
+    /(?:\b(?:nee|geen|zonder|liever\s+niet|laat\s+maar|no|nope|without|non|sans|nein|ohne|senza|sin|n[aã]o|sem|nie|bez)\b.{0,50}\bcontrol\b|\bcontrol\b.{0,50}\b(?:nee|niet|geen|zonder|liever\s+niet|laat\s+maar|no|nope|without|non|sans|nein|ohne|senza|sin|n[aã]o|sem|nie|bez)\b)/i;
   const standalonePositive =
-    /^\s*(?:ja|jazeker|graag|prima|doe\s*maa?r[ts]?|inderdaad|natuurlijk|zeker|oke|ok|jep|yes|sure)(?:\s+(?:graag|zeker|prima|doe\s*maa?r[ts]?|natuurlijk))?\s*[.!]?\s*$/i;
+    /^\s*(?:ja|jazeker|graag|prima|doe\s*maa?r[ts]?|inderdaad|natuurlijk|zeker|ok[eé]?|jep|yes|yeah|sure|please|oui|d['’]accord|bien s[uû]r|si|s[iíì]|certo|claro|sim|tak|dobrze|oczywi[sś]cie)(?:\s+(?:graag|please|zeker|prima|doe\s*maa?r[ts]?|natuurlijk|sure|por favor))?\s*[.!]?\s*$/i;
   const standaloneNegative =
-    /^\s*(?:nee|nope|geen|niks)(?:,?\s*(?:dank\s*je(?:\s*wel)?|bedankt|laat\s+maar|hoor|joh))?\s*[.!]?\s*$/i;
+    /^\s*(?:nee|nope|geen|niks|no|non|nein|n[aã]o|nie)(?:,?\s*(?:dank\s*je(?:\s*wel)?|bedankt|thanks?|thank you|merci|danke|grazie|gracias|obrigad[oa]|dzi[eę]kuj[eę]|laat\s+maar|hoor|joh|por favor))?\s*[.!]?\s*$/i;
 
   let lastEmmaControlAsk = -1;
   const emmaControlQuestionPattern =
-    /control\s+(?:er\s*(?:gelijk\s+)?bij|toevoegen)|\book\s+control\b/i;
+    /(?:wil je|zou je|would you|do you want|souhaites-tu|veux-tu|m[oö]chtest du|willst du|vuoi|quieres|queres|czy chcesz).{0,80}\bcontrol\b|\bcontrol\b.{0,80}(?:erbij|toevoegen|add|ajouter|hinzuf[uü]gen|dazu|aggiungere|a[nñ]adir|adicionar|doda[cć]|\?)/i;
 
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
@@ -1151,16 +2141,11 @@ function detectState({
     );
 
   const hasPurchaseClaim =
-    /\b(besteld|order|ordernummer|betaald|gekocht|whatsapp.?groep|groep|toegang)\b/i.test(
+    /\b(besteld|order|ordernummer|betaald|gekocht|whatsapp.?groep|groep|toegang|ordered|order number|paid|bought|whatsapp group|access|command[eé]|num[eé]ro de commande|pay[eé]|achet[eé]|groupe whatsapp|acc[eè]s|bestellt|bestellnummer|bezahlt|gekauft|whatsapp-gruppe|zugang|ordinato|numero d['’]ordine|pagato|acquistato|gruppo whatsapp|accesso|pedido|n[uú]mero (?:del pedido|da encomenda|do pedido)|pagado|pago|comprado|grupo (?:de )?whatsapp|acceso|acesso|zam[oó]wion|numer zam[oó]wienia|zapłacon|kupion|grupa whatsapp|dost[eę]p)\b/i.test(
       latest
     );
   const hasExplicitBuyingIntent =
-    /\b(bestellen|starten|ik wil starten|hoe bestel|link|kopen|aanschaffen|doorgaan)\b/i.test(
-      latest
-    );
-
-  const lowIntent =
-    /^(ok|oke|ja|nee|weet niet|misschien|kan|vertel maar|hoe bedoel je|prima|goed|klinkt goed)\.?$/i.test(
+    /\b(bestellen|starten|ik wil starten|hoe bestel|link|kopen|aanschaffen|doorgaan|order|start|how (?:do|can) i order|buy|purchase|send (?:me )?the link|commander|commencer|acheter|envoie(?:-moi)? le lien|bestellen|anfangen|kaufen|schick mir den link|ordinare|iniziare|comprare|invia il link|pedir|empezar|comprar|env[ií]a(?:me)? el enlace|encomendar|come[cç]ar|comprar|envia(?:-me)? o link|zam[oó]wi[cć]|zaczą[cć]|kupi[cć]|wy[sś]lij link)\b/i.test(
       latest
     );
 
@@ -1175,7 +2160,6 @@ function detectState({
     has_medical_trigger: hasMedicalTrigger,
     has_purchase_claim: hasPurchaseClaim,
     has_explicit_buying_intent: hasExplicitBuyingIntent,
-    is_low_intent: lowIntent,
     is_validated_customer: isValidatedCustomer,
     should_use_coaching_mode: isValidatedCustomer,
     current_phase: isValidatedCustomer ? "coaching" : cleanText(currentPhase),
@@ -1293,6 +2277,7 @@ function buildContextBlock({
     recent_conversation_history: recent_messages.map((msg) => ({
       role: msg.role,
       message_text: clamp(msg.message_text, MAX_MESSAGE_CHARS),
+      timestamp: cleanText(msg.timestamp),
     })),
     repetition_guard: {
       do_not_repeat_these_recent_emma_messages: lastEmmaMessages,
@@ -1305,14 +2290,14 @@ function buildContextBlock({
         "Als iets al bekend is uit goal, objections, last_summary of recent_conversation_history: vraag er niet opnieuw naar.",
         "Als het gesprek bestaand is: stel jezelf niet opnieuw voor en gebruik geen startbericht.",
         "Zeg NOOIT welkom terug, goed dat je er weer bent of iets vergelijkbaars, en maak nooit opmerkingen over verstreken tijd. Begin altijd direct met je antwoord, alsof het gesprek gewoon doorloopt.",
-        "Vraag NOOIT of de klant er nog is en jaag nooit op (geen Ben je er nog, Lukt het, Heb je al gekeken). Een emoji of kort bericht is een gewoon bericht: reageer er kort en warm op. Follow-ups gebeuren handmatig, nooit door jou.",
+        "Vraag NOOIT of de klant er nog is en jaag nooit op. Beoordeel een emoji of kort bericht uitsluitend vanuit de volledige gesprekscontext. Na een aangekondigde pauze opent een afsluitende bevestiging het gesprek niet opnieuw; de server handelt die beurt zelf af met alleen een groen hart. Follow-ups gebeuren handmatig, nooit door jou.",
         "Als website_link_already_sent true is: stuur de website-link en het freebies-blok NOOIT opnieuw, tenzij de klant er expliciet om vraagt. Geef bij twijfel kort persoonlijk advies in eigen woorden, zonder link.",
         "Als testimonials_link_already_sent true is: stuur de testimonials-link NIET opnieuw, tenzij de klant er expliciet om vraagt — verwijs in woorden naar de resultatenpagina.",
         "Als programma_info_link_already_sent true is: stuur de programma-uitleg link NIET opnieuw, tenzij de klant er expliciet om vraagt.",
         "Uitleggen betekent uitleggen in eigen woorden. Een link sturen is geen uitleg; stuur nooit een eerder gestuurde link opnieuw als vervanging van uitleg.",
         "Als price_already_mentioned true is: noem de prijs niet opnieuw, tenzij de klant ernaar vraagt.",
         "Vraag NOOIT naar het land van de klant. De checkout-links zijn universeel en openen automatisch in het juiste land met de juiste prijzen.",
-        "Als checkout_link_already_sent true is: stuur geen nieuwe checkout-link, tenzij de klant er expliciet opnieuw om vraagt.",
+        "Als checkout_link_already_sent true is: stuur geen nieuwe checkout-link, tenzij de klant er expliciet opnieuw om vraagt of expliciet een andere programma-, smaak- of Control-keuze maakt. Bij een gewijzigde keuze stuur je alleen de korte vervangende linkreactie zonder freebiesblok of betaaluitleg.",
         "Als whatsapp_group_link_already_sent true is: behandel de klant als gevalideerde klant en ga over naar coachingsmodus.",
         "In coachingsmodus: 100% coaching. Geen salesflow, geen prijs, geen checkout, geen upsell en geen productaanbevelingen uit jezelf. Verkoop alleen wanneer de klant er expliciet zelf om vraagt (bijvoorbeeld naar een specifiek product of als reactie op een broadcast-bericht). De WhatsApp-groep link alleen opnieuw delen als de klant er expliciet om vraagt.",
         "Ordervalidatie wordt server-side uitgevoerd. Emma mag nooit zelf een ordernummer goedkeuren of de WhatsApp-link zelfstandig delen.",
@@ -1397,6 +2382,487 @@ function extractOutputText(response) {
   }
 
   return "";
+}
+
+/* --------------- OPENAI PAUSE + INTAKE STATE CLASSIFIER ---------------- */
+
+async function classifyConversationPause({
+  message,
+  recentMessages,
+  currentGoal,
+  currentLastSummary,
+  currentPhase,
+  customerStatus,
+  conversationLanguage,
+  requestId,
+  requestStartMs,
+}) {
+  const fallback = {
+    pause_context_active: false,
+    current_message_type: "other",
+    pause_anchor_id: "",
+    confidence: "low",
+    intake_context_active: false,
+    goal_context_clear: false,
+    challenge_context_clear: false,
+    checklist_sent: false,
+    checklist_response_type: "not_applicable",
+    direct_testimonials_request: false,
+    suggested_follow_up: "",
+    intake_confidence: "low",
+  };
+
+  if (!openai || !Array.isArray(recentMessages) || recentMessages.length === 0) {
+    return fallback;
+  }
+
+  const schema = {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      pause_context_active: { type: "boolean" },
+      current_message_type: {
+        type: "string",
+        enum: [
+          "closing_acknowledgement",
+          "substantive",
+          "pause_announcement",
+          "other",
+        ],
+      },
+      pause_anchor_id: { type: "string" },
+      confidence: {
+        type: "string",
+        enum: ["high", "medium", "low"],
+      },
+      intake_context_active: { type: "boolean" },
+      goal_context_clear: { type: "boolean" },
+      challenge_context_clear: { type: "boolean" },
+      checklist_sent: { type: "boolean" },
+      checklist_response_type: {
+        type: "string",
+        enum: [
+          "meaningful_details",
+          "explicit_no_more",
+          "bare_acknowledgement",
+          "question_or_objection",
+          "cannot_elaborate",
+          "not_applicable",
+        ],
+      },
+      direct_testimonials_request: { type: "boolean" },
+      suggested_follow_up: { type: "string" },
+      intake_confidence: {
+        type: "string",
+        enum: ["high", "medium", "low"],
+      },
+    },
+    required: [
+      "pause_context_active",
+      "current_message_type",
+      "pause_anchor_id",
+      "confidence",
+      "intake_context_active",
+      "goal_context_clear",
+      "challenge_context_clear",
+      "checklist_sent",
+      "checklist_response_type",
+      "direct_testimonials_request",
+      "suggested_follow_up",
+      "intake_confidence",
+    ],
+  };
+
+  const systemPrompt = [
+    "You are a strict multilingual conversation-state classifier for a WhatsApp health coach. You classify both temporary pauses and the early intake before testimonials.",
+    "Do not reply to the customer. Return only the JSON required by the schema.",
+    "Interpret the semantic meaning of the complete exchange in any language. Do not decide by matching isolated words, phrases, emojis, or a vocabulary list.",
+    "pause_context_active is true when the current message contextually belongs to a previously announced temporary pause, especially when it merely closes or acknowledges that pause exchange.",
+    "Classify the current customer message as closing_acknowledgement when it only acknowledges or closes that pause exchange and contains no new question, information, decision, or request that needs an answer.",
+    "Classify it as substantive when it adds content that needs an answer, clearly resumes the discussion, or answers an unresolved sales or checkout question. An answer to an open product, taste, Control, payment, or order question is always substantive, even when very short.",
+    "Classify it as pause_announcement when the current message itself announces that the customer is stopping now and will continue later.",
+    "pause_anchor_id must be the exact id of the most recent customer history message that contextually announced the temporary pause. Return an empty string when no such announcement is relevant. Keep returning that anchor for substantive messages received within 30 minutes of it, so the server can prevent an immediate sales-flow restart. For a closing acknowledgement that still belongs to the pause exchange, return the anchor even when more than 30 minutes have passed.",
+    "Use other when none of the categories is established. If the context is genuinely ambiguous, use low confidence.",
+    "A short message or emoji is never enough by itself to establish a pause or closing acknowledgement; its role must follow from the surrounding conversation.",
+    "For intake, intake_context_active is true only for a lead in the welcome/intake/checklist stage before the testimonials have been sent. It is false for validated customers and later sales, checkout or coaching exchanges.",
+    "goal_context_clear is true only when the customer's desired health change or outcome is clear enough to reflect accurately in your own words. A greeting, request for information, emoji, loose fact or very broad wish with no usable direction is not enough.",
+    "challenge_context_clear is true only when the customer's main current obstacle, symptom, struggle, pattern or relevant failed approach is clear enough to understand what makes the goal difficult. Repeating only the goal does not establish the challenge.",
+    "Use the complete conversation plus CRM goal and summary. Message length never decides readiness: one rich answer may establish both fields, while several short answers may still establish neither.",
+    "checklist_sent is true only when Emma has actually sent the mandatory personalised Step 2 health checklist before the current message. This may be a suggestion checklist with check marks or, when everything was already known, a check-marked confirmation summary. Do not confuse it with a freebies, programme, price or checkout list.",
+    "When checklist_sent is true, classify the current customer response as meaningful_details if it adds or specifically confirms relevant information; explicit_no_more if it clearly says there is nothing else or the information already shared is the main issue; bare_acknowledgement if it only acknowledges or thanks without answering the checklist; question_or_objection if it asks something or raises a concern that must be answered first; cannot_elaborate if the customer says they do not know, cannot explain or do not want to elaborate; otherwise not_applicable.",
+    "When checklist_sent is false, use cannot_elaborate only when the current customer message contextually says they cannot or do not want to explain the missing intake information. Otherwise checklist_response_type is not_applicable.",
+    "direct_testimonials_request is true only when the current customer explicitly asks to see customer results, experiences, stories or the testimonials page/link. Do not infer this from general curiosity or a request for product information. Before the checklist this request does not bypass intake; it only permits a resend when the testimonials were already shared earlier.",
+    `suggested_follow_up must be one short, natural question in ${LANGUAGE_NAMES[conversationLanguage] || "the conversation language"} only when the goal is missing, the challenge is missing, or a bare checklist acknowledgement needs clarification. Ask for only the one missing thing, never claim that much is already known, and do not use an emoji or emoticon. Otherwise return an empty string.`,
+    "If the intake state is genuinely ambiguous, use low intake_confidence. Never invent a goal, challenge, checklist or meaningful answer.",
+  ].join("\n");
+
+  const history = recentMessages.slice(-20).map((msg, index) => ({
+    id: `history_${index + 1}`,
+    role: msg.role || "unknown",
+    message_text: clamp(msg.message_text, 400),
+    timestamp: cleanText(msg.timestamp),
+  }));
+  const userPayload = {
+    conversation_language: cleanText(conversationLanguage) || "nl",
+    customer_status: cleanText(customerStatus),
+    current_phase: cleanText(currentPhase),
+    crm_goal: clamp(currentGoal, MAX_GOAL_CHARS),
+    crm_last_summary: clamp(currentLastSummary, MAX_SUMMARY_CHARS),
+    recent_conversation: history,
+    current_customer_message: {
+      id: "current",
+      role: "user",
+      message_text: clamp(message, 1000),
+      received_at: new Date(requestStartMs || Date.now()).toISOString(),
+    },
+  };
+
+  const controller = new AbortController();
+  const timeoutMs = Number.isFinite(PAUSE_CLASSIFIER_TIMEOUT_MS)
+    ? Math.max(250, PAUSE_CLASSIFIER_TIMEOUT_MS)
+    : 5000;
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const startedAt = Date.now();
+  const model =
+    process.env.OPENAI_PAUSE_MODEL ||
+    process.env.OPENAI_EXTRACTION_MODEL ||
+    "gpt-4o-mini";
+
+  console.log(
+    JSON.stringify({
+      diag: true,
+      request_id: requestId,
+      event: "PAUSE_CLASSIFIER_START",
+      elapsed_ms: requestStartMs ? startedAt - requestStartMs : null,
+      timestamp_ms: startedAt,
+      model,
+      history_count: history.length,
+      timestamps_present: history.filter((item) => item.timestamp).length,
+    })
+  );
+
+  try {
+    const response = await openai.responses.create(
+      {
+        model,
+        store: false,
+        input: [
+          {
+            role: "system",
+            content: [{ type: "input_text", text: systemPrompt }],
+          },
+          {
+            role: "user",
+            content: [{ type: "input_text", text: JSON.stringify(userPayload) }],
+          },
+        ],
+        text: {
+          format: {
+            type: "json_schema",
+            name: "conversation_pause_state",
+            strict: true,
+            schema,
+          },
+        },
+      },
+      { signal: controller.signal }
+    );
+
+    const rawText = extractOutputText(response);
+    const parsed = safeJsonParse(rawText);
+    const messageTypes = new Set([
+      "closing_acknowledgement",
+      "substantive",
+      "pause_announcement",
+      "other",
+    ]);
+    const confidenceLevels = new Set(["high", "medium", "low"]);
+    const checklistResponseTypes = new Set(
+      schema.properties.checklist_response_type.enum
+    );
+    const result = {
+      pause_context_active: parsed?.pause_context_active === true,
+      current_message_type: messageTypes.has(parsed?.current_message_type)
+        ? parsed.current_message_type
+        : "other",
+      pause_anchor_id: /^history_\d+$/.test(cleanText(parsed?.pause_anchor_id))
+        ? cleanText(parsed.pause_anchor_id)
+        : "",
+      confidence: confidenceLevels.has(parsed?.confidence)
+        ? parsed.confidence
+        : "low",
+      intake_context_active: parsed?.intake_context_active === true,
+      goal_context_clear: parsed?.goal_context_clear === true,
+      challenge_context_clear: parsed?.challenge_context_clear === true,
+      checklist_sent: parsed?.checklist_sent === true,
+      checklist_response_type: checklistResponseTypes.has(
+        parsed?.checklist_response_type
+      )
+        ? parsed.checklist_response_type
+        : "not_applicable",
+      direct_testimonials_request:
+        parsed?.direct_testimonials_request === true,
+      suggested_follow_up: clamp(parsed?.suggested_follow_up, 240),
+      intake_confidence: confidenceLevels.has(parsed?.intake_confidence)
+        ? parsed.intake_confidence
+        : "low",
+    };
+
+    console.log(
+      JSON.stringify({
+        diag: true,
+        request_id: requestId,
+        event: "PAUSE_CLASSIFIER_COMPLETE",
+        elapsed_ms: requestStartMs ? Date.now() - requestStartMs : null,
+        timestamp_ms: Date.now(),
+        duration_ms: Date.now() - startedAt,
+        ...result,
+      })
+    );
+
+    return result;
+  } catch (error) {
+    console.error("PAUSE CLASSIFIER ERROR:", error?.message || error);
+    console.log(
+      JSON.stringify({
+        diag: true,
+        request_id: requestId,
+        event: "PAUSE_CLASSIFIER_ERROR",
+        elapsed_ms: requestStartMs ? Date.now() - requestStartMs : null,
+        timestamp_ms: Date.now(),
+        duration_ms: Date.now() - startedAt,
+        error_message: error?.message || String(error),
+      })
+    );
+    return fallback;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/* --------------------- OPENAI CHECKOUT CLASSIFIER ---------------------- */
+
+async function classifyCheckoutState({
+  message,
+  recentMessages,
+  customerCountry,
+  requestId,
+  requestStartMs,
+}) {
+  const fallback = {
+    checkout_context_active: false,
+    checkout_message_type: "other",
+    checkout_program: "",
+    checkout_taste: "",
+    checkout_control: "",
+    checkout_payment_mode: "unknown",
+    checkout_ambiguous_field: "none",
+    checkout_confidence: "low",
+  };
+
+  if (!openai || !Array.isArray(recentMessages) || recentMessages.length === 0) {
+    return fallback;
+  }
+
+  const schema = {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      checkout_context_active: { type: "boolean" },
+      checkout_message_type: {
+        type: "string",
+        enum: [
+          "selection_update",
+          "selection_ambiguous",
+          "link_resend_request",
+          "technical_cart_issue",
+          "technical_issue_persisting",
+          "payment_status_uncertain",
+          "question_or_objection",
+          "other",
+        ],
+      },
+      checkout_program: {
+        type: "string",
+        enum: ["Basic", "Beauty", "Deluxe", "Exclusive", ""],
+      },
+      checkout_taste: {
+        type: "string",
+        enum: ["vanilla", "chocolate", "mix", ""],
+      },
+      checkout_control: {
+        type: "string",
+        enum: ["yes", "no", "unavailable", ""],
+      },
+      checkout_payment_mode: {
+        type: "string",
+        enum: ["france_4x", "one_time", "unknown"],
+      },
+      checkout_ambiguous_field: {
+        type: "string",
+        enum: ["program", "taste", "control", "taste_and_control", "none"],
+      },
+      checkout_confidence: {
+        type: "string",
+        enum: ["high", "medium", "low"],
+      },
+    },
+    required: [
+      "checkout_context_active",
+      "checkout_message_type",
+      "checkout_program",
+      "checkout_taste",
+      "checkout_control",
+      "checkout_payment_mode",
+      "checkout_ambiguous_field",
+      "checkout_confidence",
+    ],
+  };
+
+  const systemPrompt = [
+    "You are a strict multilingual checkout-state classifier for a WhatsApp health coach.",
+    "Do not reply to the customer. Return only the JSON required by the schema.",
+    "Interpret the complete conversation semantically in any language. Do not decide from isolated words or a language-specific vocabulary list.",
+    "This classifier only manages checkout for the Complete programmes Basic, Beauty, Deluxe and Exclusive. For unrelated products or ordinary sales discussion, return checkout_context_active false and other.",
+    "checkout_context_active is true only when the customer is clearly in an ordering/checkout exchange, changes a selection after receiving a checkout link, asks for that checkout link again, or reports a technical problem with that checkout/payment.",
+    "Return the customer's CURRENT intended programme, Complete taste and Control choice after applying the newest explicit change. The newest explicit customer choice overrides every older choice.",
+    "When only one selection changes, preserve the other selections from the established conversation or the last_checkout_selection. Never silently erase an unchanged selection.",
+    "Never infer an unanswered choice. If a required choice is missing, return an empty string. A vague or ambiguous answer uses selection_ambiguous and identifies only the ambiguous field.",
+    "selection_update means the current customer message explicitly chooses, answers or changes at least one checkout selection. question_or_objection means the customer asks for information or expresses doubt and needs a normal answer before checkout can advance.",
+    "link_resend_request means the customer explicitly asks to receive the same checkout link again, for example because it was lost.",
+    "technical_cart_issue means the cart or checkout page does not open/load correctly and the customer has not yet been given the close-browser-and-reopen-link instruction in the supplied history.",
+    "technical_issue_persisting means that instruction was already given and the customer says the cart or checkout still does not work.",
+    "payment_status_uncertain means the customer may already have attempted payment and it is unclear whether money was charged or the order/payment completed. Never classify this as a simple cart-opening issue.",
+    "For customer_country PT, Control is unavailable: use unavailable unless the current customer explicitly tries to add Control, in which case return yes so the server can explain that it cannot be added.",
+    "For customer_country FR, france_4x is the default. Use one_time only when the customer explicitly chose payment in one go or the last checkout selection was already one_time and the customer only changes another selection.",
+    "For every country outside FR use one_time. This field describes the checkout-link family, not whether Klarna is used inside the universal checkout.",
+    "If context is incomplete or genuinely uncertain, use low confidence. Do not invent a programme, taste, Control answer or technical problem.",
+  ].join("\n");
+
+  const history = recentMessages.slice(-20).map((msg, index) => ({
+    id: `history_${index + 1}`,
+    role: msg.role || "unknown",
+    message_text: clamp(msg.message_text, 500),
+    timestamp: cleanText(msg.timestamp),
+  }));
+  const previousCheckoutLink = findLastEmmaCheckoutLink(recentMessages, "");
+  const previousCheckoutSelection = parseCheckoutLinkSKU(previousCheckoutLink);
+  const userPayload = {
+    customer_country: (customerCountry || "UNKNOWN").toUpperCase(),
+    last_checkout_link: previousCheckoutLink,
+    last_checkout_selection: previousCheckoutSelection || null,
+    recent_conversation: history,
+    current_customer_message: {
+      role: "user",
+      message_text: clamp(message, 1000),
+      received_at: new Date(requestStartMs || Date.now()).toISOString(),
+    },
+  };
+
+  const controller = new AbortController();
+  const timeoutMs = Number.isFinite(CHECKOUT_CLASSIFIER_TIMEOUT_MS)
+    ? Math.max(250, CHECKOUT_CLASSIFIER_TIMEOUT_MS)
+    : 6000;
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const startedAt = Date.now();
+  const model =
+    process.env.OPENAI_CHECKOUT_MODEL ||
+    process.env.OPENAI_EXTRACTION_MODEL ||
+    "gpt-4o-mini";
+
+  console.log(
+    JSON.stringify({
+      diag: true,
+      request_id: requestId,
+      event: "CHECKOUT_CLASSIFIER_START",
+      elapsed_ms: requestStartMs ? startedAt - requestStartMs : null,
+      timestamp_ms: startedAt,
+      model,
+      history_count: history.length,
+      has_previous_checkout_link: Boolean(previousCheckoutLink),
+    })
+  );
+
+  try {
+    const response = await openai.responses.create(
+      {
+        model,
+        store: false,
+        input: [
+          {
+            role: "system",
+            content: [{ type: "input_text", text: systemPrompt }],
+          },
+          {
+            role: "user",
+            content: [{ type: "input_text", text: JSON.stringify(userPayload) }],
+          },
+        ],
+        text: {
+          format: {
+            type: "json_schema",
+            name: "checkout_conversation_state",
+            strict: true,
+            schema,
+          },
+        },
+      },
+      { signal: controller.signal }
+    );
+
+    const parsed = safeJsonParse(extractOutputText(response));
+    const messageTypes = new Set(schema.properties.checkout_message_type.enum);
+    const paymentModes = new Set(schema.properties.checkout_payment_mode.enum);
+    const ambiguousFields = new Set(schema.properties.checkout_ambiguous_field.enum);
+    const confidenceLevels = new Set(schema.properties.checkout_confidence.enum);
+    const result = {
+      checkout_context_active: parsed?.checkout_context_active === true,
+      checkout_message_type: messageTypes.has(parsed?.checkout_message_type)
+        ? parsed.checkout_message_type
+        : "other",
+      checkout_program: normalizeCheckoutProgram(parsed?.checkout_program),
+      checkout_taste: normalizeCheckoutTaste(parsed?.checkout_taste),
+      checkout_control: normalizeCheckoutControl(parsed?.checkout_control),
+      checkout_payment_mode: paymentModes.has(parsed?.checkout_payment_mode)
+        ? parsed.checkout_payment_mode
+        : "unknown",
+      checkout_ambiguous_field: ambiguousFields.has(parsed?.checkout_ambiguous_field)
+        ? parsed.checkout_ambiguous_field
+        : "none",
+      checkout_confidence: confidenceLevels.has(parsed?.checkout_confidence)
+        ? parsed.checkout_confidence
+        : "low",
+    };
+
+    console.log(
+      JSON.stringify({
+        diag: true,
+        request_id: requestId,
+        event: "CHECKOUT_CLASSIFIER_COMPLETE",
+        elapsed_ms: requestStartMs ? Date.now() - requestStartMs : null,
+        timestamp_ms: Date.now(),
+        duration_ms: Date.now() - startedAt,
+        ...result,
+      })
+    );
+    return result;
+  } catch (error) {
+    console.error("CHECKOUT CLASSIFIER ERROR:", error?.message || error);
+    console.log(
+      JSON.stringify({
+        diag: true,
+        request_id: requestId,
+        event: "CHECKOUT_CLASSIFIER_ERROR",
+        elapsed_ms: requestStartMs ? Date.now() - requestStartMs : null,
+        timestamp_ms: Date.now(),
+        duration_ms: Date.now() - startedAt,
+        error_message: error?.message || String(error),
+      })
+    );
+    return fallback;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /* -------------------------- OPENAI CRM EXTRACTION ------------------------- */
@@ -1626,6 +3092,222 @@ async function getStructuredUpdates({
   }
 }
 
+/* ------------------------- INTAKE TURN ENFORCEMENT ------------------------- */
+
+function buildIntakeTurnGuard({ decision, classification }) {
+  const action = cleanText(decision?.action);
+  const commonHold =
+    "Stuur deze beurt GEEN testimonials-link en ga nog niet naar Stap 3.";
+
+  if (
+    action === "allow_testimonials" ||
+    action === "allow_testimonials_resend"
+  ) {
+    return action === "allow_testimonials_resend"
+      ? "De klant vraagt nu expliciet opnieuw om de testimonials. Je mag de testimonials-link deze beurt opnieuw sturen."
+      : "Alle contextuele voorwaarden voor Stap 3 zijn bevestigd. Je mag nu het vaste testimonialbericht sturen.";
+  }
+
+  if (action === "testimonials_already_sent") {
+    return "De testimonials zijn al gedeeld en de klant vraagt niet expliciet om de link. Stuur de link niet opnieuw.";
+  }
+
+  if (action === "ask_goal") {
+    return [
+      commonHold,
+      "Het doel van de klant is nog niet contextueel duidelijk genoeg.",
+      "Reageer warm op alleen wat echt bekend is en stel precies één korte, makkelijke vraag naar wat de klant wil veranderen of bereiken.",
+      'Zeg niet "hier kan ik al veel mee" en stuur de checklist nog niet.',
+      cleanText(classification?.suggested_follow_up)
+        ? `Passende vervolgvraag: ${cleanText(classification.suggested_follow_up)}`
+        : "",
+    ]
+      .filter(Boolean)
+      .join("\n");
+  }
+
+  if (action === "ask_challenge") {
+    return [
+      commonHold,
+      "Het doel is duidelijk, maar de grootste huidige uitdaging nog niet.",
+      "Bevestig het bekende doel kort en stel precies één makkelijke vraag naar wat dit doel nu vooral lastig maakt.",
+      'Zeg niet "hier kan ik al veel mee" en stuur de checklist nog niet.',
+      cleanText(classification?.suggested_follow_up)
+        ? `Passende vervolgvraag: ${cleanText(classification.suggested_follow_up)}`
+        : "",
+    ]
+      .filter(Boolean)
+      .join("\n");
+  }
+
+  if (action === "send_checklist" || action === "send_checklist_support") {
+    return [
+      commonHold,
+      action === "send_checklist_support"
+        ? "De klant kan of wil de ontbrekende informatie niet verder uitleggen. Gebruik nu het verplichte Stap 2-checklistbericht als vriendelijke herkenningshulp, zonder te doen alsof je al genoeg weet."
+        : "Doel en grootste uitdaging zijn duidelijk, maar het verplichte Stap 2-checklistbericht is nog niet verstuurd. Stuur dat bericht nu.",
+      "Maak de checklist contextueel: verwijder elke suggestie die de klant inhoudelijk al heeft genoemd, ook als daardoor maar één suggestie overblijft.",
+      "Zijn alle suggesties al bekend, gebruik dan een korte ✅ bevestigingschecklist met uitsluitend werkelijk gedeelde informatie en vraag alleen of er nog iets ontbreekt.",
+      "Voeg nooit een bekend onderwerp opnieuw toe om de lijst langer te maken.",
+    ].join("\n");
+  }
+
+  if (action === "clarify_checklist") {
+    return [
+      commonHold,
+      "De klant stuurde alleen een contextuele bevestiging of bedankje na de checklist; dit is geen inhoudelijk checklistantwoord.",
+      "Stel precies één korte, natuurlijke vraag of de klant nog iets uit de checklist herkent of dat het eerder gedeelde het belangrijkste is.",
+      cleanText(classification?.suggested_follow_up)
+        ? `Passende vervolgvraag: ${cleanText(classification.suggested_follow_up)}`
+        : "",
+    ]
+      .filter(Boolean)
+      .join("\n");
+  }
+
+  if (action === "answer_and_hold") {
+    return [
+      commonHold,
+      "De klant heeft een actuele vraag of een bezwaar. Beantwoord dat eerst kort en behulpzaam.",
+      "Combineer het antwoord niet met testimonials en duw de salesflow deze beurt niet verder.",
+    ].join("\n");
+  }
+
+  if (action === "hold_without_pressure") {
+    return [
+      commonHold,
+      "De klant kan of wil nu niet verder toelichten. Respecteer dat, reageer kort en warm en stel niet opnieuw dezelfde intakevraag.",
+    ].join("\n");
+  }
+
+  if (action === "hold_uncertain" || action === "hold_intake") {
+    return [
+      commonHold,
+      "De server kon niet betrouwbaar bevestigen dat alle intakevoorwaarden zijn voltooid. Blijf bij de huidige inhoud en ga alleen verder volgens Stap 2.",
+    ].join("\n");
+  }
+
+  return "";
+}
+
+const INTAKE_RECOVERY_REPLIES = {
+  nl: {
+    ask_goal: "Wat zou je op dit moment het liefst willen veranderen of bereiken? 😊",
+    ask_challenge: "Wat maakt dat op dit moment vooral lastig voor je? 😊",
+    clarify_checklist:
+      "Herken je nog iets uit het lijstje, of is wat je al vertelde het belangrijkste voor je? 😊",
+    send_checklist:
+      "Dankjewel voor het delen 🙏 Is er naast wat je al vertelde nog iets dat belangrijk is om mee te nemen? 😊",
+    hold: "Dankjewel voor het delen 🙏",
+  },
+  en: {
+    ask_goal: "What would you most like to change or achieve right now? 😊",
+    ask_challenge: "What is making that especially difficult for you right now? 😊",
+    clarify_checklist:
+      "Do you recognise anything else from the list, or is what you already shared the main thing for you? 😊",
+    send_checklist:
+      "Thank you for sharing that 🙏 Is there anything else that feels important to include? 😊",
+    hold: "Thank you for sharing that 🙏",
+  },
+  fr: {
+    ask_goal: "Qu’aimerais-tu surtout changer ou atteindre en ce moment ? 😊",
+    ask_challenge: "Qu’est-ce qui rend cela surtout difficile pour toi en ce moment ? 😊",
+    clarify_checklist:
+      "Est-ce que tu te reconnais dans un autre point de la liste, ou est-ce que ce que tu as déjà partagé est le plus important pour toi ? 😊",
+    send_checklist:
+      "Merci de l’avoir partagé 🙏 Y a-t-il autre chose d’important à prendre en compte ? 😊",
+    hold: "Merci de l’avoir partagé 🙏",
+  },
+  de: {
+    ask_goal: "Was möchtest du im Moment am liebsten verändern oder erreichen? 😊",
+    ask_challenge: "Was macht das im Moment besonders schwierig für dich? 😊",
+    clarify_checklist:
+      "Erkennst du dich noch in einem Punkt aus der Liste wieder, oder ist das, was du schon erzählt hast, für dich das Wichtigste? 😊",
+    send_checklist:
+      "Danke, dass du das geteilt hast 🙏 Gibt es noch etwas, das wir unbedingt berücksichtigen sollten? 😊",
+    hold: "Danke, dass du das geteilt hast 🙏",
+  },
+  it: {
+    ask_goal: "Che cosa vorresti soprattutto cambiare o raggiungere in questo momento? 😊",
+    ask_challenge: "Che cosa rende questo obiettivo particolarmente difficile per te in questo momento? 😊",
+    clarify_checklist:
+      "Ti riconosci in qualche altro punto dell’elenco, oppure ciò che hai già raccontato è la cosa più importante per te? 😊",
+    send_checklist:
+      "Grazie per averlo condiviso 🙏 C’è qualcos’altro di importante da tenere in considerazione? 😊",
+    hold: "Grazie per averlo condiviso 🙏",
+  },
+  es: {
+    ask_goal: "¿Qué es lo que más te gustaría cambiar o conseguir ahora mismo? 😊",
+    ask_challenge: "¿Qué es lo que hace que eso te resulte especialmente difícil ahora mismo? 😊",
+    clarify_checklist:
+      "¿Te identificas con algún otro punto de la lista o lo que ya contaste es lo más importante para ti? 😊",
+    send_checklist:
+      "Gracias por compartirlo 🙏 ¿Hay algo más importante que debamos tener en cuenta? 😊",
+    hold: "Gracias por compartirlo 🙏",
+  },
+  pt: {
+    ask_goal: "O que gostarias mais de mudar ou alcançar neste momento? 😊",
+    ask_challenge: "O que está a tornar isso especialmente difícil para ti neste momento? 😊",
+    clarify_checklist:
+      "Identificas-te com mais algum ponto da lista ou o que já partilhaste é o mais importante para ti? 😊",
+    send_checklist:
+      "Obrigada por partilhares 🙏 Há mais alguma coisa importante que devamos ter em conta? 😊",
+    hold: "Obrigada por partilhares 🙏",
+  },
+  pl: {
+    ask_goal: "Co najbardziej chciałabyś teraz zmienić lub osiągnąć? 😊",
+    ask_challenge: "Co sprawia, że jest to teraz dla Ciebie szczególnie trudne? 😊",
+    clarify_checklist:
+      "Czy rozpoznajesz u siebie coś jeszcze z tej listy, czy najważniejsze jest to, o czym już napisałaś? 😊",
+    send_checklist:
+      "Dziękuję, że się tym podzieliłaś 🙏 Czy jest jeszcze coś ważnego, co powinnam uwzględnić? 😊",
+    hold: "Dziękuję, że się tym podzieliłaś 🙏",
+  },
+};
+
+function enforceTestimonialsGate({
+  reply,
+  intakeDecision,
+  intakeClassification,
+  language,
+}) {
+  const text = cleanReplyText(reply);
+  if (!TESTIMONIALS_LINK_PATTERN.test(text)) {
+    return { reply: text, blocked: false };
+  }
+
+  if (intakeDecision?.testimonials_allowed === true) {
+    return { reply: text, blocked: false };
+  }
+
+  const action = cleanText(intakeDecision?.action);
+  if (action === "testimonials_already_sent") {
+    const withoutLink = cleanReplyText(
+      text.replace(/https?:\/\/nutritionworks\.online\/?#testimonials\S*/gi, "")
+    );
+    return {
+      reply:
+        withoutLink ||
+        (INTAKE_RECOVERY_REPLIES[language] || INTAKE_RECOVERY_REPLIES.nl).hold,
+      blocked: true,
+    };
+  }
+
+  const messages =
+    INTAKE_RECOVERY_REPLIES[language] || INTAKE_RECOVERY_REPLIES.nl;
+  const suggested = cleanReplyText(intakeClassification?.suggested_follow_up);
+  let recovery = "";
+  if (["ask_goal", "ask_challenge", "clarify_checklist"].includes(action)) {
+    recovery = suggested || messages[action];
+  } else if (["send_checklist", "send_checklist_support"].includes(action)) {
+    recovery = messages.send_checklist;
+  } else {
+    recovery = messages.hold;
+  }
+
+  return { reply: recovery, blocked: true };
+}
+
 /* ----------------------------- ELEVENLABS CHAT ---------------------------- */
 
 async function getElevenReply({
@@ -1646,7 +3328,10 @@ async function getElevenReply({
   agentId,
   requestId,
   requestStartMs,
+  pauseTurnGuard = "",
+  intakeTurnGuard = "",
 }) {
+  const fallbackReply = fallbackReplyForLanguage(conversationLanguage);
   const diag = (event, extra = {}) => {
     const now = Date.now();
     console.log(
@@ -1682,7 +3367,7 @@ async function getElevenReply({
     const settle = (reply) => {
       if (settled) return;
       settled = true;
-      resolve(cleanReplyText(reply) || FALLBACK_REPLY);
+      resolve(cleanReplyText(reply) || fallbackReply);
     };
 
     try {
@@ -1697,7 +3382,7 @@ async function getElevenReply({
         try {
           ws.close();
         } catch {}
-        settle(finalReply || FALLBACK_REPLY);
+        settle(finalReply || fallbackReply);
       }, ELEVEN_TIMEOUT_MS);
 
       ws.on("open", () => {
@@ -1766,6 +3451,12 @@ async function getElevenReply({
         const guardCheckoutSent = hasCheckoutLinkBeenSent(recentMessages);
         const guardPriceMentioned = hasPriceBeenMentioned(recentMessages);
         const guardLines = [];
+        if (cleanText(pauseTurnGuard)) {
+          guardLines.push(cleanText(pauseTurnGuard));
+        }
+        if (cleanText(intakeTurnGuard)) {
+          guardLines.push(cleanText(intakeTurnGuard));
+        }
         if (guardWebsiteSent) {
           guardLines.push(
             'De website-link en het freebies-blok zijn AL gestuurd. Stuur ze NIET opnieuw uit jezelf — verwijs in woorden naar "de pagina die ik je stuurde". Alleen opnieuw sturen als de klant er expliciet om vraagt (bijvoorbeeld link kwijt), en dan alleen de kale link zonder freebies-blok. In coaching-modus mag de link alleen gedeeld worden als recepten-tool wanneer de klant zelf om recepten of inspiratie vraagt.'
@@ -1942,7 +3633,7 @@ async function getElevenReply({
           const reply =
             cleanReplyText(data.agent_response_event?.agent_response) ||
             cleanReplyText(finalReply) ||
-            FALLBACK_REPLY;
+            fallbackReply;
 
           settle(reply);
         }
@@ -1955,7 +3646,7 @@ async function getElevenReply({
         });
         console.error("ELEVENLABS WS ERROR:", err?.message || err);
         clearTimeout(timeout);
-        settle(finalReply || FALLBACK_REPLY);
+        settle(finalReply || fallbackReply);
       });
 
       ws.on("close", () => {
@@ -1965,7 +3656,7 @@ async function getElevenReply({
         });
         clearTimeout(timeout);
         if (!settled) {
-          settle(finalReply || FALLBACK_REPLY);
+          settle(finalReply || fallbackReply);
         }
       });
     } catch (error) {
@@ -1974,7 +3665,7 @@ async function getElevenReply({
       });
       console.error("ELEVENLABS OUTER ERROR:", error?.message || error);
       if (timeout) clearTimeout(timeout);
-      settle(finalReply || FALLBACK_REPLY);
+      settle(finalReply || fallbackReply);
     }
   });
 }
@@ -2054,9 +3745,14 @@ app.post("/chat", async (req, res) => {
   const normalizedPurchasedProgram = clamp(purchased_program, MAX_SHORT_FIELD_CHARS);
   const normalizedHasControl = clamp(has_control, MAX_SHORT_FIELD_CHARS);
 
+  // Country and language are separate. Country comes only from the phone
+  // number and controls market rules; language controls wording only.
+  const customerCountry = detectCountryFromPhone(normalizedUserId) || "UNKNOWN";
+
   // Conversation language: the stored Airtable value wins; otherwise detect
-  // deterministically (phone prefix -> text -> Dutch default). A confidently
-  // detected but unsupported language locks the conversation to English.
+  // deterministically. For +32, confident French/Dutch text outranks the Dutch
+  // phone default so French-speaking Belgians remain in the Belgian market but
+  // receive natural French. An unsupported detected language uses English.
   const storedLanguage = normalizeLanguage(language);
   let conversationLanguage = storedLanguage;
   let languageUpdate = "";
@@ -2064,17 +3760,49 @@ app.post("/chat", async (req, res) => {
     const explicitRequest = detectExplicitLanguageRequest(normalizedMessage);
     const fromPhone = detectLanguageFromPhone(normalizedUserId);
     const fromText = detectLanguageFromText(normalizedMessage);
+    const belgianTextLanguage = customerCountry === "BE"
+      ? detectBelgianLanguageFromText(normalizedMessage)
+      : "";
     conversationLanguage =
       explicitRequest ||
+      belgianTextLanguage ||
       fromPhone ||
       (fromText === "other" ? "en" : fromText) ||
       "nl";
     languageUpdate = conversationLanguage;
   }
 
-  // Customer country for pricing. The checkout links themselves are universal;
-  // this only selects the price-table row. Unknown prefix/BSUID -> UK.
-  const customerCountry = detectCountryFromPhone(normalizedUserId) || "UNKNOWN";
+  if (
+    storedLanguage &&
+    customerCountry === "PT" &&
+    ["en", "nl"].includes(storedLanguage)
+  ) {
+    const explicitRequest = detectExplicitLanguageRequest(normalizedMessage);
+    const fromText = detectLanguageFromText(normalizedMessage);
+    if (
+      shouldMigrateLegacyPortugueseLanguage({
+        storedLanguage,
+        customerCountry,
+        explicitRequest,
+        textLanguage: fromText,
+      })
+    ) {
+      conversationLanguage = "pt";
+      languageUpdate = "pt";
+    }
+  }
+
+  // Repair the old +32 Dutch default when an existing Belgian contact is
+  // confidently writing French. This changes only conversation language;
+  // customer_country remains BE, so no France checkout rule can leak in.
+  if (storedLanguage === "nl" && customerCountry === "BE") {
+    const explicitRequest = detectExplicitLanguageRequest(normalizedMessage);
+    const belgianTextLanguage = detectBelgianLanguageFromText(normalizedMessage);
+    if (!explicitRequest && belgianTextLanguage === "fr") {
+      conversationLanguage = "fr";
+      languageUpdate = "fr";
+    }
+  }
 
   diag("REQUEST_PARSED", {
     user_id: normalizedUserId,
@@ -2120,12 +3848,12 @@ app.post("/chat", async (req, res) => {
 
   if (!normalizedUserId) {
     console.error("REQUEST ERROR: user_id ontbreekt");
-    return sendDiagResponse("fallback_reply", buildResponse({ send_reply: true, reply: FALLBACK_REPLY, language: conversationLanguage }));
+    return sendDiagResponse("fallback_reply", buildResponse({ send_reply: true, reply: fallbackReplyForLanguage(conversationLanguage), language: conversationLanguage }));
   }
 
   if (!normalizedMessage) {
     console.error("REQUEST ERROR: message ontbreekt");
-    return sendDiagResponse("fallback_reply", buildResponse({ send_reply: true, reply: FALLBACK_REPLY, language: conversationLanguage }));
+    return sendDiagResponse("fallback_reply", buildResponse({ send_reply: true, reply: fallbackReplyForLanguage(conversationLanguage), language: conversationLanguage }));
   }
 
   const normalizedRecentMessages = sanitizeAndPrepareRecentMessages(
@@ -2133,11 +3861,10 @@ app.post("/chat", async (req, res) => {
     normalizedMessage
   );
 
-  // Language switching for known customers: ONLY an explicit request
-  // ("can we speak English?", "auf Deutsch bitte") switches the language,
-  // at any point in the conversation, and re-locks it. There is deliberately
-  // no statistical switching — writing style alone never changes the
-  // conversation language.
+  // Language switching for known customers: after the two narrow legacy
+  // repairs above (PT and French-speaking BE), ONLY an explicit request
+  // switches the language and re-locks it. Writing style alone never changes
+  // an otherwise valid stored language.
   if (storedLanguage) {
     const explicitRequest = detectExplicitLanguageRequest(normalizedMessage);
     if (explicitRequest && explicitRequest !== conversationLanguage) {
@@ -2182,23 +3909,157 @@ app.post("/chat", async (req, res) => {
       "new_user_welcome",
       buildResponse({
         send_reply: true,
-        reply: WELCOME_MESSAGES[conversationLanguage] || WELCOME_MESSAGE,
+        reply: welcomeMessageFor(conversationLanguage, customerCountry),
         language: conversationLanguage,
         language_update: languageUpdate,
       })
     );
   }
 
+  // Pause/intake and checkout state are classified in parallel. Both
+  // classifiers are semantic and multilingual; neither relies on a
+  // language-specific word list to decide the state of the conversation.
+  const [pauseClassification, checkoutClassification] = await Promise.all([
+    classifyConversationPause({
+      message: normalizedMessage,
+      recentMessages: normalizedRecentMessages,
+      currentGoal: normalizedGoal,
+      currentLastSummary: normalizedLastSummary,
+      currentPhase: normalizedCurrentPhase,
+      customerStatus: normalizedCustomerStatus,
+      conversationLanguage,
+      requestId,
+      requestStartMs,
+    }),
+    classifyCheckoutState({
+      message: normalizedMessage,
+      recentMessages: shouldClassifyCheckoutState(
+        normalizedMessage,
+        normalizedRecentMessages
+      )
+        ? normalizedRecentMessages
+        : [],
+      customerCountry,
+      requestId,
+      requestStartMs,
+    }),
+  ]);
+  const pauseDecision = decidePauseAction(
+    pauseClassification,
+    normalizedRecentMessages,
+    requestStartMs
+  );
+
+  diag("PAUSE_CONTEXT_EVALUATED", {
+    ...pauseClassification,
+    ...pauseDecision,
+    minimum_resume_ms: Number.isFinite(PAUSE_MIN_RESUME_MS)
+      ? PAUSE_MIN_RESUME_MS
+      : 30 * 60 * 1000,
+  });
+
+  if (pauseDecision.action === "heart_only") {
+    diag("PAUSE_CLOSING_HEART_SENT", {
+      elapsed_since_previous_message_ms: pauseDecision.elapsed_ms,
+      timestamps_available: pauseDecision.timestamps_available,
+    });
+    return sendDiagResponse(
+      "pause_closing_heart",
+      buildResponse({
+        send_reply: true,
+        reply: "💚",
+        language: conversationLanguage,
+        language_update: languageUpdate,
+      })
+    );
+  }
+
+  const alreadyValidatedForCheckout = isCustomerStatusValidated(
+    normalizedCustomerStatus,
+    normalizedRecentMessages
+  );
+  const classifiedIntakeDecision = decideIntakeAction({
+    classification: pauseClassification,
+    recentMessages: normalizedRecentMessages,
+    validatedCustomer: alreadyValidatedForCheckout,
+  });
+  const intakeDecision =
+    pauseDecision.action === "guarded_reply" &&
+    classifiedIntakeDecision.testimonials_allowed === true
+      ? { action: "hold_intake", testimonials_allowed: false }
+      : classifiedIntakeDecision;
+
+  diag("INTAKE_CONTEXT_EVALUATED", {
+    intake_context_active: pauseClassification.intake_context_active,
+    goal_context_clear: pauseClassification.goal_context_clear,
+    challenge_context_clear: pauseClassification.challenge_context_clear,
+    checklist_sent: pauseClassification.checklist_sent,
+    checklist_response_type: pauseClassification.checklist_response_type,
+    direct_testimonials_request:
+      pauseClassification.direct_testimonials_request,
+    intake_confidence: pauseClassification.intake_confidence,
+    intake_action: intakeDecision.action,
+    testimonials_allowed: intakeDecision.testimonials_allowed,
+  });
+
+  const checkoutDecision = decideCheckoutAction({
+    classification: checkoutClassification,
+    recentMessages: normalizedRecentMessages,
+    customerCountry,
+    validatedCustomer: alreadyValidatedForCheckout,
+  });
+
+  diag("CHECKOUT_CONTEXT_EVALUATED", {
+    ...checkoutClassification,
+    action: checkoutDecision.action,
+    checkout_program_resolved: checkoutDecision.program,
+    checkout_taste_resolved: checkoutDecision.taste,
+    checkout_control_resolved: checkoutDecision.control,
+    checkout_payment_mode_resolved: checkoutDecision.payment_mode,
+    has_previous_checkout_link: Boolean(checkoutDecision.previous_checkout_link),
+    has_new_checkout_link: Boolean(checkoutDecision.checkout_link),
+  });
+
+  if (checkoutDecision.action !== "normal") {
+    const checkoutReply = buildCheckoutActionReply({
+      decision: checkoutDecision,
+      language: conversationLanguage,
+      customerCountry,
+    });
+    if (checkoutReply) {
+      return sendDiagResponse(
+        `checkout_${checkoutDecision.action}`,
+        buildResponse({
+          send_reply: true,
+          reply: checkoutReply,
+          language: conversationLanguage,
+          language_update: languageUpdate,
+        })
+      );
+    }
+  }
+
+  const pauseTurnGuard =
+    pauseDecision.action === "guarded_reply"
+      ? [
+          "CONTEXTUELE PAUZE ACTIEF: de klant had aangegeven het gesprek later voort te zetten en de minimale pauze van 30 minuten is nog niet verstreken of de tijd is niet betrouwbaar beschikbaar.",
+          "Het nieuwste bericht bevat wel echte inhoud. Beantwoord uitsluitend die inhoud kort en behulpzaam.",
+          "Beschouw dit NIET als toestemming om de salesflow opnieuw te starten of verder te duwen. Stel geen nieuwe verkoopvraag, hervat geen oude vervolgvraag en introduceer geen volgende stap uit jezelf.",
+          "Noem de pauze, tijd of terugkomst nooit tegen de klant.",
+        ].join("\n")
+      : "";
+  const intakeTurnGuard = buildIntakeTurnGuard({
+    decision: intakeDecision,
+    classification: pauseClassification,
+  });
+
   if (!agentId) {
     console.error("CONFIG ERROR: ELEVENLABS_AGENT_ID ontbreekt");
-    return sendDiagResponse("fallback_reply", buildResponse({ send_reply: true, reply: FALLBACK_REPLY, language: conversationLanguage }));
+    return sendDiagResponse("fallback_reply", buildResponse({ send_reply: true, reply: fallbackReplyForLanguage(conversationLanguage), language: conversationLanguage }));
   }
 
   try {
-    const alreadyValidated = isCustomerStatusValidated(
-      normalizedCustomerStatus,
-      normalizedRecentMessages
-    );
+    const alreadyValidated = alreadyValidatedForCheckout;
 
     diag("ELEVENLABS_DISPATCH", {
       already_validated: alreadyValidated,
@@ -2232,6 +4093,8 @@ app.post("/chat", async (req, res) => {
       agentId,
       requestId,
       requestStartMs,
+      pauseTurnGuard,
+      intakeTurnGuard,
     });
 
     const extractionPromise = getStructuredUpdates({
@@ -2273,8 +4136,8 @@ app.post("/chat", async (req, res) => {
 
     let reply =
       replyResult.status === "fulfilled"
-        ? cleanReplyText(replyResult.value) || FALLBACK_REPLY
-        : FALLBACK_REPLY;
+        ? cleanReplyText(replyResult.value) || fallbackReplyForLanguage(conversationLanguage)
+        : fallbackReplyForLanguage(conversationLanguage);
 
     if (replyResult.status === "rejected") {
       console.error("ELEVENLABS PROMISE ERROR:", replyResult.reason);
@@ -2296,6 +4159,23 @@ app.post("/chat", async (req, res) => {
     );
 
     reply = stripForbiddenReplyPhrases(cleanReplyText(reply));
+
+    // Hard backstop for the early intake. Prompt instructions and per-turn
+    // guards guide Emma, but the server still refuses a testimonials link when
+    // the semantic intake gate has not confirmed all required conditions.
+    const testimonialGateResult = enforceTestimonialsGate({
+      reply,
+      intakeDecision,
+      intakeClassification: pauseClassification,
+      language: conversationLanguage,
+    });
+    reply = testimonialGateResult.reply;
+    if (testimonialGateResult.blocked) {
+      diag("PREMATURE_TESTIMONIALS_BLOCKED", {
+        intake_action: intakeDecision.action,
+        intake_confidence: pauseClassification.intake_confidence,
+      });
+    }
 
     // Deterministic checkout backstop: when Emma asked for both taste and
     // Control and the customer replies with only a taste, Control is still an
@@ -2335,11 +4215,26 @@ app.post("/chat", async (req, res) => {
     // recipes/inspiration), a repeated block is removed from the reply.
     if (
       hasPatternBeenSent(normalizedRecentMessages, PLAIN_WEBSITE_LINK_PATTERN) &&
-      !/\b(website|site|link|pagina|recept|recepten|inspiratie|kwijt|nogmaals|opnieuw|stuur)\b/i.test(
+      !/\b(website|site|link|lien|enlace|liga[cç][aã]o|pagina|p[aá]gina|page|seite|sito|strona|recept|recepten|recipe|recipes|recette|recettes|rezept|rezepte|ricetta|ricette|receta|recetas|receita|receitas|przepis|przepisy|inspiratie|inspiration|inspiraci[oó]n|inspira[cç][aã]o|kwijt|lost|perdu|verloren|perso|perdido|nogmaals|opnieuw|again|encore|erneut|nuovo|otra vez|novamente|ponownie|stuur|send|envoie|schick|invia|env[ií]a|envia|wy[sś]lij)\b/i.test(
         normalizedMessage
       )
     ) {
-      reply = stripRepeatedWebsiteBlock(reply);
+      reply = stripRepeatedWebsiteBlock(reply, conversationLanguage);
+    }
+
+    const checkoutLinkValidation = enforceCheckoutLinksInReply({
+      reply,
+      classification: checkoutClassification,
+      recentMessages: normalizedRecentMessages,
+      customerCountry,
+      language: conversationLanguage,
+      currentMessage: normalizedMessage,
+    });
+    reply = checkoutLinkValidation.reply;
+    if (checkoutLinkValidation.changed) {
+      diag("CHECKOUT_LINK_FINAL_CONTROL", {
+        reason: checkoutLinkValidation.reason,
+      });
     }
 
     // Give OpenAI a short grace period to finish after ElevenLabs is done.
@@ -2517,7 +4412,7 @@ app.post("/chat", async (req, res) => {
       error_message: error?.message || String(error),
     });
     console.error("SERVER ERROR:", error?.message || error);
-    return sendDiagResponse("server_error_fallback", buildResponse({ send_reply: true, reply: FALLBACK_REPLY, language: conversationLanguage }));
+    return sendDiagResponse("server_error_fallback", buildResponse({ send_reply: true, reply: fallbackReplyForLanguage(conversationLanguage), language: conversationLanguage }));
   }
 });
 
