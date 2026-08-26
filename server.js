@@ -780,7 +780,15 @@ function sanitizeAndPrepareRecentMessages(recentMessages, currentMessage) {
         msg.role === "emma" &&
         hasPatternBeenSent([msg], TESTIMONIALS_LINK_PATTERN)
     );
+  const latestStep2ChecklistMessage = [...withText]
+    .reverse()
+    .find(
+      (msg) =>
+        msg.role === "emma" &&
+        messageLooksLikeStep2Checklist(msg.message_text)
+    );
   const missingPinnedMessages = [
+    latestStep2ChecklistMessage,
     latestCheckoutMessage,
     latestTestimonialsMessage,
   ]
@@ -798,6 +806,77 @@ function sanitizeAndPrepareRecentMessages(recentMessages, currentMessage) {
 }
 
 /* -------------------- CONTEXTUAL CONVERSATION PAUSES -------------------- */
+
+// These checks protect conversation structure only. They deliberately do not
+// try to understand customer wording; semantic meaning remains the job of the
+// multilingual classifier.
+function messageLooksLikeStep2Checklist(value) {
+  const text = String(value || "");
+  if (!text.includes("✅")) return false;
+
+  // Programme, freebies and checkout blocks can also contain check marks.
+  // A Step 2 intake checklist never contains one of these links.
+  return !/(?:nutritionworks\.online|tr\.ee\/|chat\.whatsapp\.com)/i.test(text);
+}
+
+function hasStep2ChecklistBeenSent(messages) {
+  return (Array.isArray(messages) ? messages : []).some(
+    (msg) =>
+      msg?.role === "emma" && messageLooksLikeStep2Checklist(msg.message_text)
+  );
+}
+
+function isKnownWelcomeMessage(value) {
+  const message = normalizeComparableText(value);
+  if (!message) return false;
+
+  return [
+    ...Object.values(WELCOME_MESSAGES),
+    ...Object.values(FRANCE_WELCOME_MESSAGES),
+  ].some((welcome) => {
+    const known = normalizeComparableText(welcome);
+    // Recent messages may have been clamped to MAX_MESSAGE_CHARS.
+    return (
+      message === known || known.startsWith(message) || message.startsWith(known)
+    );
+  });
+}
+
+function countNaturalIntakeFollowUps(messages) {
+  return (Array.isArray(messages) ? messages : []).filter((msg) => {
+    if (msg?.role !== "emma") return false;
+    const text = String(msg.message_text || "");
+    if (!text.includes("?")) return false;
+    if (isKnownWelcomeMessage(text) || messageLooksLikeStep2Checklist(text)) {
+      return false;
+    }
+    return !/(?:nutritionworks\.online|tr\.ee\/|chat\.whatsapp\.com)/i.test(text);
+  }).length;
+}
+
+function countPostChecklistClarifications(messages) {
+  const items = Array.isArray(messages) ? messages : [];
+  let lastChecklistIndex = -1;
+
+  items.forEach((msg, index) => {
+    if (
+      msg?.role === "emma" &&
+      messageLooksLikeStep2Checklist(msg.message_text)
+    ) {
+      lastChecklistIndex = index;
+    }
+  });
+
+  if (lastChecklistIndex < 0) return 0;
+  return items.slice(lastChecklistIndex + 1).filter((msg) => {
+    if (msg?.role !== "emma") return false;
+    const text = String(msg.message_text || "");
+    return (
+      text.includes("?") &&
+      !/(?:nutritionworks\.online|tr\.ee\/|chat\.whatsapp\.com)/i.test(text)
+    );
+  }).length;
+}
 
 // INTAKE PURE LOGIC START
 function decideIntakeAction({
@@ -833,13 +912,60 @@ function decideIntakeAction({
   }
 
   const responseType = cleanText(classification?.checklist_response_type);
-  const checklistSent = classification?.checklist_sent === true;
+  const checklistSent =
+    classification?.checklist_sent === true ||
+    hasStep2ChecklistBeenSent(recentMessages);
+  const followUpsAsked = countNaturalIntakeFollowUps(recentMessages);
+  const postChecklistClarifications =
+    countPostChecklistClarifications(recentMessages);
+
+  // Once the checklist has been sent, goal and challenge are no longer hard
+  // gates. The customer's answer to that checklist decides whether intake is
+  // complete. This prevents a second checklist or a new formal challenge
+  // question after the customer has already completed the moment naturally.
+  if (checklistSent) {
+    if (
+      responseType === "meaningful_details" ||
+      responseType === "explicit_no_more" ||
+      responseType === "cannot_elaborate"
+    ) {
+      return { action: "allow_testimonials", testimonials_allowed: true };
+    }
+
+    if (responseType === "question_or_objection") {
+      return { action: "answer_and_hold", testimonials_allowed: false };
+    }
+
+    if (responseType === "bare_acknowledgement") {
+      // One organic clarification is enough. A second non-substantive answer
+      // is respected as the end of intake instead of creating a loop.
+      return postChecklistClarifications >= 1
+        ? { action: "allow_testimonials", testimonials_allowed: true }
+        : { action: "clarify_checklist", testimonials_allowed: false };
+    }
+
+    return { action: "hold_intake", testimonials_allowed: false };
+  }
+
+  if (responseType === "question_or_objection") {
+    return { action: "answer_and_hold", testimonials_allowed: false };
+  }
 
   // When the customer cannot or does not want to explain the missing context,
   // the mandatory checklist becomes a gentle discovery aid instead of an
-  // interrogation. It still does not make testimonials ready by itself.
-  if (!checklistSent && responseType === "cannot_elaborate") {
+  // interrogation.
+  if (responseType === "cannot_elaborate") {
     return { action: "send_checklist_support", testimonials_allowed: false };
+  }
+
+  // Never ask a third intake follow-up. Rich information can reach the
+  // checklist sooner; sparse information reaches it after at most two turns.
+  if (
+    followUpsAsked >= 2 ||
+    (classification?.goal_context_clear === true &&
+      classification?.challenge_context_clear === true)
+  ) {
+    return { action: "send_checklist", testimonials_allowed: false };
   }
 
   if (classification?.goal_context_clear !== true) {
@@ -850,30 +976,7 @@ function decideIntakeAction({
     return { action: "ask_challenge", testimonials_allowed: false };
   }
 
-  if (!checklistSent) {
-    return { action: "send_checklist", testimonials_allowed: false };
-  }
-
-  if (
-    responseType === "meaningful_details" ||
-    responseType === "explicit_no_more"
-  ) {
-    return { action: "allow_testimonials", testimonials_allowed: true };
-  }
-
-  if (responseType === "bare_acknowledgement") {
-    return { action: "clarify_checklist", testimonials_allowed: false };
-  }
-
-  if (responseType === "question_or_objection") {
-    return { action: "answer_and_hold", testimonials_allowed: false };
-  }
-
-  if (responseType === "cannot_elaborate") {
-    return { action: "hold_without_pressure", testimonials_allowed: false };
-  }
-
-  return { action: "hold_intake", testimonials_allowed: false };
+  return { action: "send_checklist", testimonials_allowed: false };
 }
 // INTAKE PURE LOGIC END
 
@@ -905,9 +1008,11 @@ function decidePauseAction(classification, recentMessages, nowMs = Date.now()) {
     : 30 * 60 * 1000;
   const withinMinimum = elapsedMs === null || elapsedMs < minimumResumeMs;
   const pauseActive = classification?.pause_context_active === true;
+  const explicitAnchor = classification?.pause_anchor_is_explicit === true;
   const messageType = cleanText(classification?.current_message_type);
   const confidence = cleanText(classification?.confidence);
   const trusted = confidence === "high" || confidence === "medium";
+  const heartTrusted = confidence === "high";
   const anchorMatch = cleanText(classification?.pause_anchor_id).match(
     /^history_(\d+)$/
   );
@@ -918,12 +1023,20 @@ function decidePauseAction(classification, recentMessages, nowMs = Date.now()) {
     anchorIndex < recentMessages.slice(-20).length;
 
   let action = "normal_reply";
-  if (pauseActive && trusted && messageType === "closing_acknowledgement") {
+  if (
+    pauseActive &&
+    heartTrusted &&
+    explicitAnchor &&
+    pauseAnchorIdentified &&
+    elapsedMs !== null &&
+    messageType === "closing_acknowledgement"
+  ) {
     // Time alone never turns a closing acknowledgement into a resumed
     // conversation. A green heart is correct both before and after 30 minutes.
     action = "heart_only";
   } else if (
     trusted &&
+    explicitAnchor &&
     pauseAnchorIdentified &&
     withinMinimum &&
     (messageType === "substantive" || messageType === "other")
@@ -939,6 +1052,7 @@ function decidePauseAction(classification, recentMessages, nowMs = Date.now()) {
     within_minimum: withinMinimum,
     timestamps_available: elapsedMs !== null,
     pause_anchor_identified: pauseAnchorIdentified,
+    pause_anchor_is_explicit: explicitAnchor,
   };
 }
 // PAUSE PURE LOGIC END
@@ -2397,19 +2511,23 @@ async function classifyConversationPause({
   requestId,
   requestStartMs,
 }) {
+  const serverChecklistDetected = hasStep2ChecklistBeenSent(recentMessages);
+  const serverFollowUpsAsked = countNaturalIntakeFollowUps(recentMessages);
   const fallback = {
     pause_context_active: false,
     current_message_type: "other",
     pause_anchor_id: "",
+    pause_anchor_is_explicit: false,
     confidence: "low",
     intake_context_active: false,
     goal_context_clear: false,
     challenge_context_clear: false,
-    checklist_sent: false,
+    checklist_sent: serverChecklistDetected,
     checklist_response_type: "not_applicable",
     direct_testimonials_request: false,
     suggested_follow_up: "",
     intake_confidence: "low",
+    server_intake_followups_asked: serverFollowUpsAsked,
   };
 
   if (!openai || !Array.isArray(recentMessages) || recentMessages.length === 0) {
@@ -2431,6 +2549,7 @@ async function classifyConversationPause({
         ],
       },
       pause_anchor_id: { type: "string" },
+      pause_anchor_is_explicit: { type: "boolean" },
       confidence: {
         type: "string",
         enum: ["high", "medium", "low"],
@@ -2461,6 +2580,7 @@ async function classifyConversationPause({
       "pause_context_active",
       "current_message_type",
       "pause_anchor_id",
+      "pause_anchor_is_explicit",
       "confidence",
       "intake_context_active",
       "goal_context_clear",
@@ -2482,17 +2602,20 @@ async function classifyConversationPause({
     "Classify it as substantive when it adds content that needs an answer, clearly resumes the discussion, or answers an unresolved sales or checkout question. An answer to an open product, taste, Control, payment, or order question is always substantive, even when very short.",
     "Classify it as pause_announcement when the current message itself announces that the customer is stopping now and will continue later.",
     "pause_anchor_id must be the exact id of the most recent customer history message that contextually announced the temporary pause. Return an empty string when no such announcement is relevant. Keep returning that anchor for substantive messages received within 30 minutes of it, so the server can prevent an immediate sales-flow restart. For a closing acknowledgement that still belongs to the pause exchange, return the anchor even when more than 30 minutes have passed.",
+    "pause_anchor_is_explicit is true only when pause_anchor_id points to a real customer message that semantically announces stopping the conversation now and returning or continuing later. A message that merely finishes an intake answer, says there is no other relevant information, closes a topic, or ends the conversation is not a temporary-pause anchor. Do not use a phrase list; judge the complete exchange in any language.",
     "Use other when none of the categories is established. If the context is genuinely ambiguous, use low confidence.",
     "A short message or emoji is never enough by itself to establish a pause or closing acknowledgement; its role must follow from the surrounding conversation.",
     "For intake, intake_context_active is true only for a lead in the welcome/intake/checklist stage before the testimonials have been sent. It is false for validated customers and later sales, checkout or coaching exchanges.",
     "goal_context_clear is true only when the customer's desired health change or outcome is clear enough to reflect accurately in your own words. A greeting, request for information, emoji, loose fact or very broad wish with no usable direction is not enough.",
-    "challenge_context_clear is true only when the customer's main current obstacle, symptom, struggle, pattern or relevant failed approach is clear enough to understand what makes the goal difficult. Repeating only the goal does not establish the challenge.",
-    "Use the complete conversation plus CRM goal and summary. Message length never decides readiness: one rich answer may establish both fields, while several short answers may still establish neither.",
-    "checklist_sent is true only when Emma has actually sent the mandatory personalised Step 2 health checklist before the current message. This may be a suggestion checklist with check marks or, when everything was already known, a check-marked confirmation summary. Do not confuse it with a freebies, programme, price or checkout list.",
-    "When checklist_sent is true, classify the current customer response as meaningful_details if it adds or specifically confirms relevant information; explicit_no_more if it clearly says there is nothing else or the information already shared is the main issue; bare_acknowledgement if it only acknowledges or thanks without answering the checklist; question_or_objection if it asks something or raises a concern that must be answered first; cannot_elaborate if the customer says they do not know, cannot explain or do not want to elaborate; otherwise not_applicable.",
-    "When checklist_sent is false, use cannot_elaborate only when the current customer message contextually says they cannot or do not want to explain the missing intake information. Otherwise checklist_response_type is not_applicable.",
+    "challenge_context_clear is true only when the customer's main current obstacle, symptom, struggle, pattern or relevant failed approach is clear enough to understand what makes the goal difficult. Repeating only the goal does not establish the challenge. This field may guide a natural pre-checklist question, but it never blocks progress after the checklist has been sent.",
+    "Use the complete conversation plus CRM goal and summary. Message length never decides readiness: one rich answer may establish enough context immediately, while very little information may require at most two natural follow-up questions before the checklist.",
+    "checklist_sent is true only when Emma has actually sent the mandatory personalised Step 2 health checklist before the current message. This may be a suggestion checklist with check marks or, when everything was already known, a check-marked confirmation summary. Do not confuse it with a freebies, programme, price or checkout list. When server_intake_signals.checklist_sent is true, checklist_sent MUST be true, regardless of your own detection.",
+    "When checklist_sent is true, classify the current customer response as meaningful_details if it adds or specifically confirms relevant information; explicit_no_more if its meaning in the complete context is that the customer has no other relevant information, issues or additions; bare_acknowledgement if it only acknowledges or thanks without answering the checklist; question_or_objection if it asks something or raises a concern that must be answered first; cannot_elaborate if the customer does not know, cannot explain or does not want to elaborate; otherwise not_applicable.",
+    "explicit_no_more is a semantic intent, not a literal phrase. Expressions such as 'this was everything' are examples only, never trigger words. Recognise any equivalent meaning in any language from the full context, including corrections that make clear the customer already said there is nothing further to add.",
+    "When checklist_sent is false, use cannot_elaborate when the current message contextually communicates that the customer cannot, will not, or has nothing further to add to the missing intake information. Otherwise checklist_response_type is not_applicable.",
+    "Once checklist_sent is true, never require a separate formal challenge answer. A meaningful response, explicit semantic no-more response, or inability/unwillingness to add more completes intake, unless a current question or objection first needs an answer.",
     "direct_testimonials_request is true only when the current customer explicitly asks to see customer results, experiences, stories or the testimonials page/link. Do not infer this from general curiosity or a request for product information. Before the checklist this request does not bypass intake; it only permits a resend when the testimonials were already shared earlier.",
-    `suggested_follow_up must be one short, natural question in ${LANGUAGE_NAMES[conversationLanguage] || "the conversation language"} only when the goal is missing, the challenge is missing, or a bare checklist acknowledgement needs clarification. Ask for only the one missing thing, never claim that much is already known, and do not use an emoji or emoticon. Otherwise return an empty string.`,
+    `suggested_follow_up must be one short, natural question in ${LANGUAGE_NAMES[conversationLanguage] || "the conversation language"} only when fewer than two pre-checklist follow-ups have been asked and context is still sparse, or when the first bare checklist acknowledgement needs one clarification. Ask only one thing, never claim that much is already known, never repeat the checklist, and do not use an emoji or emoticon. Otherwise return an empty string.`,
     "If the intake state is genuinely ambiguous, use low intake_confidence. Never invent a goal, challenge, checklist or meaningful answer.",
   ].join("\n");
 
@@ -2508,6 +2631,10 @@ async function classifyConversationPause({
     current_phase: cleanText(currentPhase),
     crm_goal: clamp(currentGoal, MAX_GOAL_CHARS),
     crm_last_summary: clamp(currentLastSummary, MAX_SUMMARY_CHARS),
+    server_intake_signals: {
+      checklist_sent: serverChecklistDetected,
+      follow_up_questions_asked: Math.min(2, serverFollowUpsAsked),
+    },
     recent_conversation: history,
     current_customer_message: {
       id: "current",
@@ -2588,13 +2715,15 @@ async function classifyConversationPause({
       pause_anchor_id: /^history_\d+$/.test(cleanText(parsed?.pause_anchor_id))
         ? cleanText(parsed.pause_anchor_id)
         : "",
+      pause_anchor_is_explicit: parsed?.pause_anchor_is_explicit === true,
       confidence: confidenceLevels.has(parsed?.confidence)
         ? parsed.confidence
         : "low",
       intake_context_active: parsed?.intake_context_active === true,
       goal_context_clear: parsed?.goal_context_clear === true,
       challenge_context_clear: parsed?.challenge_context_clear === true,
-      checklist_sent: parsed?.checklist_sent === true,
+      checklist_sent:
+        serverChecklistDetected || parsed?.checklist_sent === true,
       checklist_response_type: checklistResponseTypes.has(
         parsed?.checklist_response_type
       )
@@ -2606,6 +2735,7 @@ async function classifyConversationPause({
       intake_confidence: confidenceLevels.has(parsed?.intake_confidence)
         ? parsed.intake_confidence
         : "low",
+      server_intake_followups_asked: serverFollowUpsAsked,
     };
 
     console.log(
@@ -3105,7 +3235,7 @@ function buildIntakeTurnGuard({ decision, classification }) {
   ) {
     return action === "allow_testimonials_resend"
       ? "De klant vraagt nu expliciet opnieuw om de testimonials. Je mag de testimonials-link deze beurt opnieuw sturen."
-      : "Alle contextuele voorwaarden voor Stap 3 zijn bevestigd. Je mag nu het vaste testimonialbericht sturen.";
+      : "Het verplichte checklistmoment is afgerond en de reactie van de klant is contextueel voldoende. Vraag niet alsnog apart naar een doel of uitdaging, herhaal de checklist niet en stuur nu het vaste testimonialbericht.";
   }
 
   if (action === "testimonials_already_sent") {
@@ -3117,6 +3247,7 @@ function buildIntakeTurnGuard({ decision, classification }) {
       commonHold,
       "Het doel van de klant is nog niet contextueel duidelijk genoeg.",
       "Reageer warm op alleen wat echt bekend is en stel precies één korte, makkelijke vraag naar wat de klant wil veranderen of bereiken.",
+      "Dit is één van maximaal twee natuurlijke vervolgvragen vóór het checklistmoment.",
       'Zeg niet "hier kan ik al veel mee" en stuur de checklist nog niet.',
       cleanText(classification?.suggested_follow_up)
         ? `Passende vervolgvraag: ${cleanText(classification.suggested_follow_up)}`
@@ -3131,6 +3262,7 @@ function buildIntakeTurnGuard({ decision, classification }) {
       commonHold,
       "Het doel is duidelijk, maar de grootste huidige uitdaging nog niet.",
       "Bevestig het bekende doel kort en stel precies één makkelijke vraag naar wat dit doel nu vooral lastig maakt.",
+      "Dit is één van maximaal twee natuurlijke vervolgvragen vóór het checklistmoment.",
       'Zeg niet "hier kan ik al veel mee" en stuur de checklist nog niet.',
       cleanText(classification?.suggested_follow_up)
         ? `Passende vervolgvraag: ${cleanText(classification.suggested_follow_up)}`
@@ -3145,7 +3277,7 @@ function buildIntakeTurnGuard({ decision, classification }) {
       commonHold,
       action === "send_checklist_support"
         ? "De klant kan of wil de ontbrekende informatie niet verder uitleggen. Gebruik nu het verplichte Stap 2-checklistbericht als vriendelijke herkenningshulp, zonder te doen alsof je al genoeg weet."
-        : "Doel en grootste uitdaging zijn duidelijk, maar het verplichte Stap 2-checklistbericht is nog niet verstuurd. Stuur dat bericht nu.",
+        : "Er is genoeg context of het maximum van twee natuurlijke vervolgvragen is bereikt. Het verplichte Stap 2-checklistbericht is nog niet verstuurd. Stuur dat bericht nu en stel niet eerst nog een losse intakevraag.",
       "Maak de checklist contextueel: verwijder elke suggestie die de klant inhoudelijk al heeft genoemd, ook als daardoor maar één suggestie overblijft.",
       "Zijn alle suggesties al bekend, gebruik dan een korte ✅ bevestigingschecklist met uitsluitend werkelijk gedeelde informatie en vraag alleen of er nog iets ontbreekt.",
       "Voeg nooit een bekend onderwerp opnieuw toe om de lijst langer te maken.",
@@ -3157,6 +3289,7 @@ function buildIntakeTurnGuard({ decision, classification }) {
       commonHold,
       "De klant stuurde alleen een contextuele bevestiging of bedankje na de checklist; dit is geen inhoudelijk checklistantwoord.",
       "Stel precies één korte, natuurlijke vraag of de klant nog iets uit de checklist herkent of dat het eerder gedeelde het belangrijkste is.",
+      "Herhaal de checklist niet. Na deze ene verduidelijking volgt geen tweede verduidelijkingsronde.",
       cleanText(classification?.suggested_follow_up)
         ? `Passende vervolgvraag: ${cleanText(classification.suggested_follow_up)}`
         : "",
@@ -3994,6 +4127,13 @@ app.post("/chat", async (req, res) => {
     goal_context_clear: pauseClassification.goal_context_clear,
     challenge_context_clear: pauseClassification.challenge_context_clear,
     checklist_sent: pauseClassification.checklist_sent,
+    checklist_detected_server_side: hasStep2ChecklistBeenSent(
+      normalizedRecentMessages
+    ),
+    intake_follow_up_questions_asked:
+      countNaturalIntakeFollowUps(normalizedRecentMessages),
+    post_checklist_clarifications_asked:
+      countPostChecklistClarifications(normalizedRecentMessages),
     checklist_response_type: pauseClassification.checklist_response_type,
     direct_testimonials_request:
       pauseClassification.direct_testimonials_request,
