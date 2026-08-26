@@ -8,6 +8,7 @@ import { franc } from "franc-min";
 dotenv.config();
 
 const app = express();
+const SERVER_BUILD_ID = "emma-v50.1-ai-conversation-2026-08-26-01";
 // Accept JSON bodies (Make scenarios that already work).
 app.use(express.json({ limit: "1mb" }));
 // Also accept application/x-www-form-urlencoded bodies. ManyChat (via Make)
@@ -881,16 +882,20 @@ function countPostChecklistClarifications(messages) {
 // INTAKE PURE LOGIC START
 function decideIntakeAction({
   classification,
-// The server supplies only observable intake milestones. Emma remains
-// responsible for understanding the customer's meaning and writing the next
-// conversational turn.
-function buildStructuralIntakeTurnGuard({
   recentMessages,
   validatedCustomer = false,
 }) {
   if (validatedCustomer) {
     return { action: "normal", testimonials_allowed: false };
   }
+// The server supplies only observable intake milestones. Emma remains
+// responsible for understanding the customer's meaning and writing the next
+// conversational turn.
+function buildStructuralIntakeTurnGuard(options) {
+  const recentMessages = Array.isArray(options?.recentMessages)
+    ? options.recentMessages
+    : [];
+  const validatedCustomer = Boolean(options?.validatedCustomer);
   if (validatedCustomer) return "";
   if (hasPatternBeenSent(recentMessages, TESTIMONIALS_LINK_PATTERN)) return "";
 
@@ -4861,4 +4866,5 @@ app.post("/chat", async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`Server draait op poort ${PORT}`);
+  console.log(`${SERVER_BUILD_ID} draait op poort ${PORT}`);
 });
