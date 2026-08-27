@@ -8,7 +8,7 @@ import { franc } from "franc-min";
 dotenv.config();
 
 const app = express();
-const SERVER_BUILD_ID = "emma-v51-candidate-2026-08-27-05";
+const SERVER_BUILD_ID = "emma-v51-candidate-2026-08-27-06";
 // Accept JSON bodies (Make scenarios that already work).
 app.use(express.json({ limit: "1mb" }));
 // Also accept application/x-www-form-urlencoded bodies. ManyChat (via Make)
@@ -1768,6 +1768,8 @@ async function getStructuredUpdates({
     "- Geldige waarden: Basic / Beauty / Deluxe / Exclusive / (lege string).",
     "- Alleen een duidelijke voorkeur, interesse in één programma of definitieve keuze telt.",
     "- Alleen een programmanaam noemen is niet genoeg. Noemt de klant meerdere programma's, vergelijkt die of twijfelt ertussen, retourneer dan altijd een lege string.",
+    "- Een programmanaam in een ontkenning, correctie, verbaasde vraag, citaat of reactie op een verkeerde aanname van Emma is GEEN voorkeur. Voorbeelden zoals 'Deluxe al besproken?', 'ik heb Deluxe niet gekozen' of 'waarom zeg je Beauty?' geven altijd een lege string.",
+    "- Gebruik uitsluitend wat de klant zelf positief bedoelt. Een programmanaam die alleen door Emma is voorgesteld of ten onrechte genoemd, mag nooit via de reactie van de klant alsnog als interesse worden opgeslagen.",
     "- Kies nooit zelf één programma uit meerdere genoemde opties en kopieer nooit een advies van Emma als klantkeuze.",
     "- Algemene koopintentie, het bestellen van Control, of interesse in afvallen tellen NIET als programma-interesse.",
     "- Kies nooit een default programma. Verzin nooit een programma.",
