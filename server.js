@@ -8,6 +8,7 @@ import { franc } from "franc-min";
 dotenv.config();
 
 const app = express();
+const SERVER_BUILD_ID = "emma-v51-candidate-2026-08-27-02";
 // Accept JSON bodies (Make scenarios that already work).
 app.use(express.json({ limit: "1mb" }));
 // Also accept application/x-www-form-urlencoded bodies. ManyChat (via Make)
@@ -35,6 +36,21 @@ const NO_REPLY = "__NO_REPLY__";
 
 const FALLBACK_REPLY =
   "Er ging iets mis met mijn antwoord, kun je je bericht nog een keer sturen";
+
+const FALLBACK_REPLIES = {
+  nl: FALLBACK_REPLY,
+  en: "Something went wrong with my reply. Could you send your message again?",
+  fr: "Un problème est survenu avec ma réponse. Peux-tu renvoyer ton message ?",
+  de: "Bei meiner Antwort ist etwas schiefgelaufen. Kannst du deine Nachricht noch einmal senden?",
+  it: "Si è verificato un problema con la mia risposta. Puoi inviare di nuovo il tuo messaggio?",
+  es: "Ha ocurrido un problema con mi respuesta. ¿Puedes enviar tu mensaje de nuevo?",
+  pt: "Ocorreu um problema com a minha resposta. Podes enviar novamente a tua mensagem?",
+  pl: "Wystąpił problem z moją odpowiedzią. Czy możesz wysłać wiadomość jeszcze raz?",
+};
+
+function fallbackReplyForLanguage(language) {
+  return FALLBACK_REPLIES[cleanText(language).toLowerCase()] || FALLBACK_REPLY;
+}
 
 const WELCOME_MESSAGE =
   "Hallo, ik ben Emma 😊\n\n" +
@@ -106,7 +122,51 @@ const WELCOME_MESSAGES = {
 
 // France keeps its own conversion opening. French-speaking customers outside
 // France receive the normal French version; country and language stay separate.
-const FRANCE_WELCOME_MESSAGE = WELCOME_MESSAGES.fr;
+const FRANCE_WELCOME_MESSAGES = {
+  nl:
+    "Hoi! \u{1F60A} Super dat je hebt gereageerd!\n\n" +
+    "Wil je graag afvallen? Ik help je daar heel graag bij.\n\n" +
+    "Ik heb al duizenden vrouwen en mannen begeleid met prachtige resultaten, vooral zonder het gevreesde jojo-effect.\n\n" +
+    "De meesten hadden al van alles geprobeerd zonder het resultaat waarop ze hoopten.\n\n" +
+    "Mag ik vragen wat je al hebt geprobeerd?",
+  en:
+    "Hi! \u{1F60A} It’s great that you replied!\n\n" +
+    "Would you like to lose weight? I’d be very happy to help you with that.\n\n" +
+    "I’ve already guided thousands of women and men with wonderful results, especially without the dreaded yo-yo effect.\n\n" +
+    "Most of them had already tried many things without getting the result they hoped for.\n\n" +
+    "May I ask what you have already tried?",
+  fr: WELCOME_MESSAGES.fr,
+  de:
+    "Hallo! \u{1F60A} Schön, dass du geantwortet hast!\n\n" +
+    "Möchtest du abnehmen? Ich helfe dir sehr gern dabei.\n\n" +
+    "Ich habe bereits Tausende Frauen und Männer mit großartigen Ergebnissen begleitet, vor allem ohne den gefürchteten Jo-Jo-Effekt.\n\n" +
+    "Die meisten hatten schon vieles ausprobiert, ohne das erhoffte Ergebnis zu erzielen.\n\n" +
+    "Darf ich fragen, was du bereits ausprobiert hast?",
+  it:
+    "Ciao! \u{1F60A} Che bello che hai risposto!\n\n" +
+    "Ti piacerebbe perdere peso? Sarò molto felice di aiutarti.\n\n" +
+    "Ho già seguito migliaia di donne e uomini con splendidi risultati, soprattutto senza il temuto effetto yo-yo.\n\n" +
+    "La maggior parte aveva già provato tante cose senza ottenere il risultato sperato.\n\n" +
+    "Posso chiederti che cosa hai già provato?",
+  es:
+    "¡Hola! \u{1F60A} ¡Qué bien que hayas respondido!\n\n" +
+    "¿Te gustaría perder peso? Estaré encantada de ayudarte.\n\n" +
+    "Ya he acompañado a miles de mujeres y hombres con resultados magníficos, sobre todo sin el temido efecto rebote.\n\n" +
+    "La mayoría ya había probado muchas cosas sin conseguir el resultado que esperaba.\n\n" +
+    "¿Puedo preguntarte qué has probado hasta ahora?",
+  pt:
+    "Olá! \u{1F60A} Que bom teres respondido!\n\n" +
+    "Gostarias de perder peso? Terei todo o gosto em ajudar-te.\n\n" +
+    "Já acompanhei milhares de mulheres e homens com excelentes resultados, sobretudo sem o tão receado efeito ioiô.\n\n" +
+    "A maioria já tinha tentado muitas coisas sem alcançar o resultado esperado.\n\n" +
+    "Posso perguntar-te o que já tentaste?",
+  pl:
+    "Cześć! \u{1F60A} Świetnie, że udało Ci się odpowiedzieć!\n\n" +
+    "Chcesz schudnąć? Z przyjemnością Ci w tym pomogę.\n\n" +
+    "Pomogłam już tysiącom kobiet i mężczyzn osiągnąć piękne rezultaty, przede wszystkim bez obawianego efektu jo-jo.\n\n" +
+    "Większość z nich próbowała już wielu rzeczy bez oczekiwanego rezultatu.\n\n" +
+    "Mogę zapytać, czego już próbowałaś lub próbowałeś?",
+};
 WELCOME_MESSAGES.fr =
   "Bonjour, je suis Emma \u{1F60A}\n\n" +
   "J'aide chaque jour des personnes à atteindre leurs objectifs de santé et je serai ravie de réfléchir avec toi à ce qui peut te convenir \u{1F917}\n\n" +
@@ -166,6 +226,20 @@ function cleanReplyText(value) {
     .replace(/[ \t]{2,}/g, " ")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
+}
+
+const ALLOWED_EMOJIS = new Set(["😊", "🤗", "🙏", "💚", "✅"]);
+
+function enforceAllowedEmojis(value) {
+  const text = cleanReplyText(value);
+  return cleanReplyText(
+    text.replace(/\p{Extended_Pictographic}\uFE0F?/gu, (emoji) => {
+      const normalized = emoji.replace(/\uFE0F/g, "");
+      return ALLOWED_EMOJIS.has(emoji) || ALLOWED_EMOJIS.has(normalized)
+        ? normalized
+        : "";
+    })
+  );
 }
 
 // The website exists in three variants that must be tracked independently:
@@ -250,7 +324,27 @@ function stripTrailingCoachingQuestions(value) {
 // Removes a repeated Stap 4 website/freebies block from a reply. Only
 // called when the website link was already sent earlier AND the customer's
 // current message does not explicitly ask for it.
-function stripRepeatedWebsiteBlock(value) {
+function repeatedContentFallbackForLanguage(language) {
+  const copy = {
+    nl: "Ik denk graag met je mee op basis van wat je al hebt bekeken 💚",
+    en: "I’m happy to help based on what you have already viewed 💚",
+    fr: "Je suis là pour t’aider à partir de ce que tu as déjà consulté 💚",
+    de: "Ich helfe dir gern auf Basis dessen, was du bereits angesehen hast 💚",
+    it: "Ti aiuto volentieri partendo da ciò che hai già visto 💚",
+    es: "Estaré encantada de ayudarte a partir de lo que ya has visto 💚",
+    pt: "Terei todo o gosto em ajudar com base no que já viste 💚",
+    pl: "Chętnie pomogę na podstawie tego, co już udało Ci się zobaczyć 💚",
+  };
+  return copy[cleanText(language).toLowerCase()] || copy.en;
+}
+
+function customerExplicitlyRequestsARepeatedLink(text) {
+  return /\b(link|website|site|pagina|página|page|seite|sito|strona|recept|recipe|recette|rezept|ricetta|receta|receita|przepis|kwijt|lost|perdu|verloren|perso|perdido|nogmaals|opnieuw|again|encore|erneut|nuovo|novamente|ponownie|stuur|send|envoie|schick|invia|env[ií]a|envia|wy[sś]lij)\b/i.test(
+    cleanText(text)
+  );
+}
+
+function stripRepeatedWebsiteBlock(value, language = "en") {
   const text = cleanReplyText(value);
   if (!text || !PLAIN_WEBSITE_LINK_PATTERN.test(text)) return text;
   const paragraphs = text.split("\n\n").filter((p) => {
@@ -265,9 +359,17 @@ function stripRepeatedWebsiteBlock(value) {
     return true;
   });
   const out = cleanReplyText(paragraphs.join("\n\n"));
-  return (
-    out || "Alles over de programma's staat op de pagina die ik je eerder stuurde \u{1F49A}"
-  );
+  return out || repeatedContentFallbackForLanguage(language);
+}
+
+function stripRepeatedTrackedLink(value, pattern, language = "en") {
+  const text = cleanReplyText(value);
+  if (!text || !pattern.test(text)) return text;
+  const paragraphs = text
+    .split("\n\n")
+    .filter((paragraph) => !pattern.test(paragraph));
+  return cleanReplyText(paragraphs.join("\n\n")) ||
+    repeatedContentFallbackForLanguage(language);
 }
 
 function clamp(value, max = 500) {
@@ -347,7 +449,7 @@ function buildResponse({
   language_update = "",
   send_reply,
 }) {
-  const rawReply = reply === NO_REPLY ? NO_REPLY : cleanReplyText(reply);
+  const rawReply = reply === NO_REPLY ? NO_REPLY : enforceAllowedEmojis(reply);
 
   return {
     send_reply:
@@ -524,6 +626,34 @@ function detectLanguageFromText(text) {
   return FRANC_TO_LANGUAGE[iso3] || "other";
 }
 
+function chooseInitialConversationLanguage({
+  explicitRequest,
+  textLanguage,
+  phoneLanguage,
+}) {
+  return (
+    explicitRequest ||
+    (textLanguage && textLanguage !== "other" ? textLanguage : "") ||
+    phoneLanguage ||
+    (textLanguage === "other" ? "en" : "") ||
+    "nl"
+  );
+}
+
+function shouldMigrateLegacyPortugueseLanguage({
+  storedLanguage,
+  customerCountry,
+  explicitRequest,
+  textLanguage,
+}) {
+  return (
+    cleanText(customerCountry).toUpperCase() === "PT" &&
+    ["nl", "en"].includes(normalizeLanguage(storedLanguage)) &&
+    !explicitRequest &&
+    textLanguage === "pt"
+  );
+}
+
 
 /* -------------------------- MESSAGE NORMALIZATION ------------------------- */
 
@@ -543,8 +673,35 @@ function parseTimestamp(value) {
   const raw = cleanText(value);
   if (!raw) return null;
 
+  if (/^\d{10,13}$/.test(raw)) {
+    const numeric = Number(raw);
+    if (!Number.isFinite(numeric)) return null;
+    return raw.length <= 10 ? numeric * 1000 : numeric;
+  }
+
   const t = Date.parse(raw);
   return Number.isFinite(t) ? t : null;
+}
+
+function buildTimingFacts(messages, nowMs = Date.now()) {
+  const latestTimedMessage = [...(Array.isArray(messages) ? messages : [])]
+    .reverse()
+    .find((msg) => parseTimestamp(msg?.timestamp) !== null);
+  const previousTimestampMs = latestTimedMessage
+    ? parseTimestamp(latestTimedMessage.timestamp)
+    : null;
+  const elapsedMs = previousTimestampMs === null
+    ? null
+    : Math.max(0, nowMs - previousTimestampMs);
+
+  return {
+    timestamps_available: previousTimestampMs !== null,
+    previous_message_timestamp: latestTimedMessage?.timestamp || "",
+    elapsed_since_previous_message_ms: elapsedMs,
+    within_30_minutes_of_previous_message:
+      elapsedMs === null ? null : elapsedMs < 30 * 60 * 1000,
+    timing_is_factual_not_pause_intent: true,
+  };
 }
 
 function normalizeRecentMessages(value) {
@@ -604,6 +761,22 @@ function removeCurrentUserMessageFromHistory(messages, currentMessage) {
     .reverse();
 }
 
+function messageLooksLikeStep2Checklist(value) {
+  const text = String(value || "");
+  return (
+    text.includes("✅") &&
+    text.includes("?") &&
+    !/(?:nutritionworks\.online|tr\.ee\/|chat\.whatsapp\.com)/i.test(text)
+  );
+}
+
+function latestMessageMatching(messages, predicate) {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    if (predicate(messages[index])) return messages[index];
+  }
+  return null;
+}
+
 function sanitizeAndPrepareRecentMessages(recentMessages, currentMessage) {
   const normalized = normalizeRecentMessages(recentMessages);
   const sorted = sortMessagesChronologically(normalized);
@@ -620,9 +793,35 @@ function sanitizeAndPrepareRecentMessages(recentMessages, currentMessage) {
     currentMessage
   );
 
-  return withoutCurrentMessage
-    .filter((msg) => msg.message_text)
-    .slice(-MAX_CONTEXT_MESSAGES)
+  const contentMessages = withoutCurrentMessage.filter((msg) => msg.message_text);
+  const pinnedMilestones = [
+    latestMessageMatching(contentMessages, (msg) =>
+      msg.role === "emma" && PLAIN_WEBSITE_LINK_PATTERN.test(msg.message_text)
+    ),
+    latestMessageMatching(contentMessages, (msg) =>
+      msg.role === "emma" && TESTIMONIALS_LINK_PATTERN.test(msg.message_text)
+    ),
+    latestMessageMatching(contentMessages, (msg) =>
+      msg.role === "emma" && PROGRAMMA_INFO_LINK_PATTERN.test(msg.message_text)
+    ),
+    latestMessageMatching(contentMessages, (msg) =>
+      msg.role === "emma" && hasCheckoutLinkBeenSent([msg])
+    ),
+    latestMessageMatching(contentMessages, (msg) =>
+      msg.role === "emma" && /chat\.whatsapp\.com/i.test(msg.message_text)
+    ),
+    latestMessageMatching(contentMessages, (msg) =>
+      msg.role === "emma" && messageLooksLikeStep2Checklist(msg.message_text)
+    ),
+  ].filter(Boolean);
+  const recentTail = contentMessages.slice(-MAX_CONTEXT_MESSAGES);
+  const prepared = sortMessagesChronologically(
+    uniqueBy([...pinnedMilestones, ...recentTail], (msg) => {
+      return `${msg.role}|${normalizeComparableText(msg.message_text)}|${msg.timestamp || ""}`;
+    })
+  );
+
+  return prepared
     .map((msg) => ({
       role: msg.role || "unknown",
       message_text: clamp(msg.message_text, MAX_MESSAGE_CHARS),
@@ -656,19 +855,232 @@ function hasPriceBeenMentioned(messages) {
 }
 
 function hasCheckoutLinkBeenSent(messages) {
-  // Matches any of the real tr.ee checkout URLs. Covers Control, all 4 program
-  // SKUs, all program+Control combos, loose upgrade products (Berry caps,
-  // Fruit/Vegetable caps, Berry+Fruit/Vegetable combos), extra products
-  // (Omega, Complete Bars, Superfood, Luminate, Vegetable Soup), in both
-  // Dutch and Belgian markets, plus the France 4-instalment links which all
-  // end in "-4x-fr".
   return messages.some(
-    (msg) =>
-      msg.role === "emma" &&
-      /tr\.ee\/(?:bestellen-(?:nl|be)-|(?:basic|beauty|deluxe|exclusive)-(?:van|choc|mix)|control1x|[a-z0-9-]+-4x-fr\b)/i.test(
-        msg.message_text
-      )
+    (msg) => {
+      if (msg.role !== "emma") return false;
+      const links = [...cleanText(msg.message_text).matchAll(TREE_LINK_PATTERN)];
+      return links.some((match) =>
+        APPROVED_CHECKOUT_SLUGS.has(cleanText(match[1]).toLowerCase())
+      );
+    }
   );
+}
+
+const APPROVED_CHECKOUT_SLUGS = new Set([
+  "basic-choc", "basic-choc-control", "basic-mix", "basic-mix-control", "basic-van", "basic-van-control",
+  "beauty-choc", "beauty-choc-control", "beauty-mix", "beauty-mix-control", "beauty-van", "beauty-van-control",
+  "deluxe-choc", "deluxe-choc-control", "deluxe-mix", "deluxe-mix-control", "deluxe-van", "deluxe-van-control",
+  "exclusive-choc", "exclusive-choc-control", "exclusive-mix", "exclusive-mix-control", "exclusive-van", "exclusive-van-control",
+  "control1x", "fruit-veg-berry-soft", "fruit-veg-soft", "berries", "berries-omega", "berries-soft",
+  "fruit-veg-berry", "fruit-vegtables", "essentials-omega", "omegaselection", "superfood",
+  "bestellen-be-repen-choc", "bestellen-be-repen-fruit", "bestellen-be-repen-mix", "bestellen-be-soep60",
+  "bestellen-nl-luminate15", "bestellen-nl-luminate30", "bestellen-nl-repen-choc", "bestellen-nl-repen-fruit",
+  "bestellen-nl-repen-mix", "bestellen-nl-soep30", "bestellen-nl-soep60",
+  "baies-4x-fr", "barres-choc-4x-fr", "barres-fruits-4x-fr", "barres-mixte-4x-fr",
+  "basic-choc-4x-fr", "basic-choc-control-4x-fr", "basic-mix-control-4x-fr", "basic-mixte-4x-fr", "basic-van-4x-fr", "basic-van-control-4x-fr",
+  "beauty-choc-4x-fr", "beauty-choc-control-4x-fr", "beauty-mixte-4x-fr", "beauty-mixte-control-4x-fr", "beauty-van-4x-fr", "beauty-van-control-4x-fr",
+  "control-4x-fr", "deluxe-choc-4x-fr", "deluxe-choc-control-4x-fr", "deluxe-mixte-4x-fr", "deluxe-mixte-control-4x-fr", "deluxe-van-4x-fr", "deluxe-van-control-4x-fr",
+  "exclusive-choc-4x-fr", "exclusive-choc-control-4x-fr", "exclusive-mixte-4x-fr", "exclusive-mixte-control-4x-fr", "exclusive-van-4x-fr", "exclusive-van-control-4x-fr",
+  "fruits-legumes-4x-fr", "fruits-legumes-baies-4x-fr", "fruits-legumes-baies-omega-4x-fr", "omega-4x-fr", "superfood-4x-fr",
+]);
+
+const TREE_LINK_PATTERN = /https?:\/\/tr\.ee\/([a-z0-9-]+)/gi;
+
+const FRANCE_PRODUCT_LINKS = new Map([
+  ["control1x", "control-4x-fr"],
+  ["berries", "baies-4x-fr"],
+  ["fruit-vegtables", "fruits-legumes-4x-fr"],
+  ["fruit-veg-berry", "fruits-legumes-baies-4x-fr"],
+  ["essentials-omega", "fruits-legumes-baies-omega-4x-fr"],
+  ["omegaselection", "omega-4x-fr"],
+  ["superfood", "superfood-4x-fr"],
+  ["bestellen-nl-repen-choc", "barres-choc-4x-fr"],
+  ["bestellen-nl-repen-fruit", "barres-fruits-4x-fr"],
+  ["bestellen-nl-repen-mix", "barres-mixte-4x-fr"],
+  ["bestellen-be-repen-choc", "barres-choc-4x-fr"],
+  ["bestellen-be-repen-fruit", "barres-fruits-4x-fr"],
+  ["bestellen-be-repen-mix", "barres-mixte-4x-fr"],
+]);
+
+const FRANCE_UNIVERSAL_ONLY_SLUGS = new Set([
+  "berries-omega",
+  "fruit-veg-berry-soft",
+  "fruit-veg-soft",
+  "berries-soft",
+  "bestellen-nl-luminate15",
+  "bestellen-nl-luminate30",
+  "bestellen-nl-soep30",
+  "bestellen-nl-soep60",
+]);
+
+function hasExplicitOneTimePaymentRequest(text) {
+  return /\b(in (?:één|een) keer|alles (?:in )?(?:één|een) keer|eenmalig|one[-\s]?time|pay in full|single payment|en une seule fois|paiement unique|einmalig|auf einmal|pagamento unico|pago [uú]nico|de uma s[oó] vez|jednorazowo)\b/i.test(
+    cleanText(text)
+  );
+}
+
+function mapCheckoutLinkForCountry(slug, customerCountry) {
+  const country = cleanText(customerCountry).toUpperCase();
+  const normalizedSlug = cleanText(slug).toLowerCase();
+  const universal = slug.match(
+    /^(basic|beauty|deluxe|exclusive)-(van|choc|mix)(-control)?$/i
+  );
+  const france = slug.match(
+    /^(basic|beauty|deluxe|exclusive)-(van|choc|mixte|mix)(-control)?-4x-fr$/i
+  );
+
+  if (country === "FR" && universal) {
+    const [, program, taste, control = ""] = universal;
+    const franceTaste = taste.toLowerCase() === "mix"
+      ? program.toLowerCase() === "basic" && control
+        ? "mix"
+        : "mixte"
+      : taste.toLowerCase();
+    return `${program.toLowerCase()}-${franceTaste}${control.toLowerCase()}-4x-fr`;
+  }
+
+  if (country === "FR" && FRANCE_PRODUCT_LINKS.has(normalizedSlug)) {
+    return FRANCE_PRODUCT_LINKS.get(normalizedSlug);
+  }
+
+  if (country !== "FR" && france) {
+    const [, program, taste, control = ""] = france;
+    const titleProgram = program.charAt(0).toUpperCase() + program.slice(1).toLowerCase();
+    const titleTaste = taste.toLowerCase().startsWith("mix")
+      ? "Mix"
+      : taste.charAt(0).toUpperCase() + taste.slice(1).toLowerCase();
+    return `${titleProgram}-${titleTaste}${control ? "-Control" : ""}`;
+  }
+
+  if (country !== "FR") {
+    for (const [universalSlug, franceSlug] of FRANCE_PRODUCT_LINKS) {
+      if (franceSlug !== normalizedSlug) continue;
+      if (/^bestellen-(?:nl|be)-repen-/.test(universalSlug)) {
+        const taste = normalizedSlug.match(/^barres-(choc|fruits|mixte)-4x-fr$/)?.[1];
+        const market = country === "BE" ? "be" : "nl";
+        const localTaste = taste === "fruits" ? "fruit" : taste === "mixte" ? "mix" : "choc";
+        return `bestellen-${market}-repen-${localTaste}`;
+      }
+      return universalSlug;
+    }
+  }
+
+  return slug;
+}
+
+function enforceTechnicalCheckoutLinks({
+  reply,
+  customerCountry,
+  language,
+  currentMessage,
+  recentMessages,
+}) {
+  const text = cleanReplyText(reply);
+  const links = [...text.matchAll(TREE_LINK_PATTERN)];
+  if (links.length === 0) {
+    return { reply: text, changed: false, reason: "no_checkout_link" };
+  }
+  if (links.length > 1) {
+    return {
+      reply: fallbackReplyForLanguage(language),
+      changed: true,
+      reason: "multiple_checkout_links_blocked",
+    };
+  }
+
+  const match = links[0];
+  const originalUrl = match[0];
+  const slug = cleanText(match[1]).toLowerCase();
+  const country = cleanText(customerCountry).toUpperCase();
+  if (!APPROVED_CHECKOUT_SLUGS.has(slug)) {
+    return {
+      reply: fallbackReplyForLanguage(language),
+      changed: true,
+      reason: "unknown_checkout_link_blocked",
+    };
+  }
+
+  if (country === "PT" && /(?:^control1x$|-control(?:-|$)|^control-4x-fr$)/i.test(slug)) {
+    return {
+      reply: fallbackReplyForLanguage(language),
+      changed: true,
+      reason: "portugal_control_link_blocked",
+    };
+  }
+
+  if (
+    country === "BE" &&
+    /^(?:superfood|bestellen-nl-luminate(?:15|30)|bestellen-nl-soep30)$/i.test(slug)
+  ) {
+    return {
+      reply: fallbackReplyForLanguage(language),
+      changed: true,
+      reason: "belgium_unavailable_product_link_blocked",
+    };
+  }
+
+  const previousCheckoutLink = findLastEmmaCheckoutLink(recentMessages, "");
+  const previousCheckoutSlug =
+    previousCheckoutLink.match(/https?:\/\/tr\.ee\/([a-z0-9-]+)/i)?.[1] || "";
+  const previousWasOneTime =
+    country === "FR" &&
+    Boolean(previousCheckoutLink) &&
+    /^(?:basic|beauty|deluxe|exclusive)-(?:van|choc|mix)(?:-control)?$/i.test(
+      previousCheckoutSlug
+    );
+  const oneTimeRequestInHistory = (Array.isArray(recentMessages)
+    ? recentMessages
+    : []
+  ).some(
+    (message) =>
+      message.role === "user" &&
+      hasExplicitOneTimePaymentRequest(message.message_text)
+  );
+  const franceOneTimeAllowed =
+    country === "FR" &&
+    (previousWasOneTime ||
+      oneTimeRequestInHistory ||
+      hasExplicitOneTimePaymentRequest(currentMessage));
+  const isFranceLink = /-4x-fr$/i.test(slug);
+
+  if (country !== "FR" && isFranceLink) {
+    const mappedSlug = mapCheckoutLinkForCountry(slug, country);
+    if (mappedSlug !== slug && APPROVED_CHECKOUT_SLUGS.has(mappedSlug.toLowerCase())) {
+      return {
+        reply: text.replace(originalUrl, `https://tr.ee/${mappedSlug}`),
+        changed: true,
+        reason: "france_programme_link_corrected_for_other_country",
+      };
+    }
+    return {
+      reply: fallbackReplyForLanguage(language),
+      changed: true,
+      reason: "france_only_link_blocked",
+    };
+  }
+
+  if (
+    country === "FR" &&
+    !isFranceLink &&
+    !franceOneTimeAllowed &&
+    !FRANCE_UNIVERSAL_ONLY_SLUGS.has(slug)
+  ) {
+    const mappedSlug = mapCheckoutLinkForCountry(slug, country);
+    if (mappedSlug !== slug && APPROVED_CHECKOUT_SLUGS.has(mappedSlug.toLowerCase())) {
+      return {
+        reply: text.replace(originalUrl, `https://tr.ee/${mappedSlug}`),
+        changed: true,
+        reason: "programme_link_corrected_for_france",
+      };
+    }
+    return {
+      reply: fallbackReplyForLanguage(language),
+      changed: true,
+      reason: "non_france_link_blocked_for_france",
+    };
+  }
+
+  return { reply: text, changed: false, reason: "checkout_link_valid" };
 }
 
 function hasWhatsappGroupLinkBeenSent(messages) {
@@ -685,157 +1097,6 @@ function hasAskedOrderNumber(messages) {
   );
 }
 
-function hasAskedTaste(messages) {
-  return messages.some(
-    (msg) =>
-      msg.role === "emma" &&
-      /welke smaak|chocolade.*vanille|vanille.*chocolade|half-half|smaak complete/i.test(
-        msg.message_text
-      )
-  );
-}
-
-function hasReceivedTasteAnswer(messages) {
-  return messages.some(
-    (msg) =>
-      msg.role === "user" &&
-      /\b(chocola(?:de|t)?|vanille|half[-\s]?half|half|mix|gemengd)\b/i.test(
-        msg.message_text
-      )
-  );
-}
-
-function isTasteOnlyCheckoutAnswer(text) {
-  const normalized = cleanText(text).toLowerCase();
-  if (!normalized) return false;
-
-  // Only intercept short answers whose actual content is the taste choice.
-  // Longer messages or questions about Control remain available to Emma so she
-  // can answer them naturally before asking for the final yes/no choice.
-  return /^\s*(?:graag\s+)?(?:chocola(?:de|t)?|vanille|half[-\s]?half|half|mix|gemengd)(?:\s+graag)?[.!]?\s*$/i.test(
-    normalized
-  );
-}
-
-function controlFollowUpForLanguage(language, tasteText) {
-  const taste = cleanText(tasteText).toLowerCase();
-  const labels = {
-    nl: { chocolate: "chocolade", vanilla: "vanille", mix: "half-half" },
-    en: { chocolate: "chocolate", vanilla: "vanilla", mix: "half-and-half" },
-    fr: { chocolate: "chocolat", vanilla: "vanille", mix: "moitié-moitié" },
-    de: { chocolate: "Schokolade", vanilla: "Vanille", mix: "halb-halb" },
-    it: { chocolate: "cioccolato", vanilla: "vaniglia", mix: "metà e metà" },
-    es: { chocolate: "chocolate", vanilla: "vainilla", mix: "mitad y mitad" },
-    pt: { chocolate: "chocolate", vanilla: "baunilha", mix: "meio a meio" },
-    pl: { chocolate: "czekolada", vanilla: "wanilia", mix: "pół na pół" },
-  };
-
-  const key = /chocola/.test(taste)
-    ? "chocolate"
-    : /half|mix|gemengd/.test(taste)
-      ? "mix"
-      : "vanilla";
-  const lang = labels[language] ? language : "en";
-  const label = labels[lang][key];
-
-  const messages = {
-    nl: `Helder, ${label} genoteerd 💚\n\nWil je Control erbij doen? 😊`,
-    en: `Got it, ${label} noted 💚\n\nWould you like to add Control? 😊`,
-    fr: `Parfait, ${label} noté 💚\n\nSouhaites-tu ajouter Control ? 😊`,
-    de: `Alles klar, ${label} ist notiert 💚\n\nMöchtest du Control dazu nehmen? 😊`,
-    it: `Perfetto, ${label} segnato 💚\n\nVuoi aggiungere Control? 😊`,
-    es: `Perfecto, ${label} anotado 💚\n\n¿Quieres añadir Control? 😊`,
-    pt: `Perfeito, ${label} registado 💚\n\nQueres adicionar Control? 😊`,
-    pl: `Jasne, zapisuję ${label} 💚\n\nCzy chcesz dodać Control? 😊`,
-  };
-
-  return messages[lang];
-}
-
-// Detects whether the user has explicitly answered Emma's "wil je Control
-// erbij?" upsell question in the checkout flow. Looks for affirmative or
-// negative responses around Control, plus standalone yes/no answers that
-// immediately follow Emma's combo question containing "Control".
-function hasReceivedControlAnswer(messages) {
-  // Find the most recent Emma message that asks about Control.
-  // Matches several common phrasings of the upsell question:
-  //   - "Control er gelijk bij doen"
-  //   - "Control erbij doen"
-  //   - "Control er bij"
-  //   - "Control toevoegen"
-  //   - "ook Control"
-  const emmaControlQuestionPattern =
-    /control\s+(?:er\s*(?:gelijk\s+)?bij|toevoegen)|\book\s+control\b/i;
-  let lastEmmaIndexWithControlAsk = -1;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const msg = messages[i];
-    if (
-      msg.role === "emma" &&
-      emmaControlQuestionPattern.test(msg.message_text || "")
-    ) {
-      lastEmmaIndexWithControlAsk = i;
-      break;
-    }
-  }
-
-  // Check user messages AFTER Emma's Control question for an answer
-  const userMessagesAfterAsk =
-    lastEmmaIndexWithControlAsk >= 0
-      ? messages.slice(lastEmmaIndexWithControlAsk + 1)
-      : messages;
-
-  return userMessagesAfterAsk.some((msg) => {
-    if (msg.role !== "user") return false;
-    const text = (msg.message_text || "").toLowerCase();
-
-    // Explicit Control yes/no
-    if (
-      /\b(ja|jazeker|graag|prima|zeker|doe maar|inderdaad|natuurlijk).{0,30}control\b/i.test(
-        text
-      )
-    )
-      return true;
-    if (
-      /\bcontrol.{0,30}(ja|jazeker|graag|prima|zeker|doe maar|inderdaad|natuurlijk)\b/i.test(
-        text
-      )
-    )
-      return true;
-    if (
-      /\b(nee|geen|zonder|liever niet|laat maar).{0,30}control\b/i.test(text)
-    )
-      return true;
-    if (
-      /\bcontrol.{0,30}(nee|geen|zonder|liever niet|laat maar|niet)\b/i.test(
-        text
-      )
-    )
-      return true;
-
-    // Standalone yes/no when Emma's last question contained Control
-    if (lastEmmaIndexWithControlAsk >= 0) {
-      // Standalone affirmative answers (single or short combinations).
-      // The "doe\s*maa?r[ts]?" pattern matches "doe maar", "doemaar",
-      // "doe maart" (common typo with extra t), "doe mar", etc.
-      if (
-        /^\s*(?:ja|jazeker|graag|prima|doe\s*maa?r[ts]?|inderdaad|natuurlijk|zeker|oke|ok|jep|yes|sure)(?:\s+(?:graag|zeker|prima|doe\s*maa?r[ts]?|natuurlijk))?\s*[\.!]?\s*$/i.test(
-          text
-        )
-      )
-        return true;
-      // Standalone negative answers (single or short combinations)
-      if (
-        /^\s*(?:nee|nope|geen|niks)(?:,?\s*(?:dank\s*je(?:\s*wel)?|bedankt|laat\s+maar|hoor|joh))?\s*[\.!]?\s*$/i.test(
-          text
-        )
-      )
-        return true;
-    }
-
-    return false;
-  });
-}
-
 function isCustomerStatusValidated(customerStatus, recentMessages) {
   return (
     cleanText(customerStatus).toLowerCase() === "customer" ||
@@ -847,16 +1108,14 @@ function isCustomerStatusValidated(customerStatus, recentMessages) {
 // Internal product detection (deterministic, code-side).
 // Triggers when a valid order number has been shared AND a WhatsApp group
 // link has been sent — same gate as customer_status validation.
-// Once triggered, derives purchased_program, has_control, interested_in_program
-// and interested_in_control from the conversation content.
+// Once triggered, derives only verified purchase facts. Programme interest,
+// comparison and doubt remain contextual CRM facts handled by the extractor.
 
 // Juice Plus order numbers always start with "JP04", followed by a
 // customer-specific code. "JP04" alone is not enough: require at least
 // three extra characters after the prefix.
 const ORDER_NUMBER_PATTERN = /\bJP04[-_]?[A-Z0-9]{3,}\b/i;
-const PROGRAM_PATTERN = /\b(basic|beauty|deluxe|exclusive)\b/i;
 const PROGRAM_PATTERN_GLOBAL = /\b(basic|beauty|deluxe|exclusive)\b/gi;
-const CONTROL_MENTION_PATTERN = /\bcontrol\b/i;
 const CONTROL_COMBO_PATTERN =
   /(?:\bmet[\s-]*(?:de[\s-]*)?control|\ben[\s-]*(?:de[\s-]*)?control|\binclusief[\s-]*control|\bcontrol[\s-]*erbij|(?:^|\s|\W)\+[\s-]*control)/i;
 
@@ -1005,24 +1264,6 @@ function extractPurchasedProgram(messages, currentReply) {
   return findProgramInText(confirmationText);
 }
 
-function extractInterestedInProgram(messages, currentUserMessage) {
-  // Program interest is based only on the customer's own statements or
-  // choices. A program suggested by Emma must never be stored as customer
-  // interest. Take the customer's LAST explicit program mention.
-  let lastMatch = "";
-
-  for (const msg of messages) {
-    if (msg.role !== "user") continue;
-    const found = findProgramInText(cleanText(msg.message_text));
-    if (found) lastMatch = found;
-  }
-
-  const userFound = findProgramInText(cleanText(currentUserMessage));
-  if (userFound) lastMatch = userFound;
-
-  return lastMatch;
-}
-
 function deriveHasControl(messages, currentReply, programName) {
   // Returns "ja" / "nee" for consistency with the interested_in_control field
   // (both fields use the same Dutch boolean style in Airtable, instead of the
@@ -1048,65 +1289,10 @@ function deriveHasControl(messages, currentReply, programName) {
   return CONTROL_COMBO_PATTERN.test(confirmationText) ? "ja" : "nee";
 }
 
-function deriveInterestedInControl(messages, currentUserMessage) {
-  // Store Control interest only when the customer shows demonstrably positive
-  // interest. Emma mentioning or explaining Control is never sufficient.
-  // Negative answers are deliberately returned as an empty update so they can
-  // never be stored as positive interest.
-  const positiveWithControl =
-    /(?:\b(?:ja|jazeker|graag|prima|zeker|doe\s*maa?r[ts]?|inderdaad|natuurlijk|oke|ok|yes|sure)\b.{0,40}\bcontrol\b|\bcontrol\b.{0,40}\b(?:ja|jazeker|graag|prima|zeker|doe\s*maa?r[ts]?|inderdaad|natuurlijk|oke|ok|yes|sure|erbij|toevoegen|nemen|wil|bestellen)\b)/i;
-  const negativeWithControl =
-    /(?:\b(?:nee|geen|zonder|liever\s+niet|laat\s+maar)\b.{0,40}\bcontrol\b|\bcontrol\b.{0,40}\b(?:nee|niet|geen|zonder|liever\s+niet|laat\s+maar)\b)/i;
-  const standalonePositive =
-    /^\s*(?:ja|jazeker|graag|prima|doe\s*maa?r[ts]?|inderdaad|natuurlijk|zeker|oke|ok|jep|yes|sure)(?:\s+(?:graag|zeker|prima|doe\s*maa?r[ts]?|natuurlijk))?\s*[.!]?\s*$/i;
-  const standaloneNegative =
-    /^\s*(?:nee|nope|geen|niks)(?:,?\s*(?:dank\s*je(?:\s*wel)?|bedankt|laat\s+maar|hoor|joh))?\s*[.!]?\s*$/i;
-
-  let lastEmmaControlAsk = -1;
-  const emmaControlQuestionPattern =
-    /control\s+(?:er\s*(?:gelijk\s+)?bij|toevoegen)|\book\s+control\b/i;
-
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const msg = messages[i];
-    if (msg.role === "emma" && emmaControlQuestionPattern.test(cleanText(msg.message_text))) {
-      lastEmmaControlAsk = i;
-      break;
-    }
-  }
-
-  const customerTexts = [];
-  for (let i = 0; i < messages.length; i++) {
-    if (messages[i].role === "user") {
-      customerTexts.push({ index: i, text: cleanText(messages[i].message_text) });
-    }
-  }
-  if (currentUserMessage) {
-    customerTexts.push({ index: messages.length, text: cleanText(currentUserMessage) });
-  }
-
-  for (let i = customerTexts.length - 1; i >= 0; i--) {
-    const { index, text } = customerTexts[i];
-    if (!text) continue;
-
-    if (negativeWithControl.test(text)) return "";
-    if (positiveWithControl.test(text)) return "ja";
-
-    // A simple "ja" counts when it answers the latest still-open Control
-    // question. Intervening Emma explanations do not close that question.
-    if (lastEmmaControlAsk >= 0 && index > lastEmmaControlAsk) {
-      if (standaloneNegative.test(text)) return "";
-      if (standalonePositive.test(text)) return "ja";
-    }
-  }
-
-  return "";
-}
-
 function derivePurchaseFields({
   recentMessages,
   currentUserMessage,
   currentReply,
-  whatsappGroupLinkSentNowOrEarlier,
 }) {
   // Hard gate: a valid JP04 order number from the user AND a checkout link
   // sent by Emma. The checkout URL is the canonical purchased SKU.
@@ -1118,24 +1304,11 @@ function derivePurchaseFields({
   const checkoutLink = findLastEmmaCheckoutLink(recentMessages, currentReply);
   const validated = orderNumberPresent && Boolean(checkoutLink);
 
-  // interested_in_program / interested_in_control can be derived independently
-  // of the purchase trigger (a customer can be "interested" before buying).
-  const interestedInProgram = extractInterestedInProgram(
-    recentMessages,
-    currentUserMessage
-  );
-  const interestedInControlSignal = deriveInterestedInControl(
-    recentMessages,
-    currentUserMessage
-  );
-
   if (!validated) {
     return {
       validated: false,
       purchased_program: "",
       has_control: "",
-      interested_in_program: interestedInProgram,
-      interested_in_control: interestedInControlSignal,
     };
   }
 
@@ -1152,8 +1325,6 @@ function derivePurchaseFields({
     validated: true,
     purchased_program: purchasedProgram,
     has_control: hasControl,
-    interested_in_program: interestedInProgram,
-    interested_in_control: interestedInControlSignal,
   };
 }
 
@@ -1278,15 +1449,13 @@ function buildContextBlock({
   const priceAlreadyMentioned = hasPriceBeenMentioned(recent_messages);
   const checkoutLinkAlreadySent = hasCheckoutLinkBeenSent(recent_messages);
   const whatsappGroupLinkAlreadySent = hasWhatsappGroupLinkBeenSent(recent_messages);
-  const tasteAlreadyAsked = hasAskedTaste(recent_messages);
-  const tasteAnswerReceived = hasReceivedTasteAnswer(recent_messages);
-  const controlAnswerReceived = hasReceivedControlAnswer(recent_messages);
   const orderNumberAlreadyAsked = hasAskedOrderNumber(recent_messages);
 
   const validatedCustomer = isCustomerStatusValidated(
     customer_status,
     recent_messages
   );
+  const timingFacts = buildTimingFacts(recent_messages);
 
   const context = {
     agent_name: "Emma",
@@ -1298,13 +1467,11 @@ function buildContextBlock({
       price_already_mentioned: priceAlreadyMentioned,
       checkout_link_already_sent: checkoutLinkAlreadySent,
       whatsapp_group_link_already_sent: whatsappGroupLinkAlreadySent,
-      taste_already_asked: tasteAlreadyAsked,
-      taste_answer_received: tasteAnswerReceived,
-      control_answer_received: controlAnswerReceived,
       order_number_already_asked: orderNumberAlreadyAsked,
       conversation_language: cleanText(conversation_language) || "nl",
       customer_country: cleanText(customer_country) || "UNKNOWN",
       order_validation_server_side: true,
+      pause_timing: timingFacts,
     },
     crm_memory: {
       customer_status: validatedCustomer ? "customer" : cleanText(customer_status),
@@ -1321,6 +1488,7 @@ function buildContextBlock({
     recent_conversation_history: recent_messages.map((msg) => ({
       role: msg.role,
       message_text: clamp(msg.message_text, MAX_MESSAGE_CHARS),
+      timestamp: msg.timestamp || "",
     })),
     repetition_guard: {
       do_not_repeat_these_recent_emma_messages: lastEmmaMessages,
@@ -1334,6 +1502,7 @@ function buildContextBlock({
         "Als het gesprek bestaand is: stel jezelf niet opnieuw voor en gebruik geen startbericht.",
         "Zeg NOOIT welkom terug, goed dat je er weer bent of iets vergelijkbaars, en maak nooit opmerkingen over verstreken tijd. Begin altijd direct met je antwoord, alsof het gesprek gewoon doorloopt.",
         "Vraag NOOIT of de klant er nog is en jaag nooit op (geen Ben je er nog, Lukt het, Heb je al gekeken). Een emoji of kort bericht is een gewoon bericht: reageer er kort en warm op. Follow-ups gebeuren handmatig, nooit door jou.",
+        "Gebruik pause_timing uitsluitend als feitelijke tijdinformatie. Alleen de volledige gesprekscontext bepaalt of werkelijk een tijdelijke pauze was aangekondigd; tijd of een kort bericht op zichzelf bewijst dat nooit.",
         "Als website_link_already_sent true is: stuur de website-link en het freebies-blok NOOIT opnieuw, tenzij de klant er expliciet om vraagt. Geef bij twijfel kort persoonlijk advies in eigen woorden, zonder link.",
         "Als testimonials_link_already_sent true is: stuur de testimonials-link NIET opnieuw, tenzij de klant er expliciet om vraagt — verwijs in woorden naar de resultatenpagina.",
         "Als programma_info_link_already_sent true is: stuur de programma-uitleg link NIET opnieuw, tenzij de klant er expliciet om vraagt.",
@@ -1537,15 +1706,17 @@ async function getStructuredUpdates({
     "- Geef de huidige fase terug zodra die verandert ten opzichte van current_phase.",
     "- Als de fase niet duidelijk verandert: lege string.",
     "",
-    "interested_in_program_update — Welk specifiek programma (Basic, Beauty, Deluxe of Exclusive) de klant zelf expliciet noemt of kiest.",
+    "interested_in_program_update — Welk ene specifieke programma (Basic, Beauty, Deluxe of Exclusive) de klant zelf duidelijk verkiest of kiest.",
     "- Geldige waarden: Basic / Beauty / Deluxe / Exclusive / (lege string).",
-    "- Vul ALLEEN in als de klant zelf de exacte programmanaam (Basic, Beauty, Deluxe of Exclusive) noemt of kiest.",
+    "- Alleen een duidelijke voorkeur, interesse in één programma of definitieve keuze telt.",
+    "- Alleen een programmanaam noemen is niet genoeg. Noemt de klant meerdere programma's, vergelijkt die of twijfelt ertussen, retourneer dan altijd een lege string.",
+    "- Kies nooit zelf één programma uit meerdere genoemde opties en kopieer nooit een advies van Emma als klantkeuze.",
     "- Algemene koopintentie, het bestellen van Control, of interesse in afvallen tellen NIET als programma-interesse.",
-    "- Kies nooit een default programma. Als geen programmanaam letterlijk is genoemd: lege string. Verzin nooit een programma.",
+    "- Kies nooit een default programma. Verzin nooit een programma.",
     "",
     "interested_in_control_update — Of de klant aantoonbaar positieve interesse toont in Control.",
     "- Geldige waarden: ja / (lege string).",
-    "- Vul \"ja\" alleen in bij een positieve uitspraak of keuze van de klant, inclusief een kort contextueel antwoord zoals 'ja' op een openstaande Control-vraag.",
+    "- Vul \"ja\" alleen in bij een contextueel duidelijke positieve uitspraak of keuze van de klant, inclusief een kort antwoord zoals 'ja' wanneer uit het volledige gesprek blijkt dat dit de openstaande Control-vraag beantwoordt.",
     "- Een vermelding of suggestie van Emma is nooit voldoende.",
     "- Negatieve antwoorden zoals 'nee', 'geen Control' en 'laat maar' geven altijd een lege string.",
     "",
@@ -1675,6 +1846,7 @@ async function getElevenReply({
   requestId,
   requestStartMs,
 }) {
+  const fallbackReply = fallbackReplyForLanguage(conversationLanguage);
   const diag = (event, extra = {}) => {
     const now = Date.now();
     console.log(
@@ -1710,7 +1882,7 @@ async function getElevenReply({
     const settle = (reply) => {
       if (settled) return;
       settled = true;
-      resolve(cleanReplyText(reply) || FALLBACK_REPLY);
+      resolve(cleanReplyText(reply) || fallbackReply);
     };
 
     try {
@@ -1725,7 +1897,7 @@ async function getElevenReply({
         try {
           ws.close();
         } catch {}
-        settle(finalReply || FALLBACK_REPLY);
+        settle(finalReply || fallbackReply);
       }, ELEVEN_TIMEOUT_MS);
 
       ws.on("open", () => {
@@ -1811,30 +1983,12 @@ async function getElevenReply({
         }
         if (guardCheckoutSent) {
           guardLines.push(
-            "Er is AL een checkout-link gestuurd. Geen nieuwe checkout-link, tenzij de klant er expliciet om vraagt of een andere keuze maakt."
+            "TECHNISCH FEIT: er is al een checkout-link gestuurd. Bij een expliciete wijziging of verzoek om dezelfde link mag je de juiste link sturen, maar herhaal het freebiesblok en de betaaluitleg nooit."
           );
         }
         if (guardPriceMentioned) {
           guardLines.push(
             "De prijs is AL genoemd. Niet herhalen, tenzij de klant ernaar vraagt."
-          );
-        }
-        if (hasReceivedTasteAnswer(recentMessages)) {
-          guardLines.push(
-            "De smaak is AL door de klant gegeven — vraag er NOOIT meer naar. Pak het antwoord uit de gespreksgeschiedenis."
-          );
-        }
-        if (hasReceivedControlAnswer(recentMessages)) {
-          guardLines.push(
-            "De Control-vraag is AL beantwoord — vraag er NOOIT meer naar. Zijn product en smaak bekend: stuur NU direct de juiste checkout-link (sectie 5.3)."
-          );
-        } else if (
-          hasAskedTaste(recentMessages) &&
-          hasReceivedTasteAnswer(recentMessages) &&
-          (customerCountry || "").toUpperCase() !== "PT"
-        ) {
-          guardLines.push(
-            "De smaak is bekend, maar de Control-vraag is nog NIET beantwoord. Stuur GEEN checkout-link en neem Control niet aan. Vraag uitsluitend kort: 'Wil je Control erbij doen?' Pas na een duidelijk ja of nee mag de checkout-link worden gestuurd."
           );
         }
         if ((customerCountry || "").toUpperCase() === "PT") {
@@ -1970,7 +2124,7 @@ async function getElevenReply({
           const reply =
             cleanReplyText(data.agent_response_event?.agent_response) ||
             cleanReplyText(finalReply) ||
-            FALLBACK_REPLY;
+            fallbackReply;
 
           settle(reply);
         }
@@ -1983,7 +2137,7 @@ async function getElevenReply({
         });
         console.error("ELEVENLABS WS ERROR:", err?.message || err);
         clearTimeout(timeout);
-        settle(finalReply || FALLBACK_REPLY);
+        settle(finalReply || fallbackReply);
       });
 
       ws.on("close", () => {
@@ -1993,7 +2147,7 @@ async function getElevenReply({
         });
         clearTimeout(timeout);
         if (!settled) {
-          settle(finalReply || FALLBACK_REPLY);
+          settle(finalReply || fallbackReply);
         }
       });
     } catch (error) {
@@ -2002,7 +2156,7 @@ async function getElevenReply({
       });
       console.error("ELEVENLABS OUTER ERROR:", error?.message || error);
       if (timeout) clearTimeout(timeout);
-      settle(finalReply || FALLBACK_REPLY);
+      settle(finalReply || fallbackReply);
     }
   });
 }
@@ -2092,11 +2246,11 @@ app.post("/chat", async (req, res) => {
     const explicitRequest = detectExplicitLanguageRequest(normalizedMessage);
     const fromPhone = detectLanguageFromPhone(normalizedUserId);
     const fromText = detectLanguageFromText(normalizedMessage);
-    conversationLanguage =
-      explicitRequest ||
-      fromPhone ||
-      (fromText === "other" ? "en" : fromText) ||
-      "nl";
+    conversationLanguage = chooseInitialConversationLanguage({
+      explicitRequest,
+      textLanguage: fromText,
+      phoneLanguage: fromPhone,
+    });
     languageUpdate = conversationLanguage;
   }
 
@@ -2148,12 +2302,12 @@ app.post("/chat", async (req, res) => {
 
   if (!normalizedUserId) {
     console.error("REQUEST ERROR: user_id ontbreekt");
-    return sendDiagResponse("fallback_reply", buildResponse({ send_reply: true, reply: FALLBACK_REPLY, language: conversationLanguage }));
+    return sendDiagResponse("fallback_reply", buildResponse({ send_reply: true, reply: fallbackReplyForLanguage(conversationLanguage), language: conversationLanguage }));
   }
 
   if (!normalizedMessage) {
     console.error("REQUEST ERROR: message ontbreekt");
-    return sendDiagResponse("fallback_reply", buildResponse({ send_reply: true, reply: FALLBACK_REPLY, language: conversationLanguage }));
+    return sendDiagResponse("fallback_reply", buildResponse({ send_reply: true, reply: fallbackReplyForLanguage(conversationLanguage), language: conversationLanguage }));
   }
 
   const normalizedRecentMessages = sanitizeAndPrepareRecentMessages(
@@ -2171,6 +2325,19 @@ app.post("/chat", async (req, res) => {
     if (explicitRequest && explicitRequest !== conversationLanguage) {
       conversationLanguage = explicitRequest;
       languageUpdate = explicitRequest;
+    } else {
+      const textLanguage = detectLanguageFromText(normalizedMessage);
+      if (
+        shouldMigrateLegacyPortugueseLanguage({
+          storedLanguage,
+          customerCountry,
+          explicitRequest,
+          textLanguage,
+        })
+      ) {
+        conversationLanguage = "pt";
+        languageUpdate = "pt";
+      }
     }
   }
 
@@ -2211,8 +2378,8 @@ app.post("/chat", async (req, res) => {
       buildResponse({
         send_reply: true,
         reply:
-          customerCountry === "FR" && conversationLanguage === "fr"
-            ? FRANCE_WELCOME_MESSAGE
+          customerCountry === "FR"
+            ? FRANCE_WELCOME_MESSAGES[conversationLanguage] || FRANCE_WELCOME_MESSAGES.fr
             : WELCOME_MESSAGES[conversationLanguage] || WELCOME_MESSAGE,
         language: conversationLanguage,
         language_update: languageUpdate,
@@ -2222,7 +2389,7 @@ app.post("/chat", async (req, res) => {
 
   if (!agentId) {
     console.error("CONFIG ERROR: ELEVENLABS_AGENT_ID ontbreekt");
-    return sendDiagResponse("fallback_reply", buildResponse({ send_reply: true, reply: FALLBACK_REPLY, language: conversationLanguage }));
+    return sendDiagResponse("fallback_reply", buildResponse({ send_reply: true, reply: fallbackReplyForLanguage(conversationLanguage), language: conversationLanguage }));
   }
 
   try {
@@ -2304,8 +2471,8 @@ app.post("/chat", async (req, res) => {
 
     let reply =
       replyResult.status === "fulfilled"
-        ? cleanReplyText(replyResult.value) || FALLBACK_REPLY
-        : FALLBACK_REPLY;
+        ? cleanReplyText(replyResult.value) || fallbackReplyForLanguage(conversationLanguage)
+        : fallbackReplyForLanguage(conversationLanguage);
 
     if (replyResult.status === "rejected") {
       console.error("ELEVENLABS PROMISE ERROR:", replyResult.reason);
@@ -2328,49 +2495,50 @@ app.post("/chat", async (req, res) => {
 
     reply = stripForbiddenReplyPhrases(cleanReplyText(reply));
 
-    // Deterministic checkout backstop: when Emma asked for both taste and
-    // Control and the customer replies with only a taste, Control is still an
-    // open choice. Never infer Control from earlier generic interest or a prior
-    // "ja", and never send a combo checkout-link until the customer explicitly
-    // answers the Control question.
-    const tasteKnownForCheckout = hasReceivedTasteAnswer([
-      ...normalizedRecentMessages,
-      { role: "user", message_text: normalizedMessage },
-    ]);
-    const controlAnsweredForCheckout = hasReceivedControlAnswer([
-      ...normalizedRecentMessages,
-      { role: "user", message_text: normalizedMessage },
-    ]);
-    const tasteWasAskedForCheckout = hasAskedTaste(normalizedRecentMessages);
-    const checkoutAlreadySentForCheckout = hasCheckoutLinkBeenSent(
-      normalizedRecentMessages
-    );
-
-    if (
-      !alreadyValidated &&
-      (customerCountry || "").toUpperCase() !== "PT" &&
-      tasteWasAskedForCheckout &&
-      tasteKnownForCheckout &&
-      !controlAnsweredForCheckout &&
-      !checkoutAlreadySentForCheckout &&
-      isTasteOnlyCheckoutAnswer(normalizedMessage)
-    ) {
-      reply = controlFollowUpForLanguage(
-        conversationLanguage,
-        normalizedMessage
-      );
-    }
-
     // Backstop: the Stap 4 website/freebies block is sent once. If it was
     // already sent and the customer did not explicitly ask for it (or for
     // recipes/inspiration), a repeated block is removed from the reply.
+    const explicitRepeatedLinkRequest =
+      customerExplicitlyRequestsARepeatedLink(normalizedMessage);
     if (
       hasPatternBeenSent(normalizedRecentMessages, PLAIN_WEBSITE_LINK_PATTERN) &&
-      !/\b(website|site|link|pagina|recept|recepten|inspiratie|kwijt|nogmaals|opnieuw|stuur)\b/i.test(
-        normalizedMessage
-      )
+      !explicitRepeatedLinkRequest
     ) {
-      reply = stripRepeatedWebsiteBlock(reply);
+      reply = stripRepeatedWebsiteBlock(reply, conversationLanguage);
+    }
+    if (
+      hasPatternBeenSent(normalizedRecentMessages, TESTIMONIALS_LINK_PATTERN) &&
+      !explicitRepeatedLinkRequest
+    ) {
+      reply = stripRepeatedTrackedLink(
+        reply,
+        TESTIMONIALS_LINK_PATTERN,
+        conversationLanguage
+      );
+    }
+    if (
+      hasPatternBeenSent(normalizedRecentMessages, PROGRAMMA_INFO_LINK_PATTERN) &&
+      !explicitRepeatedLinkRequest
+    ) {
+      reply = stripRepeatedTrackedLink(
+        reply,
+        PROGRAMMA_INFO_LINK_PATTERN,
+        conversationLanguage
+      );
+    }
+
+    const checkoutSafety = enforceTechnicalCheckoutLinks({
+      reply,
+      customerCountry,
+      language: conversationLanguage,
+      currentMessage: normalizedMessage,
+      recentMessages: normalizedRecentMessages,
+    });
+    reply = checkoutSafety.reply;
+    if (checkoutSafety.changed) {
+      diag("CHECKOUT_LINK_TECHNICAL_CONTROL", {
+        reason: checkoutSafety.reason,
+      });
     }
 
     // Give OpenAI a short grace period to finish after ElevenLabs is done.
@@ -2436,10 +2604,6 @@ app.post("/chat", async (req, res) => {
     const whatsappLinkInCurrentReply = /chat\.whatsapp\.com/i.test(
       cleanText(reply)
     );
-    const whatsappLinkSentNowOrEarlier =
-      whatsappLinkInCurrentReply ||
-      hasWhatsappGroupLinkBeenSent(normalizedRecentMessages);
-
     // A user is considered a validated customer as soon as they have shared
     // a valid order number, regardless of whether Emma has sent the WhatsApp
     // group link yet. This is more robust than tying customer_status to
@@ -2479,7 +2643,6 @@ app.post("/chat", async (req, res) => {
       recentMessages: normalizedRecentMessages,
       currentUserMessage: normalizedMessage,
       currentReply: reply,
-      whatsappGroupLinkSentNowOrEarlier: whatsappLinkSentNowOrEarlier,
     });
 
     // customer_status is purely server-side (order control + self-healing).
@@ -2489,11 +2652,12 @@ app.post("/chat", async (req, res) => {
     const finalCurrentPhaseUpdate =
       selfHealCurrentPhase || extraction.current_phase_update;
 
-    // Product fields: code-side derivation always wins over the extractor.
-    // We only write a non-empty value (so we never overwrite a previously
-    // correct Airtable value with an empty string).
-    const finalInterestedInProgramUpdate = derivedPurchase.interested_in_program;
-    const finalInterestedInControlUpdate = derivedPurchase.interested_in_control;
+    // Purchase facts remain deterministic. Interest and doubt are semantic,
+    // so those two fields come from the contextual extractor.
+    const finalInterestedInProgramUpdate =
+      extraction.interested_in_program_update;
+    const finalInterestedInControlUpdate =
+      extraction.interested_in_control_update;
     const finalPurchasedProgramUpdate = derivedPurchase.purchased_program;
     const finalHasControlUpdate = derivedPurchase.has_control;
 
@@ -2548,10 +2712,10 @@ app.post("/chat", async (req, res) => {
       error_message: error?.message || String(error),
     });
     console.error("SERVER ERROR:", error?.message || error);
-    return sendDiagResponse("server_error_fallback", buildResponse({ send_reply: true, reply: FALLBACK_REPLY, language: conversationLanguage }));
+    return sendDiagResponse("server_error_fallback", buildResponse({ send_reply: true, reply: fallbackReplyForLanguage(conversationLanguage), language: conversationLanguage }));
   }
 });
 
 app.listen(PORT, () => {
-  console.log(`Server draait op poort ${PORT}`);
+  console.log(`${SERVER_BUILD_ID} draait op poort ${PORT}`);
 });
