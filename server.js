@@ -8,7 +8,7 @@ import { franc } from "franc-min";
 dotenv.config();
 
 const app = express();
-const SERVER_BUILD_ID = "emma-v51-candidate-2026-08-27-04";
+const SERVER_BUILD_ID = "emma-v51-candidate-2026-08-27-05";
 // Accept JSON bodies (Make scenarios that already work).
 app.use(express.json({ limit: "1mb" }));
 // Also accept application/x-www-form-urlencoded bodies. ManyChat (via Make)
@@ -912,11 +912,8 @@ const APPROVED_CHECKOUT_SLUGS = new Set([
   "beauty-choc", "beauty-choc-control", "beauty-mix", "beauty-mix-control", "beauty-van", "beauty-van-control",
   "deluxe-choc", "deluxe-choc-control", "deluxe-mix", "deluxe-mix-control", "deluxe-van", "deluxe-van-control",
   "exclusive-choc", "exclusive-choc-control", "exclusive-mix", "exclusive-mix-control", "exclusive-van", "exclusive-van-control",
-  "control1x", "fruit-veg-berry-soft", "fruit-veg-soft", "berries", "berries-omega", "berries-soft",
-  "fruit-veg-berry", "fruit-vegtables", "essentials-omega", "omegaselection", "superfood",
-  "bestellen-be-repen-choc", "bestellen-be-repen-fruit", "bestellen-be-repen-mix", "bestellen-be-soep60",
-  "bestellen-nl-luminate15", "bestellen-nl-luminate30", "bestellen-nl-repen-choc", "bestellen-nl-repen-fruit",
-  "bestellen-nl-repen-mix", "bestellen-nl-soep30", "bestellen-nl-soep60",
+  "chocolate-bars", "control1x", "fruit-bars", "fruit-veg-berry-soft", "fruit-veg-soft", "berries", "berries-omega", "berries-soft",
+  "fruit-veg-berry", "fruit-vegtables", "essentials-omega", "luminate15", "luminate30", "mix-bars", "omegaselection", "soup30", "soup60", "superfood",
   "baies-4x-fr", "barres-choc-4x-fr", "barres-fruits-4x-fr", "barres-mixte-4x-fr",
   "basic-choc-4x-fr", "basic-choc-control-4x-fr", "basic-mix-control-4x-fr", "basic-mixte-4x-fr", "basic-van-4x-fr", "basic-van-control-4x-fr",
   "beauty-choc-4x-fr", "beauty-choc-control-4x-fr", "beauty-mixte-4x-fr", "beauty-mixte-control-4x-fr", "beauty-van-4x-fr", "beauty-van-control-4x-fr",
@@ -935,12 +932,9 @@ const FRANCE_PRODUCT_LINKS = new Map([
   ["essentials-omega", "fruits-legumes-baies-omega-4x-fr"],
   ["omegaselection", "omega-4x-fr"],
   ["superfood", "superfood-4x-fr"],
-  ["bestellen-nl-repen-choc", "barres-choc-4x-fr"],
-  ["bestellen-nl-repen-fruit", "barres-fruits-4x-fr"],
-  ["bestellen-nl-repen-mix", "barres-mixte-4x-fr"],
-  ["bestellen-be-repen-choc", "barres-choc-4x-fr"],
-  ["bestellen-be-repen-fruit", "barres-fruits-4x-fr"],
-  ["bestellen-be-repen-mix", "barres-mixte-4x-fr"],
+  ["chocolate-bars", "barres-choc-4x-fr"],
+  ["fruit-bars", "barres-fruits-4x-fr"],
+  ["mix-bars", "barres-mixte-4x-fr"],
 ]);
 
 const FRANCE_UNIVERSAL_ONLY_SLUGS = new Set([
@@ -948,10 +942,10 @@ const FRANCE_UNIVERSAL_ONLY_SLUGS = new Set([
   "fruit-veg-berry-soft",
   "fruit-veg-soft",
   "berries-soft",
-  "bestellen-nl-luminate15",
-  "bestellen-nl-luminate30",
-  "bestellen-nl-soep30",
-  "bestellen-nl-soep60",
+  "luminate15",
+  "luminate30",
+  "soup30",
+  "soup60",
 ]);
 
 function hasExplicitOneTimePaymentRequest(text) {
@@ -996,12 +990,6 @@ function mapCheckoutLinkForCountry(slug, customerCountry) {
   if (country !== "FR") {
     for (const [universalSlug, franceSlug] of FRANCE_PRODUCT_LINKS) {
       if (franceSlug !== normalizedSlug) continue;
-      if (/^bestellen-(?:nl|be)-repen-/.test(universalSlug)) {
-        const taste = normalizedSlug.match(/^barres-(choc|fruits|mixte)-4x-fr$/)?.[1];
-        const market = country === "BE" ? "be" : "nl";
-        const localTaste = taste === "fruits" ? "fruit" : taste === "mixte" ? "mix" : "choc";
-        return `bestellen-${market}-repen-${localTaste}`;
-      }
       return universalSlug;
     }
   }
@@ -1049,14 +1037,17 @@ function enforceTechnicalCheckoutLinks({
     };
   }
 
-  if (
-    country === "BE" &&
-    /^(?:superfood|bestellen-nl-luminate(?:15|30)|bestellen-nl-soep30)$/i.test(slug)
-  ) {
+  const unavailableInCountry =
+    (country === "BE" && /^(?:superfood|luminate(?:15|30)|soup30)$/i.test(slug)) ||
+    (["DE", "PT", "PL", "UK", "UNKNOWN"].includes(country) &&
+      /^luminate(?:15|30)$/i.test(slug)) ||
+    (country === "PL" && /^mix-bars$/i.test(slug));
+
+  if (unavailableInCountry) {
     return {
       reply: fallbackReplyForLanguage(language),
       changed: true,
-      reason: "belgium_unavailable_product_link_blocked",
+      reason: "country_unavailable_product_link_blocked",
     };
   }
 
