@@ -8,7 +8,7 @@ import { franc } from "franc-min";
 dotenv.config();
 
 const app = express();
-const SERVER_BUILD_ID = "emma-v51-candidate-2026-08-27-06";
+const SERVER_BUILD_ID = "emma-v51-candidate-2026-08-27-07";
 // Accept JSON bodies (Make scenarios that already work).
 app.use(express.json({ limit: "1mb" }));
 // Also accept application/x-www-form-urlencoded bodies. ManyChat (via Make)
@@ -922,7 +922,163 @@ const APPROVED_CHECKOUT_SLUGS = new Set([
   "fruits-legumes-4x-fr", "fruits-legumes-baies-4x-fr", "fruits-legumes-baies-omega-4x-fr", "omega-4x-fr", "superfood-4x-fr",
 ]);
 
+// Temporary manual stock switch. Keep this aligned with the removable
+// NL/BE capsule-delay block at the top of the ElevenLabs prompt. Set to false
+// only when the capsules are actually orderable again; the calendar date does
+// not change availability automatically.
+const NL_BE_CAPSULE_DELAY_ACTIVE = true;
+
 const TREE_LINK_PATTERN = /https?:\/\/tr\.ee\/([a-z0-9-]+)/gi;
+
+const NL_BE_DELAYED_LOOSE_CAPSULE_SLUGS = new Set([
+  "berries",
+  "berries-omega",
+  "fruit-veg-berry",
+  "fruit-vegtables",
+  "essentials-omega",
+  "omegaselection",
+  "baies-4x-fr",
+  "fruits-legumes-4x-fr",
+  "fruits-legumes-baies-4x-fr",
+  "fruits-legumes-baies-omega-4x-fr",
+  "omega-4x-fr",
+]);
+
+function parseNlBeDelayedProgramSlug(slug) {
+  const match = cleanText(slug).match(
+    /^(beauty|deluxe|exclusive)-(van|choc|mixte|mix)(-control)?(?:-4x-fr)?$/i
+  );
+  if (!match) return null;
+  return {
+    program: match[1].charAt(0).toUpperCase() + match[1].slice(1).toLowerCase(),
+    taste: match[2].toLowerCase() === "van"
+      ? "vanilla"
+      : match[2].toLowerCase() === "choc"
+        ? "chocolate"
+        : "mix",
+    hasControl: Boolean(match[3]),
+  };
+}
+
+function isNlBeDelayedCapsuleSlug(slug) {
+  const normalized = cleanText(slug).toLowerCase();
+  return Boolean(
+    parseNlBeDelayedProgramSlug(normalized) ||
+      NL_BE_DELAYED_LOOSE_CAPSULE_SLUGS.has(normalized)
+  );
+}
+
+function basicSlugForDelayedProgram(selection) {
+  if (!selection) return "";
+  const taste = selection.taste === "vanilla"
+    ? "Van"
+    : selection.taste === "chocolate"
+      ? "Choc"
+      : "Mix";
+  return `Basic-${taste}${selection.hasControl ? "-Control" : ""}`;
+}
+
+const NL_BE_CAPSULE_DELAY_COPY = {
+  nl: {
+    notice: (program) =>
+      `Wat fijn dat je voor ${program} wilt gaan 💚 Dat programma kan heel goed bij je wensen passen. Alleen hebben we in Nederland en België op dit moment een kleine leveringsvertraging met de capsules. Daarom starten we nu met Basic en Complete, en kunnen we het programma rond of na 15 september met de losse capsules uitbreiden. Stuur me tegen die tijd zelf even een berichtje, dan help ik je daarmee.`,
+    confirmation: (taste, hasControl) =>
+      `Top, ik zet daarom nu Basic ${taste}${hasControl ? " met Control" : ""} voor je klaar 💚`,
+    unavailable:
+      "De capsules en Omega+ hebben in Nederland en België op dit moment een kleine leveringsvertraging en zijn daarom tijdelijk niet te bestellen. Naar verwachting zijn ze rond 15 september weer beschikbaar. Stuur me rond of na die datum zelf even een berichtje, dan help ik je graag verder 💚",
+    tastes: { vanilla: "Vanille", chocolate: "Chocolade", mix: "Half-half" },
+  },
+  fr: {
+    notice: (program) =>
+      `Je suis ravie que tu souhaites choisir ${program} 💚 Ce programme peut très bien correspondre à tes objectifs. Nous avons simplement un petit retard de livraison sur les capsules aux Pays-Bas et en Belgique. Nous commençons donc maintenant avec Basic et Complete, puis nous pourrons ajouter les capsules séparément vers le 15 septembre ou après. Envoie-moi toi-même un message à ce moment-là et je t'aiderai avec plaisir.`,
+    confirmation: (taste, hasControl) =>
+      `Je te prépare donc maintenant Basic ${taste}${hasControl ? " avec Control" : ""} 💚`,
+    unavailable:
+      "Les capsules et Omega+ connaissent actuellement un petit retard de livraison aux Pays-Bas et en Belgique et ne peuvent donc pas être commandés pour le moment. Ils devraient être de nouveau disponibles vers le 15 septembre. Envoie-moi toi-même un message à ce moment-là et je t'aiderai avec plaisir 💚",
+    tastes: { vanilla: "Vanille", chocolate: "Chocolat", mix: "moitié-moitié" },
+  },
+  en: {
+    notice: (program) =>
+      `I'm glad you'd like to choose ${program} 💚 It can be a great match for your goals. There is currently a small delivery delay affecting capsules in the Netherlands and Belgium, so we'll start with Basic and Complete now and can add the separate capsules around or after 15 September. Send me a message yourself around then and I'll gladly help you.`,
+    confirmation: (taste, hasControl) =>
+      `I'll therefore prepare Basic ${taste}${hasControl ? " with Control" : ""} for you now 💚`,
+    unavailable:
+      "Capsules and Omega+ currently have a small delivery delay in the Netherlands and Belgium, so they cannot be ordered for the moment. They are expected to be available again around 15 September. Send me a message yourself around then and I'll gladly help you 💚",
+    tastes: { vanilla: "Vanilla", chocolate: "Chocolate", mix: "Half-and-half" },
+  },
+  de: {
+    notice: (program) =>
+      `Wie schön, dass du dich für ${program} entschieden hast 💚 Das Programm kann sehr gut zu deinen Zielen passen. Bei den Kapseln gibt es in den Niederlanden und Belgien momentan eine kleine Lieferverzögerung. Deshalb starten wir jetzt mit Basic und Complete und können die einzelnen Kapseln etwa ab dem 15. September ergänzen. Schreib mir dann bitte selbst noch einmal, und ich helfe dir gern weiter.`,
+    confirmation: (taste, hasControl) =>
+      `Ich bereite deshalb jetzt Basic ${taste}${hasControl ? " mit Control" : ""} für dich vor 💚`,
+    unavailable:
+      "Bei den Kapseln und Omega+ gibt es in den Niederlanden und Belgien momentan eine kleine Lieferverzögerung. Deshalb können sie vorübergehend nicht bestellt werden. Voraussichtlich sind sie etwa ab dem 15. September wieder verfügbar. Schreib mir dann bitte selbst noch einmal, und ich helfe dir gern weiter 💚",
+    tastes: { vanilla: "Vanille", chocolate: "Schokolade", mix: "Halb-halb" },
+  },
+  it: {
+    notice: (program) =>
+      `Che bello che tu abbia scelto ${program} 💚 Può essere davvero adatto ai tuoi obiettivi. Al momento c'è un piccolo ritardo nella consegna delle capsule nei Paesi Bassi e in Belgio. Per questo iniziamo ora con Basic e Complete e potremo aggiungere le capsule separatamente intorno al 15 settembre o dopo. Scrivimi tu in quel periodo e ti aiuterò volentieri.`,
+    confirmation: (taste, hasControl) =>
+      `Per ora ti preparo quindi Basic ${taste}${hasControl ? " con Control" : ""} 💚`,
+    unavailable:
+      "Al momento c'è un piccolo ritardo nella consegna delle capsule e di Omega+ nei Paesi Bassi e in Belgio, quindi temporaneamente non possono essere ordinati. Dovrebbero tornare disponibili intorno al 15 settembre. Scrivimi tu in quel periodo e ti aiuterò volentieri 💚",
+    tastes: { vanilla: "Vaniglia", chocolate: "Cioccolato", mix: "Metà e metà" },
+  },
+  es: {
+    notice: (program) =>
+      `Qué bien que quieras elegir ${program} 💚 Puede encajar muy bien con tus objetivos. Ahora mismo hay un pequeño retraso en la entrega de las cápsulas en los Países Bajos y Bélgica. Por eso empezamos ahora con Basic y Complete y podremos añadir las cápsulas por separado alrededor del 15 de septiembre o después. Escríbeme tú por esas fechas y te ayudaré encantada.`,
+    confirmation: (taste, hasControl) =>
+      `Por ahora te preparo Basic ${taste}${hasControl ? " con Control" : ""} 💚`,
+    unavailable:
+      "Ahora mismo hay un pequeño retraso en la entrega de las cápsulas y Omega+ en los Países Bajos y Bélgica, por lo que temporalmente no se pueden pedir. Se espera que vuelvan a estar disponibles alrededor del 15 de septiembre. Escríbeme tú por esas fechas y te ayudaré encantada 💚",
+    tastes: { vanilla: "Vainilla", chocolate: "Chocolate", mix: "Mitad y mitad" },
+  },
+  pt: {
+    notice: (program) =>
+      `Que bom que queres escolher o ${program} 💚 Pode adequar-se muito bem aos teus objetivos. Neste momento existe um pequeno atraso na entrega das cápsulas nos Países Baixos e na Bélgica. Por isso, começamos agora com o Basic e o Complete e poderemos acrescentar as cápsulas separadamente por volta de 15 de setembro ou depois. Envia-me tu uma mensagem nessa altura e terei todo o gosto em ajudar.`,
+    confirmation: (taste, hasControl) =>
+      `Por agora, preparo-te então o Basic ${taste}${hasControl ? " com Control" : ""} 💚`,
+    unavailable:
+      "Neste momento existe um pequeno atraso na entrega das cápsulas e do Omega+ nos Países Baixos e na Bélgica, por isso temporariamente não podem ser encomendados. Prevê-se que voltem a estar disponíveis por volta de 15 de setembro. Envia-me tu uma mensagem nessa altura e terei todo o gosto em ajudar 💚",
+    tastes: { vanilla: "Baunilha", chocolate: "Chocolate", mix: "Metade-metade" },
+  },
+  pl: {
+    notice: (program) =>
+      `Bardzo się cieszę, że wybierasz ${program} 💚 Ten program może świetnie pasować do Twoich celów. Obecnie w Holandii i Belgii występuje niewielkie opóźnienie w dostawie kapsułek. Dlatego teraz zaczniemy od Basic i Complete, a osobne kapsułki będzie można dodać około 15 września lub później. Napisz do mnie wtedy ponownie, a chętnie Ci pomogę.`,
+    confirmation: (taste, hasControl) =>
+      `Dlatego teraz przygotuję dla Ciebie Basic ${taste}${hasControl ? " z Control" : ""} 💚`,
+    unavailable:
+      "Obecnie w Holandii i Belgii występuje niewielkie opóźnienie w dostawie kapsułek i Omega+, dlatego chwilowo nie można ich zamówić. Powinny być ponownie dostępne około 15 września. Napisz do mnie wtedy ponownie, a chętnie Ci pomogę 💚",
+    tastes: { vanilla: "Wanilia", chocolate: "Czekolada", mix: "Pół na pół" },
+  },
+};
+
+function nlBeCapsuleDelayCheckoutReply({ text, linkMatch, selection, language }) {
+  const copy = NL_BE_CAPSULE_DELAY_COPY[cleanText(language).toLowerCase()] ||
+    NL_BE_CAPSULE_DELAY_COPY.en;
+  if (!selection) return copy.unavailable;
+
+  const basicSlug = basicSlugForDelayedProgram(selection);
+  const originalUrl = linkMatch[0];
+  const beforeLink = text.slice(0, linkMatch.index);
+  const afterLink = text.slice(linkMatch.index + originalUrl.length).trim();
+  const promotionParagraph = beforeLink
+    .split(/\n{2,}/)
+    .find((paragraph) => /1\s*\+\s*1/.test(paragraph));
+  const taste = copy.tastes[selection.taste] || copy.tastes.mix;
+
+  return cleanReplyText(
+    [
+      copy.notice(selection.program),
+      promotionParagraph || "",
+      copy.confirmation(taste, selection.hasControl),
+      `https://tr.ee/${basicSlug}`,
+      afterLink,
+    ]
+      .filter(Boolean)
+      .join("\n\n")
+  );
+}
 
 const FRANCE_PRODUCT_LINKS = new Map([
   ["control1x", "control-4x-fr"],
@@ -1026,6 +1182,26 @@ function enforceTechnicalCheckoutLinks({
       reply: fallbackReplyForLanguage(language),
       changed: true,
       reason: "unknown_checkout_link_blocked",
+    };
+  }
+
+  if (
+    NL_BE_CAPSULE_DELAY_ACTIVE &&
+    ["NL", "BE"].includes(country) &&
+    isNlBeDelayedCapsuleSlug(slug)
+  ) {
+    const selection = parseNlBeDelayedProgramSlug(slug);
+    return {
+      reply: nlBeCapsuleDelayCheckoutReply({
+        text,
+        linkMatch: match,
+        selection,
+        language,
+      }),
+      changed: true,
+      reason: selection
+        ? "nl_be_capsule_program_link_replaced_with_basic"
+        : "nl_be_capsule_product_link_blocked",
     };
   }
 
@@ -2028,6 +2204,27 @@ async function getElevenReply({
         const lastCheckoutSelection = parseCheckoutLinkSKU(lastCheckoutLink);
         const guardPriceMentioned = hasPriceBeenMentioned(recentMessages);
         const guardLines = [];
+        if (
+          NL_BE_CAPSULE_DELAY_ACTIVE &&
+          ["NL", "BE"].includes((customerCountry || "").toUpperCase())
+        ) {
+          const lastCheckoutSlug =
+            lastCheckoutLink.match(/https?:\/\/tr\.ee\/([a-z0-9-]+)/i)?.[1] || "";
+          guardLines.push(
+            [
+              "TIJDELIJKE TECHNISCHE VOORRAADGRENS VOOR DEZE NL/BE-KLANT:",
+              "- Fruit-, Groente- en Berry-capsules en Omega+ zijn tijdelijk niet bestelbaar. Beauty, Deluxe en Exclusive zijn daardoor nu niet af te rekenen. Basic met Complete is het enige direct bestelbare hoofdprogramma; Control mag als add-on bij Basic.",
+              "- Deze grens overrulet een programmavoorkeur, CRM-waarde, samenvatting, volledige smaak- en Controlkeuze, koopbevestiging en iedere gewone checkoutinstructie.",
+              "- Wil de klant Beauty, Deluxe of Exclusive: erken natuurlijk dat dit goed kan passen, leg de kleine capsulevertraging uit, start nu met Basic/Complete en nodig de klant uit rond of na 15 september zelf terug te berichten voor de losse capsules.",
+              "- Zijn smaak en Control al bekend en wil de klant starten: vraag niets opnieuw en stuur uitsluitend de overeenkomstige Basic-link. Stuur NOOIT een Beauty-, Deluxe-, Exclusive-, capsule- of Omega+-link.",
+              lastCheckoutSlug && isNlBeDelayedCapsuleSlug(lastCheckoutSlug)
+                ? `- LET OP: de eerder verstuurde link ${lastCheckoutLink} is door de tijdelijke voorraadgrens niet bruikbaar. Geef geen browser- of checkoutinstructies voor die link. Leg de vertraging uit en vervang hem door de overeenkomstige Basic-link met behoud van smaak en Control.`
+                : "",
+            ]
+              .filter(Boolean)
+              .join("\n")
+          );
+        }
         if (guardWebsiteSent) {
           guardLines.push(
             'De website-link en het freebies-blok zijn AL gestuurd. Stuur ze NIET opnieuw uit jezelf — verwijs in woorden naar "de pagina die ik je stuurde". Alleen opnieuw sturen als de klant er expliciet om vraagt (bijvoorbeeld link kwijt), en dan alleen de kale link zonder freebies-blok. In coaching-modus mag de link alleen gedeeld worden als recepten-tool wanneer de klant zelf om recepten of inspiratie vraagt.'
@@ -2346,6 +2543,9 @@ app.post("/chat", async (req, res) => {
   diag("REQUEST_PARSED", {
     user_id: normalizedUserId,
     message_length: normalizedMessage.length,
+    server_build_id: SERVER_BUILD_ID,
+    customer_country: customerCountry,
+    conversation_language: conversationLanguage,
     customer_status: normalizedCustomerStatus,
     current_phase: normalizedCurrentPhase,
     recent_messages_count: Array.isArray(recent_messages) ? recent_messages.length : 0,
