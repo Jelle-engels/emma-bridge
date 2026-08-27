@@ -8,7 +8,7 @@ import { franc } from "franc-min";
 dotenv.config();
 
 const app = express();
-const SERVER_BUILD_ID = "emma-v51-candidate-2026-08-27-03";
+const SERVER_BUILD_ID = "emma-v51-candidate-2026-08-27-04";
 // Accept JSON bodies (Make scenarios that already work).
 app.use(express.json({ limit: "1mb" }));
 // Also accept application/x-www-form-urlencoded bodies. ManyChat (via Make)
@@ -370,6 +370,40 @@ function stripRepeatedTrackedLink(value, pattern, language = "en") {
     .filter((paragraph) => !pattern.test(paragraph));
   return cleanReplyText(paragraphs.join("\n\n")) ||
     repeatedContentFallbackForLanguage(language);
+}
+
+// A later checkout URL is either a requested resend or a changed selection.
+// In both cases the payment/freebies sales block has already been delivered.
+// This filter removes only those objectively repeated paragraphs; it never
+// selects a product, writes a customer sentence or changes the checkout URL.
+function stripRepeatedCheckoutExtras(value) {
+  const text = cleanReplyText(value);
+  if (!text) return text;
+
+  const repeatedPaymentPattern =
+    /\b(?:klarna|i\s*deal|ideal|credit\s*card|creditcard|sepa|3\s*(?:termijnen|terms|instalments?|installments?|raten|rate|cuotas|prestazioni|presta[cç][oõ]es|raty)|4\s*(?:maandtermijnen|monthly payments?|mensualit[eé]s|monatsraten|rate mensili|cuotas mensuales|presta[cç][oõ]es mensais|raty miesi[eę]czne))\b/i;
+  const repeatedFreebiesPattern =
+    /\b(?:gratis extra|free extras?|kostenlos(?:e|en)? extras?|extra gratuit|extras? gratuit|extra gratis|extras? gr[aá]tis|bezp[łl]atne dodatki|persoonlijke coaching|personal coaching|coaching personnel|pers[oö]nliches coaching|coaching personale|coaching personal|besloten whatsapp|private whatsapp|groupe whatsapp|whatsapp-gruppe|gruppo whatsapp|grupo (?:de )?whatsapp|grupa whatsapp|facebook groep|facebook group|groupe facebook|facebook-gruppe|gruppo facebook|grupo (?:de )?facebook|grupa facebook|complete toolkit|recepten|recipes|recettes|rezepte|ricette|recetas|receitas|przepisy|workouts?)\b/i;
+
+  const kept = text
+    .split("\n\n")
+    .map((paragraph) =>
+      paragraph
+        .split("\n")
+        .filter((line) => {
+          if (/https?:\/\/tr\.ee\//i.test(line)) return true;
+          if (line.includes("✅")) return false;
+          if (repeatedPaymentPattern.test(line)) return false;
+          if (/[€£]|\b\d+(?:[,.]\d+)?\s*zł\b/i.test(line)) return false;
+          if (repeatedFreebiesPattern.test(line)) return false;
+          return true;
+        })
+        .join("\n")
+        .trim()
+    )
+    .filter(Boolean);
+
+  return cleanReplyText(kept.join("\n\n"));
 }
 
 function clamp(value, max = 500) {
@@ -1145,44 +1179,64 @@ function parseCheckoutLinkSKU(url) {
   // "beauty-mixte-control-4x-fr", fail to see the "-control" that follows
   // "mixte", and return hasControl=false for a combo order.
   const franceMatch = url.match(
-    /tr\.ee\/(basic|beauty|deluxe|exclusive)-(?:van|choc|mixte|mix)(-control)?-4x-fr/i
+    /tr\.ee\/(basic|beauty|deluxe|exclusive)-(van|choc|mixte|mix)(-control)?-4x-fr/i
   );
   if (franceMatch) {
     const lower = franceMatch[1].toLowerCase();
     const program = lower.charAt(0).toUpperCase() + lower.slice(1);
-    const hasControl = Boolean(franceMatch[2]);
-    return { program, hasControl };
+    const tasteToken = franceMatch[2].toLowerCase();
+    const taste = tasteToken === "van"
+      ? "vanilla"
+      : tasteToken === "choc"
+        ? "chocolate"
+        : "mix";
+    const hasControl = Boolean(franceMatch[3]);
+    return { program, taste, hasControl, paymentMode: "france_4x" };
   }
   if (/tr\.ee\/control-4x-fr(?:\b|\/|\?|$)/i.test(url)) {
-    return { program: "", hasControl: true };
+    return { program: "", taste: "", hasControl: true, paymentMode: "france_4x" };
   }
 
   // Universal links (2026): tr.ee/Basic-Van, tr.ee/Deluxe-Mix-Control, ...
   const universalMatch = url.match(
-    /tr\.ee\/(basic|beauty|deluxe|exclusive)-(?:van|choc|mix)(-control)?/i
+    /tr\.ee\/(basic|beauty|deluxe|exclusive)-(van|choc|mix)(-control)?/i
   );
   if (universalMatch) {
     const lower = universalMatch[1].toLowerCase();
     const program = lower.charAt(0).toUpperCase() + lower.slice(1);
-    const hasControl = Boolean(universalMatch[2]);
-    return { program, hasControl };
+    const tasteToken = universalMatch[2].toLowerCase();
+    const taste = tasteToken === "van"
+      ? "vanilla"
+      : tasteToken === "choc"
+        ? "chocolate"
+        : "mix";
+    const hasControl = Boolean(universalMatch[3]);
+    return { program, taste, hasControl, paymentMode: "one_time" };
   }
   if (/tr\.ee\/control1x(?:\b|\/|\?|$)/i.test(url)) {
-    return { program: "", hasControl: true };
+    return { program: "", taste: "", hasControl: true, paymentMode: "one_time" };
   }
 
   // Legacy country links, kept so running conversations still validate.
   const programMatch = url.match(
-    /tr\.ee\/bestellen-(?:nl|be)-(basic|beauty|deluxe|exclusive)(?:-(?:choc|van|mix))?(-control)?/i
+    /tr\.ee\/bestellen-(?:nl|be)-(basic|beauty|deluxe|exclusive)(?:-(choc|van|mix))?(-control)?/i
   );
   if (programMatch) {
     const lower = programMatch[1].toLowerCase();
     const program = lower.charAt(0).toUpperCase() + lower.slice(1);
-    const hasControl = Boolean(programMatch[2]);
-    return { program, hasControl };
+    const tasteToken = cleanText(programMatch[2]).toLowerCase();
+    const taste = tasteToken === "van"
+      ? "vanilla"
+      : tasteToken === "choc"
+        ? "chocolate"
+        : tasteToken === "mix"
+          ? "mix"
+          : "";
+    const hasControl = Boolean(programMatch[3]);
+    return { program, taste, hasControl, paymentMode: "one_time" };
   }
   if (/tr\.ee\/bestellen-(?:nl|be)-control(?:\b|\/|\?|$)/i.test(url)) {
-    return { program: "", hasControl: true };
+    return { program: "", taste: "", hasControl: true, paymentMode: "one_time" };
   }
 
   return null;
@@ -1191,22 +1245,24 @@ function parseCheckoutLinkSKU(url) {
 // Walks backward through Emma's messages to find the most recent tr.ee
 // checkout URL she sent. Prefers the current reply if it contains a link.
 function findLastEmmaCheckoutLink(messages, currentReply) {
-  // The France alternative is listed FIRST so that a "-4x-fr" link is matched
-  // in full. Otherwise the universal alternative would match its "basic-van"
-  // prefix and silently drop the "-control" that follows "mixte".
-  const urlRegex =
-    /(https?:\/\/tr\.ee\/(?:(?:basic|beauty|deluxe|exclusive)-(?:van|choc|mixte|mix)(?:-control)?-4x-fr|control-4x-fr|[a-z0-9-]+-4x-fr|bestellen-[a-z0-9-]+|(?:basic|beauty|deluxe|exclusive)-(?:van|choc|mix)(?:-control)?|control1x))/i;
+  const findApprovedLink = (value) => {
+    const links = [...cleanText(value).matchAll(TREE_LINK_PATTERN)];
+    const approved = links.find((match) =>
+      APPROVED_CHECKOUT_SLUGS.has(cleanText(match[1]).toLowerCase())
+    );
+    return approved?.[0] || "";
+  };
 
   if (currentReply) {
-    const match = cleanText(currentReply).match(urlRegex);
-    if (match) return match[1];
+    const link = findApprovedLink(currentReply);
+    if (link) return link;
   }
 
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
     if (msg.role === "emma" && msg.message_text) {
-      const match = cleanText(msg.message_text).match(urlRegex);
-      if (match) return match[1];
+      const link = findApprovedLink(msg.message_text);
+      if (link) return link;
     }
   }
 
@@ -1455,6 +1511,8 @@ function buildContextBlock({
   );
   const priceAlreadyMentioned = hasPriceBeenMentioned(recent_messages);
   const checkoutLinkAlreadySent = hasCheckoutLinkBeenSent(recent_messages);
+  const lastCheckoutLink = findLastEmmaCheckoutLink(recent_messages, "");
+  const lastCheckoutSelection = parseCheckoutLinkSKU(lastCheckoutLink);
   const whatsappGroupLinkAlreadySent = hasWhatsappGroupLinkBeenSent(recent_messages);
   const orderNumberAlreadyAsked = hasAskedOrderNumber(recent_messages);
 
@@ -1473,6 +1531,8 @@ function buildContextBlock({
       programma_info_link_already_sent: programmaInfoLinkAlreadySent,
       price_already_mentioned: priceAlreadyMentioned,
       checkout_link_already_sent: checkoutLinkAlreadySent,
+      last_checkout_link: lastCheckoutLink,
+      last_checkout_selection: lastCheckoutSelection,
       whatsapp_group_link_already_sent: whatsappGroupLinkAlreadySent,
       order_number_already_asked: orderNumberAlreadyAsked,
       conversation_language: cleanText(conversation_language) || "nl",
@@ -1516,7 +1576,7 @@ function buildContextBlock({
         "Uitleggen betekent uitleggen in eigen woorden. Een link sturen is geen uitleg; stuur nooit een eerder gestuurde link opnieuw als vervanging van uitleg.",
         "Als price_already_mentioned true is: noem de prijs niet opnieuw, tenzij de klant ernaar vraagt.",
         "Vraag NOOIT naar het land van de klant. De checkout-links zijn universeel en openen automatisch in het juiste land met de juiste prijzen.",
-        "Als checkout_link_already_sent true is: stuur geen nieuwe checkout-link, tenzij de klant er expliciet opnieuw om vraagt.",
+        "Als checkout_link_already_sent true is: last_checkout_link en last_checkout_selection zijn de technische waarheid over de laatst verstuurde combinatie. Behoud die keuzes bij een technisch probleem. Stuur alleen een nieuwe link als de klant expliciet om dezelfde link vraagt of een keuze wijzigt; herhaal nooit het betaal- of freebiesblok.",
         "Als whatsapp_group_link_already_sent true is: behandel de klant als gevalideerde klant en ga over naar coachingsmodus.",
         "In coachingsmodus: 100% coaching. Geen salesflow, geen prijs, geen checkout, geen upsell en geen productaanbevelingen uit jezelf. Verkoop alleen wanneer de klant er expliciet zelf om vraagt (bijvoorbeeld naar een specifiek product of als reactie op een broadcast-bericht). De WhatsApp-groep link alleen opnieuw delen als de klant er expliciet om vraagt.",
         "Ordervalidatie wordt server-side uitgevoerd. Emma mag nooit zelf een ordernummer goedkeuren of de WhatsApp-link zelfstandig delen.",
@@ -1971,6 +2031,8 @@ async function getElevenReply({
           PROGRAMMA_INFO_LINK_PATTERN
         );
         const guardCheckoutSent = hasCheckoutLinkBeenSent(recentMessages);
+        const lastCheckoutLink = findLastEmmaCheckoutLink(recentMessages, "");
+        const lastCheckoutSelection = parseCheckoutLinkSKU(lastCheckoutLink);
         const guardPriceMentioned = hasPriceBeenMentioned(recentMessages);
         const guardLines = [];
         if (guardWebsiteSent) {
@@ -1990,7 +2052,7 @@ async function getElevenReply({
         }
         if (guardCheckoutSent) {
           guardLines.push(
-            "TECHNISCH FEIT: er is al een checkout-link gestuurd. Bij een expliciete wijziging of verzoek om dezelfde link mag je de juiste link sturen, maar herhaal het freebiesblok en de betaaluitleg nooit."
+            `TECHNISCH FEIT: er is al een checkout-link gestuurd. De laatst verstuurde URL is ${lastCheckoutLink || "onbekend"} en de technisch gelezen selectie is ${JSON.stringify(lastCheckoutSelection || {})}. Deze bestaande keuzes blijven gelden tijdens een checkoutprobleem en mogen niet opnieuw worden gevraagd. Bij een expliciete wijziging of verzoek om dezelfde link mag je de juiste link sturen, maar herhaal het freebiesblok en de betaaluitleg nooit.`
           );
         }
         if (guardPriceMentioned) {
@@ -2569,6 +2631,25 @@ app.post("/chat", async (req, res) => {
       diag("CHECKOUT_LINK_TECHNICAL_CONTROL", {
         reason: checkoutSafety.reason,
       });
+    }
+
+    // If any approved checkout link was already sent, every later checkout
+    // link is a resend or replacement. The initial payment/freebies block is
+    // therefore technically non-repeatable, regardless of Emma's wording.
+    const previousCheckoutLink = findLastEmmaCheckoutLink(
+      normalizedRecentMessages,
+      ""
+    );
+    const currentReplyCheckoutLink = findLastEmmaCheckoutLink([], reply);
+    if (previousCheckoutLink && currentReplyCheckoutLink) {
+      const beforeCheckoutRepeatFilter = reply;
+      reply = stripRepeatedCheckoutExtras(reply);
+      if (reply !== beforeCheckoutRepeatFilter) {
+        diag("REPEATED_CHECKOUT_EXTRAS_REMOVED", {
+          previous_checkout_link: previousCheckoutLink,
+          current_checkout_link: currentReplyCheckoutLink,
+        });
+      }
     }
 
     // Give OpenAI a short grace period to finish after ElevenLabs is done.
