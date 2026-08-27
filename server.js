@@ -8,7 +8,7 @@ import { franc } from "franc-min";
 dotenv.config();
 
 const app = express();
-const SERVER_BUILD_ID = "emma-v51-candidate-2026-08-27-02";
+const SERVER_BUILD_ID = "emma-v51-candidate-2026-08-27-03";
 // Accept JSON bodies (Make scenarios that already work).
 app.use(express.json({ limit: "1mb" }));
 // Also accept application/x-www-form-urlencoded bodies. ManyChat (via Make)
@@ -630,11 +630,14 @@ function chooseInitialConversationLanguage({
   explicitRequest,
   textLanguage,
   phoneLanguage,
+  customerCountry,
 }) {
+  const country = cleanText(customerCountry).toUpperCase();
   return (
     explicitRequest ||
-    (textLanguage && textLanguage !== "other" ? textLanguage : "") ||
+    (country === "BE" && textLanguage === "fr" ? "fr" : "") ||
     phoneLanguage ||
+    (textLanguage && textLanguage !== "other" ? textLanguage : "") ||
     (textLanguage === "other" ? "en" : "") ||
     "nl"
   );
@@ -652,6 +655,10 @@ function shouldMigrateLegacyPortugueseLanguage({
     !explicitRequest &&
     textLanguage === "pt"
   );
+}
+
+function shouldTrustStoredLanguage({ storedLanguage, hasConversationState }) {
+  return Boolean(normalizeLanguage(storedLanguage) && hasConversationState);
 }
 
 
@@ -2236,10 +2243,36 @@ app.post("/chat", async (req, res) => {
   const normalizedPurchasedProgram = clamp(purchased_program, MAX_SHORT_FIELD_CHARS);
   const normalizedHasControl = clamp(has_control, MAX_SHORT_FIELD_CHARS);
 
-  // Conversation language: the stored Airtable value wins; otherwise detect
-  // deterministically (phone prefix -> text -> Dutch default). A confidently
-  // detected but unsupported language locks the conversation to English.
-  const storedLanguage = normalizeLanguage(language);
+  // A stored language wins only when other conversation state exists as well.
+  // If a test/customer record was cleared but an old language value still
+  // arrives from another layer, it must not revive that stale language.
+  const hasConversationState = Boolean(
+    normalizedCustomerStatus ||
+      normalizedCurrentPhase ||
+      normalizedGoal ||
+      normalizedObjections ||
+      normalizedLastSummary ||
+      normalizedInterestedInProgram ||
+      normalizedInterestedInControl ||
+      normalizedPurchasedProgram ||
+      normalizedHasControl ||
+      (Array.isArray(recent_messages) &&
+        recent_messages.some((item) =>
+          cleanText(item?.message_text ?? item?.text ?? item?.message)
+        ))
+  );
+  const suppliedLanguage = normalizeLanguage(language);
+  const storedLanguage = shouldTrustStoredLanguage({
+    storedLanguage: suppliedLanguage,
+    hasConversationState,
+  })
+    ? suppliedLanguage
+    : "";
+  // Customer country and conversation language are separate. The phone
+  // country is resolved first so a +31 number cannot be misclassified as
+  // German by statistical detection of a short Dutch opening message.
+  const customerCountry = detectCountryFromPhone(normalizedUserId) || "UNKNOWN";
+
   let conversationLanguage = storedLanguage;
   let languageUpdate = "";
   if (!conversationLanguage) {
@@ -2250,13 +2283,10 @@ app.post("/chat", async (req, res) => {
       explicitRequest,
       textLanguage: fromText,
       phoneLanguage: fromPhone,
+      customerCountry,
     });
     languageUpdate = conversationLanguage;
   }
-
-  // Customer country for pricing. The checkout links themselves are universal;
-  // this only selects the price-table row. Unknown prefix/BSUID -> UK.
-  const customerCountry = detectCountryFromPhone(normalizedUserId) || "UNKNOWN";
 
   diag("REQUEST_PARSED", {
     user_id: normalizedUserId,
