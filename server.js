@@ -8,7 +8,7 @@ import { franc } from "franc-min";
 dotenv.config();
 
 const app = express();
-const SERVER_BUILD_ID = "emma-v51-candidate-2026-08-27-07";
+const SERVER_BUILD_ID = "emma-v51-candidate-2026-08-30-08";
 // Accept JSON bodies (Make scenarios that already work).
 app.use(express.json({ limit: "1mb" }));
 // Also accept application/x-www-form-urlencoded bodies. ManyChat (via Make)
@@ -2215,7 +2215,9 @@ async function getElevenReply({
               "TIJDELIJKE TECHNISCHE VOORRAADGRENS VOOR DEZE NL/BE-KLANT:",
               "- Fruit-, Groente- en Berry-capsules en Omega+ zijn tijdelijk niet bestelbaar. Beauty, Deluxe en Exclusive zijn daardoor nu niet af te rekenen. Basic met Complete is het enige direct bestelbare hoofdprogramma; Control mag als add-on bij Basic.",
               "- Deze grens overrulet een programmavoorkeur, CRM-waarde, samenvatting, volledige smaak- en Controlkeuze, koopbevestiging en iedere gewone checkoutinstructie.",
-              "- Wil de klant Beauty, Deluxe of Exclusive: erken natuurlijk dat dit goed kan passen, leg de kleine capsulevertraging uit, start nu met Basic/Complete en nodig de klant uit rond of na 15 september zelf terug te berichten voor de losse capsules.",
+              "- TIMING: noem deze vertraging NIET tijdens intake, checklist, testimonials, websiteoriëntatie, programma-uitleg, vergelijking, advies of twijfel. Leg hem pas één keer uit nadat de klant definitief Beauty, Deluxe of Exclusive kiest, in hetzelfde checkoutbericht waarin je naar de Complete-smaak vraagt. Alleen op een rechtstreekse leverbaarheidsvraag antwoord je eerder eerlijk.",
+              "- Behandel de programmakeuze als een definitief startbesluit: start nu logisch met Basic/Complete, breid rond of na 15 september uit met de losse capsules en vraag NOOIT opnieuw of de klant ondanks de vertraging nog wil starten of liever wil wachten.",
+              "- Nadat je dit bij het smaakmoment hebt uitgelegd, herhaal je de vertraging niet bij Control, de link, prijs of ordernummerzin.",
               "- Zijn smaak en Control al bekend en wil de klant starten: vraag niets opnieuw en stuur uitsluitend de overeenkomstige Basic-link. Stuur NOOIT een Beauty-, Deluxe-, Exclusive-, capsule- of Omega+-link.",
               lastCheckoutSlug && isNlBeDelayedCapsuleSlug(lastCheckoutSlug)
                 ? `- LET OP: de eerder verstuurde link ${lastCheckoutLink} is door de tijdelijke voorraadgrens niet bruikbaar. Geef geen browser- of checkoutinstructies voor die link. Leg de vertraging uit en vervang hem door de overeenkomstige Basic-link met behoud van smaak en Control.`
@@ -2279,7 +2281,10 @@ async function getElevenReply({
           // Dutch market genuinely used to offer) could otherwise pull Emma
           // toward a "-4x-fr" link that does not work in their country.
           guardLines.push(
-            "Deze klant zit NIET in Frankrijk. Betalen in 4 maandtermijnen bestaat hier NIET en de checkout-links uit tabel 4.1c (die eindigen op -4x-fr) mag je NOOIT sturen. Vraagt de klant om 4 termijnen, bijvoorbeeld omdat dat vroeger in Nederland kon: zeg kort en eerlijk dat dat niet meer kan en bied Klarna in 3 termijnen aan. Beloof nooit dat je het nakijkt of regelt, en noem Frankrijk of andere markten niet."
+            [
+              "Deze klant zit NIET in Frankrijk. De bestelling is ALTIJD eenmalig: geen abonnement, geen automatische herhaling en na 3 of 4 maanden komt nooit vanzelf een nieuwe bestelling. Zeg of suggereer nooit het tegenovergestelde. Vraagt de klant ernaar, bevestig kort dat het één eenmalige levering is.",
+              "Betalen in 4 maandtermijnen bestaat hier NIET en de checkout-links uit tabel 4.1c (die eindigen op -4x-fr) mag je NOOIT sturen. Vraagt de klant om 4 termijnen, bijvoorbeeld omdat dat vroeger in Nederland kon: zeg kort en eerlijk dat dat niet meer kan en bied Klarna in 3 termijnen aan. Beloof nooit dat je het nakijkt of regelt, en noem Frankrijk of andere markten niet.",
+            ].join("\n")
           );
         }
         const turnGuards =
