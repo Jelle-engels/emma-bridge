@@ -8,7 +8,7 @@ import { franc } from "franc-min";
 dotenv.config();
 
 const app = express();
-const SERVER_BUILD_ID = "emma-v51-candidate-2026-08-30-08";
+const SERVER_BUILD_ID = "emma-v51-delivery-only-2026-09-05-09";
 // Accept JSON bodies (Make scenarios that already work).
 app.use(express.json({ limit: "1mb" }));
 // Also accept application/x-www-form-urlencoded bodies. ManyChat (via Make)
@@ -54,11 +54,12 @@ function fallbackReplyForLanguage(language) {
 
 const WELCOME_MESSAGE =
   "Hallo, ik ben Emma 😊\n\n" +
-  "Ik help dagelijks mensen om hun gezondheidsdoelen te bereiken en ik denk graag met je mee 🤗\n\n" +
-  "We hebben al tienduizenden mensen geholpen en ik denk dat ik jou ook goed kan helpen 💚\n\n" +
-  "Vertel eens, waar zou jij het allerliefst verandering in willen zien? 💚\n\n" +
-  "Je mag zo uitgebreid of juist zo kort antwoorden als je wilt. Alles is goed 🤗\n\n" +
-  "Vertel bijvoorbeeld iets over je doel, waar je tegenaan loopt of wat je al geprobeerd hebt.";
+  "Ik help dagelijks vrouwen met afvallen en andere gezondheidsdoelen en denk graag persoonlijk met je mee via WhatsApp 🤗\n\n" +
+  "Waar wil jij op dit moment vooral hulp bij?\n\n" +
+  "✅ Afvallen\n" +
+  "✅ Afvallen én andere gezondheidsdoelen\n" +
+  "✅ Iets anders\n\n" +
+  "Stuur gewoon wat het beste bij jou past. Dan kijk ik direct met je mee 💚";
 
 // One hardcoded welcome message per supported language. This message never
 // touches the LLM, so the most-seen message is guaranteed correct in every
@@ -67,11 +68,12 @@ const WELCOME_MESSAGES = {
   nl: WELCOME_MESSAGE,
   en:
     "Hi, I'm Emma \u{1F60A}\n\n" +
-    "Every day I help people work toward their health goals, and I'm happy to think things through with you \u{1F917}\n\n" +
-    "We've already helped tens of thousands of people, and I believe I can help you too \u{1F49A}\n\n" +
-    "Tell me, what would you most like to see change? \u{1F49A}\n\n" +
-    "You can answer in as much or as little detail as you like. Anything is fine \u{1F917}\n\n" +
-    "For example, tell me about your goal, what you're struggling with, or what you've already tried.",
+    "Every day I help women with weight loss and other health goals, with personal guidance via WhatsApp \u{1F917}\n\n" +
+    "What would you most like help with right now?\n\n" +
+    "\u{2705} Losing weight\n" +
+    "\u{2705} Losing weight and other health goals\n" +
+    "\u{2705} Something else\n\n" +
+    "Just reply with what fits you best, and I'll help you from there \u{1F49A}",
   // Frankrijk heeft een eigen openingsbericht, geschreven op conversie.
   // Opzet: sociale bewijskracht eerst, dan een lage-drempelvraag naar doel EN
   // grootste obstakel (samen precies de Stap 2-gate uit de prompt), met het
@@ -85,39 +87,44 @@ const WELCOME_MESSAGES = {
     "Est-ce que je peux te demander ce que tu as d\u00e9j\u00e0 essay\u00e9 ?",
   de:
     "Hallo, ich bin Emma \u{1F60A}\n\n" +
-    "Ich helfe jeden Tag Menschen dabei, ihre Gesundheitsziele zu erreichen, und denke gern gemeinsam mit dir nach \u{1F917}\n\n" +
-    "Wir haben bereits Zehntausenden Menschen geholfen und ich glaube, dass ich auch dir gut helfen kann \u{1F49A}\n\n" +
-    "Erz\u00e4hl mal, was w\u00fcrdest du am allerliebsten ver\u00e4ndern? \u{1F49A}\n\n" +
-    "Du kannst so ausf\u00fchrlich oder so kurz antworten, wie du m\u00f6chtest. Alles ist in Ordnung \u{1F917}\n\n" +
-    "Erz\u00e4hl zum Beispiel etwas \u00fcber dein Ziel, woran du gerade scheiterst oder was du schon ausprobiert hast.",
+    "Ich unterstütze jeden Tag Frauen beim Abnehmen und bei anderen Gesundheitszielen und begleite dich gern persönlich über WhatsApp \u{1F917}\n\n" +
+    "Wobei wünschst du dir im Moment am meisten Unterstützung?\n\n" +
+    "\u{2705} Abnehmen\n" +
+    "\u{2705} Abnehmen und weitere Gesundheitsziele\n" +
+    "\u{2705} Etwas anderes\n\n" +
+    "Schreib mir einfach, was am besten zu dir passt. Dann schauen wir direkt gemeinsam weiter \u{1F49A}",
   it:
     "Ciao, sono Emma \u{1F60A}\n\n" +
-    "Ogni giorno aiuto le persone a raggiungere i loro obiettivi di salute e mi fa piacere ragionare insieme a te \u{1F917}\n\n" +
-    "Abbiamo gi\u00e0 aiutato decine di migliaia di persone e penso di poter aiutare bene anche te \u{1F49A}\n\n" +
-    "Dimmi, quale cambiamento vorresti vedere pi\u00f9 di ogni altra cosa? \u{1F49A}\n\n" +
-    "Puoi rispondere in modo dettagliato oppure molto breve. Va bene tutto \u{1F917}\n\n" +
-    "Per esempio, puoi raccontarmi il tuo obiettivo, ci\u00f2 che ti sta bloccando o cosa hai gi\u00e0 provato.",
+    "Ogni giorno aiuto le donne a perdere peso e a raggiungere altri obiettivi di salute, con un supporto personale su WhatsApp \u{1F917}\n\n" +
+    "In questo momento, per cosa vorresti soprattutto ricevere aiuto?\n\n" +
+    "\u{2705} Perdere peso\n" +
+    "\u{2705} Perdere peso e raggiungere altri obiettivi di salute\n" +
+    "\u{2705} Qualcos'altro\n\n" +
+    "Scrivimi semplicemente l'opzione che ti rispecchia di più e vediamo subito insieme come posso aiutarti \u{1F49A}",
   es:
     "Hola, soy Emma \u{1F60A}\n\n" +
-    "Cada d\u00eda ayudo a personas a alcanzar sus objetivos de salud y me gusta pensar contigo en lo que necesitas \u{1F917}\n\n" +
-    "Ya hemos ayudado a decenas de miles de personas y creo que tambi\u00e9n puedo ayudarte bien a ti \u{1F49A}\n\n" +
-    "Cu\u00e9ntame, \u00bfqu\u00e9 es lo que m\u00e1s te gustar\u00eda cambiar? \u{1F49A}\n\n" +
-    "Puedes responder con todo el detalle que quieras o de forma muy breve. Todo est\u00e1 bien \u{1F917}\n\n" +
-    "Por ejemplo, puedes contarme cu\u00e1l es tu objetivo, qu\u00e9 te est\u00e1 frenando o qu\u00e9 has probado hasta ahora.",
+    "Cada día ayudo a mujeres a perder peso y a alcanzar otros objetivos de salud, con acompañamiento personal por WhatsApp \u{1F917}\n\n" +
+    "¿Con qué te gustaría recibir más ayuda ahora mismo?\n\n" +
+    "\u{2705} Perder peso\n" +
+    "\u{2705} Perder peso y alcanzar otros objetivos de salud\n" +
+    "\u{2705} Otra cosa\n\n" +
+    "Respóndeme simplemente con la opción que mejor encaje contigo y lo vemos juntas enseguida \u{1F49A}",
   pt:
     "Ol\u00e1, eu sou a Emma \u{1F60A}\n\n" +
-    "Todos os dias ajudo pessoas a alcan\u00e7ar os seus objetivos de sa\u00fade e terei todo o gosto em pensar contigo no que poder\u00e1 resultar melhor \u{1F917}\n\n" +
-    "J\u00e1 ajud\u00e1mos dezenas de milhares de pessoas e acredito que tamb\u00e9m te posso ajudar \u{1F49A}\n\n" +
-    "Conta-me: o que gostarias mais de mudar? \u{1F49A}\n\n" +
-    "Podes responder com o detalhe que quiseres ou de forma muito breve. Est\u00e1 tudo bem \u{1F917}\n\n" +
-    "Podes, por exemplo, falar-me do teu objetivo, do que te est\u00e1 a dificultar ou do que j\u00e1 tentaste.",
+    "Todos os dias ajudo mulheres a perder peso e a alcançar outros objetivos de saúde, com acompanhamento pessoal através do WhatsApp \u{1F917}\n\n" +
+    "Em que gostarias mais de ter ajuda neste momento?\n\n" +
+    "\u{2705} Perder peso\n" +
+    "\u{2705} Perder peso e alcançar outros objetivos de saúde\n" +
+    "\u{2705} Outra coisa\n\n" +
+    "Responde apenas com a opção que mais combina contigo e vemos já como te posso ajudar \u{1F49A}",
   pl:
     "Cze\u015b\u0107, jestem Emma \u{1F60A}\n\n" +
-    "Ka\u017cdego dnia pomagam ludziom osi\u0105ga\u0107 cele zdrowotne i ch\u0119tnie zastanowi\u0119 si\u0119 razem z Tob\u0105, co b\u0119dzie najlepsze \u{1F917}\n\n" +
-    "Pomogli\u015bmy ju\u017c dziesi\u0105tkom tysi\u0119cy os\u00f3b i my\u015bl\u0119, \u017ce Tobie te\u017c mog\u0119 dobrze pom\u00f3c \u{1F49A}\n\n" +
-    "Powiedz, co najbardziej chcia\u0142aby\u015b zmieni\u0107? \u{1F49A}\n\n" +
-    "Mo\u017cesz odpowiedzie\u0107 bardzo szczeg\u00f3\u0142owo albo kr\u00f3tko. Ka\u017cda odpowied\u017a jest w porz\u0105dku \u{1F917}\n\n" +
-    "Mo\u017cesz na przyk\u0142ad opisa\u0107 sw\u00f3j cel, to, co Ci\u0119 teraz blokuje, albo czego ju\u017c pr\u00f3bowa\u0142a\u015b.",
+    "Każdego dnia pomagam kobietom schudnąć i osiągać inne cele zdrowotne, zapewniając osobiste wsparcie przez WhatsApp \u{1F917}\n\n" +
+    "W czym najbardziej potrzebujesz teraz pomocy?\n\n" +
+    "\u{2705} Schudnąć\n" +
+    "\u{2705} Schudnąć i zadbać o inne cele zdrowotne\n" +
+    "\u{2705} W czymś innym\n\n" +
+    "Napisz po prostu, która opcja najlepiej do Ciebie pasuje. Od razu zobaczymy, jak mogę Ci pomóc \u{1F49A}",
 };
 
 // France keeps its own conversion opening. French-speaking customers outside
@@ -169,11 +176,12 @@ const FRANCE_WELCOME_MESSAGES = {
 };
 WELCOME_MESSAGES.fr =
   "Bonjour, je suis Emma \u{1F60A}\n\n" +
-  "J'aide chaque jour des personnes à atteindre leurs objectifs de santé et je serai ravie de réfléchir avec toi à ce qui peut te convenir \u{1F917}\n\n" +
-  "Nous avons déjà aidé des dizaines de milliers de personnes et je pense pouvoir aussi t'aider \u{1F49A}\n\n" +
-  "Dis-moi, qu'aimerais-tu le plus voir changer ? \u{1F49A}\n\n" +
-  "Tu peux répondre de façon très détaillée ou très brièvement. Tout me va \u{1F917}\n\n" +
-  "Tu peux par exemple me parler de ton objectif, de ce qui te bloque ou de ce que tu as déjà essayé.";
+  "Chaque jour, j'aide des femmes à perdre du poids et à atteindre d'autres objectifs de santé, avec un accompagnement personnalisé sur WhatsApp \u{1F917}\n\n" +
+  "Pour quoi aimerais-tu surtout être accompagnée en ce moment ?\n\n" +
+  "\u{2705} Perdre du poids\n" +
+  "\u{2705} Perdre du poids et atteindre d'autres objectifs de santé\n" +
+  "\u{2705} Autre chose\n\n" +
+  "Dis-moi simplement ce qui te correspond le mieux, et on regarde tout de suite ensemble \u{1F49A}";
 
 const openai = process.env.OPENAI_API_KEY
   ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
