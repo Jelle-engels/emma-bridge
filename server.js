@@ -8,7 +8,7 @@ import { franc } from "franc-min";
 dotenv.config();
 
 const app = express();
-const SERVER_BUILD_ID = "emma-memory-v1-2026-09-30";
+const SERVER_BUILD_ID = "emma-links-guideguard-v2-2026-10-02";
 // Accept JSON bodies (Make scenarios that already work).
 app.use(express.json({ limit: "1mb" }));
 // Also accept application/x-www-form-urlencoded bodies. ManyChat (via Make)
@@ -254,9 +254,40 @@ function enforceAllowedEmojis(value) {
 // the plain site (Stap 4), the testimonials page (Stap 3) and the program
 // explanation page (decision help). All three contain "nutritionworks.online",
 // so plain-substring matching would let one block the others.
-const PLAIN_WEBSITE_LINK_PATTERN = /nutritionworks\.online(?!\/?#)/i;
-const TESTIMONIALS_LINK_PATTERN = /nutritionworks\.online\/?#testimonials/i;
-const PROGRAMMA_INFO_LINK_PATTERN = /nutritionworks\.online\/?#programma-info/i;
+const PLAIN_WEBSITE_LINK_PATTERN = /nutritionworks\.online(?:\/?#(?:programmes|programma-info)(?![a-z0-9_-])|\/?(?=$|[\s)\]>,.!?]))/i;
+const TESTIMONIALS_LINK_PATTERN = /nutritionworks\.online\/?#(?:resultaten|testimonials)(?![a-z0-9_-])/i;
+const PROGRAMMA_INFO_LINK_PATTERN = /nutritionworks\.online\/?#(?:programmes|programma-info)(?![a-z0-9_-])/i;
+
+// Canonical public destinations; legacy chat history remains recognizable.
+function canonicalizePublicLinks(value) {
+  return String(value || "")
+    .replace(/(https?:\/\/nutritionworks\.online\/?#)testimonials(?![a-z0-9_-])/gi, "$1resultaten")
+    .replace(/(https?:\/\/nutritionworks\.online\/?#)programma-info(?![a-z0-9_-])/gi, "$1programmes");
+}
+
+// Defense in depth, not an entitlement system. Until a trusted authenticated
+// grant service exists, the bridge never releases the protected guide URL.
+function blockProtectedGuideDownload(value, language = "en") {
+  const raw = String(value || "");
+  let decoded = raw;
+  for (let i = 0; i < 3; i++) { try { decoded = decodeURIComponent(decoded); } catch { break; } }
+  decoded = decoded.replace(/&#(?:x([0-9a-f]+)|(\d+));/gi, (_, hex, dec) => String.fromCharCode(parseInt(hex || dec, hex ? 16 : 10))).replace(/\\u([0-9a-f]{4})/gi, (_, h) => String.fromCharCode(parseInt(h, 16)));
+  const normalized = decoded.normalize("NFKC").replace(/[\u200B-\u200D\uFEFF]/g, "");
+  const forbidden = /Nutrition[\s_+.-]*Works[\s_+.-]*Startgids(?:[\s_+.-]*pdf|\.pdf)/i.test(normalized)
+    || /(?:https?:\/\/|www\.)[^\s<>]*(?:startgids|fit[_-]?guide)[^\s<>]*\.pdf/i.test(normalized);
+  if (!forbidden) return raw;
+  const replies = {
+    nl: "Ik kan hier geen directe downloadlink delen. Heb je de gids al ontvangen? Kijk dan in je oorspronkelijke leveringsmail, ook in de spammap. Vind je hem niet, mail dan naar info@nutritionworks.online; daar kun je hulp vragen bij je toegang 💚",
+    en: "I can’t share a direct download link here. Please check your original delivery email and spam folder. If you cannot find it, contact info@nutritionworks.online for help with access 💚",
+    fr: "Je ne peux pas partager de lien de téléchargement direct ici. Vérifie ton e-mail de livraison et les spams. Sinon, contacte info@nutritionworks.online pour obtenir de l’aide 💚",
+    de: "Ich kann hier keinen direkten Downloadlink teilen. Schau bitte in deiner ursprünglichen Liefermail und im Spamordner nach. Hilfe zum Zugang erhältst du unter info@nutritionworks.online 💚",
+    it: "Non posso condividere qui un link diretto per il download. Controlla l’e-mail di consegna e lo spam. Per assistenza con l’accesso, scrivi a info@nutritionworks.online 💚",
+    es: "No puedo compartir aquí un enlace de descarga directo. Revisa el correo de entrega y la carpeta de spam. Para ayuda con el acceso, escribe a info@nutritionworks.online 💚",
+    pt: "Não posso partilhar aqui uma ligação direta de download. Verifica o e-mail de entrega e o spam. Para ajuda com o acesso, escreve para info@nutritionworks.online 💚",
+    pl: "Nie mogę tutaj udostępnić bezpośredniego linku do pobrania. Sprawdź wiadomość z dostawą i folder spam. W sprawie dostępu napisz na info@nutritionworks.online 💚"
+  };
+  return replies[language] || replies.en;
+}
 
 function hasPatternBeenSent(messages, pattern) {
   return messages.some(
@@ -347,7 +378,7 @@ function repeatedContentFallbackForLanguage(language) {
 }
 
 function customerExplicitlyRequestsARepeatedLink(text) {
-  return /\b(link|website|site|pagina|página|page|seite|sito|strona|recept|recipe|recette|rezept|ricetta|receta|receita|przepis|kwijt|lost|perdu|verloren|perso|perdido|nogmaals|opnieuw|again|encore|erneut|nuovo|novamente|ponownie|stuur|send|envoie|schick|invia|env[ií]a|envia|wy[sś]lij)\b/i.test(
+  return /\b(programma|programma’s|programmas|programmes|programs|pakketten|resultaten|results|testimonials|link|website|site|pagina|página|page|seite|sito|strona|recept|recipe|recette|rezept|ricetta|receta|receita|przepis|kwijt|lost|perdu|verloren|perso|perdido|nogmaals|opnieuw|again|encore|erneut|nuovo|novamente|ponownie|stuur|send|envoie|schick|invia|env[ií]a|envia|wy[sś]lij)\b/i.test(
     cleanText(text)
   );
 }
@@ -356,7 +387,7 @@ function stripRepeatedWebsiteBlock(value, language = "en") {
   const text = cleanReplyText(value);
   if (!text || !PLAIN_WEBSITE_LINK_PATTERN.test(text)) return text;
   const paragraphs = text.split("\n\n").filter((p) => {
-    if (TESTIMONIALS_LINK_PATTERN.test(p) || PROGRAMMA_INFO_LINK_PATTERN.test(p)) {
+    if (TESTIMONIALS_LINK_PATTERN.test(p)) {
       return true;
     }
     if (PLAIN_WEBSITE_LINK_PATTERN.test(p)) return false;
@@ -2088,19 +2119,19 @@ async function getElevenReply({
           "De vorige checkout is geen nieuwe klantkeuze. Bij een door de klant gevraagde bijbestelling volg je het nieuwe product en vraag je na de link weer om het nieuwe ordernummer.",
         ];
         if (!validatedCustomer && (memory.has_fit_guide === "ja" || memory.fit_guide_source === "gekocht")) {
-          guardLines.push("Deze persoon heeft de Fit Guide. Geen algemene introductie en nooit opnieuw de gids verkopen. Help eerst bij de gids; werk vervolgens alleen wanneer passend vriendelijk en subtiel richting Juice Plus-programma’s. Gidsbezit alleen maakt niemand Juice Plus-klant.");
+          guardLines.push("Deze persoon heeft volgens de CRM-context de Fit Guide. Beantwoord de actuele vraag vriendelijk. Bij een prijs- of koopvraag: €39, erken dat opnieuw kopen voor zichzelf niet nodig is, geen ongevraagde bestellink of programma-aanbod. Help bij gidsvragen zonder betaalde gidsinhoud te verzinnen. Gidsbezit alleen maakt niemand Juice Plus-klant en is geen technisch gecontroleerd downloadrecht.");
         }
         if (memory.has_fit_guide === "onbekend" || !memory.has_fit_guide) {
           guardLines.push("Onbekende Fit Guide-status is geen nee. Beantwoord het huidige bericht; vraag alleen naar gidsbezit wanneer dat echt relevant is.");
         }
         if (guardWebsiteSent) {
           guardLines.push(
-            'De website-link en het freebies-blok zijn AL gestuurd. Stuur ze NIET opnieuw uit jezelf — verwijs in woorden naar "de pagina die ik je stuurde". Alleen opnieuw sturen als de klant er expliciet om vraagt (bijvoorbeeld link kwijt), en dan alleen de kale link zonder freebies-blok. In coaching-modus mag de link alleen gedeeld worden als recepten-tool wanneer de klant zelf om recepten of inspiratie vraagt.'
+            'De website-link en het freebies-blok zijn AL gestuurd. Stuur ze NIET opnieuw uit jezelf — verwijs in woorden naar "de pagina die ik je stuurde". Alleen opnieuw sturen als de klant er expliciet om vraagt (bijvoorbeeld link kwijt), en dan alleen de kale link zonder freebies-blok. Passende inhoudelijke links naar openbare artikelen, recepten en hulpmiddelen blijven toegestaan, ook in coaching. Dat is geen herhaling van het commerciële programma- of voordelenblok.'
           );
         }
         if (guardTestimonialsSent) {
           guardLines.push(
-            "De testimonials-link is AL gedeeld. Stuur hem NIET opnieuw, ook niet bij twijfel of bezwaar (sectie 8.4 en 8.6) — dezelfde link twee keer sturen voelt automatisch. Verwijs in woorden naar de resultaten en vraag gerust of de klant ze al heeft kunnen bekijken. Twijfelt de klant vooral over WELK programma past: stuur dan de programma-uitleg pagina https://nutritionworks.online/#programma-info (mits die nog niet gedeeld is). Alleen als de klant expliciet om de testimonials-link vraagt, stuur je hem opnieuw."
+            "De testimonials-link is AL gedeeld. Stuur hem NIET opnieuw, ook niet bij twijfel of bezwaar (sectie 8.4 en 8.6) — dezelfde link twee keer sturen voelt automatisch. Verwijs zo nodig in woorden naar de resultaten. Vraag niet of de klant al heeft gekeken en jaag niet op. Twijfelt de klant vooral over WELK programma past: stuur dan de programma-uitleg pagina https://nutritionworks.online/#programmes (mits die nog niet gedeeld is). Alleen als de klant expliciet om de testimonials-link vraagt, stuur je hem opnieuw."
           );
         }
         if (guardProgrammaInfoSent) {
@@ -2780,6 +2811,7 @@ app.post("/chat", async (req, res) => {
       reply = fallbackReplyForLanguage(conversationLanguage);
     }
     if (validatedNow) reply = stripTrailingCoachingQuestions(reply);
+    reply = blockProtectedGuideDownload(canonicalizePublicLinks(reply), conversationLanguage);
     const finalCustomerStatusUpdate =
       validatedNow && normalizedCustomerStatus.toLowerCase() !== "customer" ? "customer" : "";
     const finalCurrentPhaseUpdate = memory.order_event === "confirmed" ? "coaching" :
