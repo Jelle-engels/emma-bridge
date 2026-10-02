@@ -3,7 +3,7 @@ import express from "express";
 import WebSocket from "ws";
 import OpenAI from "openai";
 import dotenv from "dotenv";
-import { randomUUID } from "crypto";
+import { randomUUID, createHash, timingSafeEqual } from "crypto";
 import { franc } from "franc-min";
 
 dotenv.config();
@@ -11,9 +11,30 @@ dotenv.config();
 // Guide access is isolated and fails closed until private configuration is ready.
 
 const app = express();
-const SERVER_BUILD_ID = "emma-private-guide-v1-2026-10-02";
+const SERVER_BUILD_ID = "emma-request-auth-v1-2026-10-02";
 const guideRuntime = initGuideRuntime({ express });
 app.use("/guide-access", guideRuntime.router);
+// Only the owner's authenticated Make scenario may call the conversation route.
+// This check is local and synchronous: it adds no network call, wait or retry.
+// Never place the shared key in browser code, request URLs or diagnostic logs.
+function createChatAuthentication(secret) {
+  const validKey = value => typeof value === "string" && /^[A-Za-z0-9_-]{43}$/.test(value);
+  const expected = validKey(secret) ? createHash("sha256").update(secret).digest() : null;
+  return (req, res, next) => {
+    if (req.method !== "POST") return next();
+    res.set("Cache-Control", "no-store");
+    if (!expected) return res.status(503).json({ error: "temporarily_unavailable" });
+    const supplied = req.get("x-emma-bridge-key");
+    if (!validKey(supplied) || !timingSafeEqual(expected, createHash("sha256").update(supplied).digest())) {
+      return res.status(401).json({ error: "unauthorized" });
+    }
+    // Server-owned context only; never trust a matching flag in the JSON body.
+    res.locals.emmaMakeAuthenticated = true;
+    return next();
+  };
+}
+app.use("/chat", createChatAuthentication(process.env.EMMA_MAKE_SHARED_SECRET));
+
 // Accept JSON bodies (Make scenarios that already work).
 app.use(express.json({ limit: "1mb" }));
 // Also accept application/x-www-form-urlencoded bodies. ManyChat (via Make)
