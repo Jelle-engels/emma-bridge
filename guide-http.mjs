@@ -4,7 +4,7 @@ import {createHash} from 'node:crypto';
 import {isIP} from 'node:net';
 import {AccessError} from './guide-access.mjs';
 
-const MESSAGES={invalid_code:'Deze code klopt niet of is verlopen. Controleer de code of vraag een nieuwe aan.',access_denied:'Je toegang kon niet worden bevestigd. Mail ons op info@nutritionworks.online; we helpen je graag.',login_required:'Vul je e-mailadres in om opnieuw toegang te krijgen.',try_later:'Je hebt het te vaak geprobeerd. Probeer het later opnieuw.',temporarily_unavailable:'Dit lukt op dit moment niet. Probeer het straks opnieuw.'};
+const MESSAGES={invalid_code:'Deze code klopt niet of is verlopen. Controleer de code of vraag een nieuwe aan.',access_denied:'Je toegang kon niet worden bevestigd. Stuur gerust een berichtje naar Emma via nutritionworks.online/#emma; zij helpt je graag.',login_required:'Vul je e-mailadres in om opnieuw toegang te krijgen.',try_later:'Je hebt het te vaak geprobeerd. Probeer het later opnieuw.',temporarily_unavailable:'Dit lukt op dit moment niet. Probeer het straks opnieuw.'};
 export async function verifyGuideFile(file,expectedHash){
  if(!/^[a-f0-9]{64}$/.test(expectedHash||''))throw Error('Guide fingerprint is required');
  const s=statSync(file);if(!s.isFile()||s.size<1000||s.size>50_000_000)throw Error('Invalid guide source');
@@ -16,7 +16,7 @@ export async function verifyGuideFile(file,expectedHash){
 // be supplied after its proxy path has been verified. The socket IP is fail-safe:
 // a shared proxy may hit a limit, but cannot be spoofed by the requesting browser.
 export function clientIP(req){return isIP(req.socket?.remoteAddress||'')?req.socket.remoteAddress:null;}
-export function createGuideRouter({express,access,pdfPath,pdfSize,origins=['https://nutritionworks.online'],ipResolver=clientIP,onFault=()=>{}}){
+export function createGuideRouter({express,access,pdfPath,pdfSize,reader=null,origins=['https://nutritionworks.online'],ipResolver=clientIP,onFault=()=>{}}){
  const router=express.Router(),allowed=new Set(origins);
  router.use((req,res,next)=>{
   res.set({'Cache-Control':'no-store, private, max-age=0','Pragma':'no-cache','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer','X-Robots-Tag':'noindex, nofollow','Vary':'Origin'});
@@ -47,11 +47,29 @@ export function createGuideRouter({express,access,pdfPath,pdfSize,origins=['http
   await access.authorize(bearer(req));res.json({authorized:true});
  }));
  router.post('/logout',wrap(async(req,res)=>{cleanBody(req,[]);access.logout(bearer(req));res.sendStatus(204);}));
+ router.get('/reader',wrap(async(req,res)=>{
+  const grant=await access.authorize(bearer(req));
+  if(!reader)throw new AccessError(503,'temporarily_unavailable');
+  res.json({...reader.index(),personalEmail:grant.email});
+ }));
+ router.post('/reader/page',wrap(async(req,res)=>{
+  const body=cleanBody(req,['page']);
+  if(!Number.isInteger(body.page)||body.page<1||body.page>205)throw new AccessError(400,'invalid_request');
+  const grant=await access.authorize(bearer(req));
+  if(!reader)throw new AccessError(503,'temporarily_unavailable');
+  // Neither the customer nor the page URL can choose a watermark identity.
+  res.json(await reader.page(body.page,grant.email));
+ }));
+ router.get('/worksheets',wrap(async(req,res)=>{
+  await access.authorize(bearer(req));
+  if(!reader)throw new AccessError(503,'temporarily_unavailable');
+  const pdf=await reader.worksheets();
+  res.set({'Content-Type':'application/pdf','Content-Disposition':'attachment; filename="Nutrition_Works_Invulbladen.pdf"','Content-Security-Policy':"sandbox; default-src 'none'"});
+  res.send(pdf);
+ }));
  router.get('/download',wrap(async(req,res)=>{
   await access.authorize(bearer(req));
-  res.set({'Content-Type':'application/pdf','Content-Length':String(pdfSize),'Content-Disposition':'attachment; filename="Nutrition_Works_Startgids.pdf"','Content-Security-Policy':"sandbox; default-src 'none'"});
-  const stream=createReadStream(pdfPath);stream.on('error',()=>{onFault('guide_read_failed');res.destroy();});
-  res.on('close',()=>stream.destroy());stream.pipe(res);
+  res.status(410).json({error:'online_reader',message:'De gids lees je nu online. Vernieuw de toegangspagina om je gids te openen.'});
  }));
  router.use((req,res)=>res.status(404).json({error:'not_found'}));
  router.use((err,req,res,next)=>{

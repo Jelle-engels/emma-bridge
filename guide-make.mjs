@@ -27,6 +27,13 @@ export function makeAdapters({url,serviceKey,fetchImpl=fetch}){
    if(!Array.isArray(data?.records))throw new AccessError(503,'temporarily_unavailable');
    if(data.records.length!==1||data.offset)return null;
    const g=canonicalGrant(data.records[0]);return g?.email===email?g:null;
+  },
+  async findByUserId(userId){
+   if(typeof userId!=='string'||!/^\d{8,15}$/.test(userId))return null;
+   const data=await invoke('find',{formula:`AND({user_id}=${JSON.stringify(userId)},{access_status}="active")`},4000);
+   if(!Array.isArray(data?.records))throw new AccessError(503,'temporarily_unavailable');
+   if(data.records.length!==1||data.offset)return null;
+   const g=canonicalGrant(data.records[0]);return g?.userId===userId?g:null;
   }
  };
  const mailer=async data=>{
