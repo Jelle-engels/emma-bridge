@@ -1,3 +1,4 @@
+import { initGuideRuntime } from "./guide-runtime.mjs";
 import express from "express";
 import WebSocket from "ws";
 import OpenAI from "openai";
@@ -7,8 +8,12 @@ import { franc } from "franc-min";
 
 dotenv.config();
 
+// Guide access is isolated and fails closed until private configuration is ready.
+
 const app = express();
-const SERVER_BUILD_ID = "emma-links-guideguard-v2-2026-10-02";
+const SERVER_BUILD_ID = "emma-private-guide-v1-2026-10-02";
+const guideRuntime = initGuideRuntime({ express });
+app.use("/guide-access", guideRuntime.router);
 // Accept JSON bodies (Make scenarios that already work).
 app.use(express.json({ limit: "1mb" }));
 // Also accept application/x-www-form-urlencoded bodies. ManyChat (via Make)
