@@ -52,6 +52,10 @@ export class GuideAccess {
     token_hash TEXT PRIMARY KEY, grant_id TEXT NOT NULL, grant_version INTEGER NOT NULL,
     recipient_hash TEXT NOT NULL, expires INTEGER NOT NULL
    ) STRICT;
+   CREATE TABLE IF NOT EXISTS worksheet_tickets (
+    token_hash TEXT PRIMARY KEY, session_hash TEXT NOT NULL REFERENCES sessions(token_hash) ON DELETE CASCADE,
+    disposition TEXT NOT NULL CHECK(disposition IN ('inline','attachment')), expires INTEGER NOT NULL
+   ) STRICT;
    CREATE TABLE IF NOT EXISTS limits (
     bucket TEXT PRIMARY KEY, used INTEGER NOT NULL, expires INTEGER NOT NULL
    ) STRICT;
@@ -69,7 +73,7 @@ export class GuideAccess {
  decrypt(value){const b=Buffer.from(value,'base64url'),d=createDecipheriv('aes-256-gcm',this.key,b.subarray(0,12));d.setAuthTag(b.subarray(12,28));return JSON.parse(Buffer.concat([d.update(b.subarray(28)),d.final()]).toString('utf8'));}
  transaction(fn){this.db.exec('BEGIN IMMEDIATE');try{const r=fn();this.db.exec('COMMIT');return r;}catch(e){this.db.exec('ROLLBACK');throw e;}}
  audit(event,subject=''){this.db.prepare('INSERT INTO audit(event,occurred,subject_hash) VALUES(?,?,?)').run(event,this.now(),subject?this.mac('audit',subject):null);}
- cleanup(){const now=this.now();this.db.prepare('DELETE FROM requests WHERE expires<?').run(now-HOUR);this.db.prepare('DELETE FROM sessions WHERE expires<?').run(now);this.db.prepare('DELETE FROM limits WHERE expires<?').run(now);this.db.prepare('DELETE FROM audit WHERE occurred<?').run(now-30*DAY);}
+ cleanup(){const now=this.now();this.db.prepare('DELETE FROM worksheet_tickets WHERE expires<=?').run(now);this.db.prepare('DELETE FROM requests WHERE expires<?').run(now-HOUR);this.db.prepare('DELETE FROM sessions WHERE expires<?').run(now);this.db.prepare('DELETE FROM limits WHERE expires<?').run(now);this.db.prepare('DELETE FROM audit WHERE occurred<?').run(now-30*DAY);}
  budget(scope,value,maximum,period){
   const now=this.now(),start=Math.floor(now/period)*period,bucket=this.mac('limit',scope+'|'+start+'|'+value);
   const row=this.db.prepare('SELECT used FROM limits WHERE bucket=?').get(bucket);
@@ -148,13 +152,36 @@ export class GuideAccess {
  }
  async authorize(sessionToken){
   if(!TOKEN.test(sessionToken||''))throw new AccessError(401,'login_required');
-  const digest=this.mac('session',sessionToken),s=this.db.prepare('SELECT * FROM sessions WHERE token_hash=?').get(digest);
+  return this.authorizeSessionHash(this.mac('session',sessionToken));
+ }
+ async authorizeSessionHash(digest){
+  const s=this.db.prepare('SELECT * FROM sessions WHERE token_hash=?').get(digest);
   if(!s||s.expires<=this.now())throw new AccessError(401,'login_required');
   let g;try{g=verifiedGrant(await this.provider.get(s.grant_id),this.now());}catch{throw new AccessError(503,'temporarily_unavailable');}
   if(!g||g.id!==s.grant_id||g.version!==s.grant_version||!equal(this.mac('recipient',g.email),s.recipient_hash)){
    this.db.prepare('DELETE FROM sessions WHERE token_hash=?').run(digest);throw new AccessError(403,'access_denied');
   }
   return g;
+ }
+ // A form navigation cannot set an Authorization header. Issue a short, one-use
+ // credential scoped ONLY to the printable worksheets. Never put it in a URL.
+ async worksheetTicket(sessionToken,disposition){
+  if(!['inline','attachment'].includes(disposition))throw new AccessError(400,'invalid_request');
+  await this.authorize(sessionToken);this.cleanup();
+  const digest=this.mac('session',sessionToken),s=this.db.prepare('SELECT expires FROM sessions WHERE token_hash=?').get(digest);
+  if(!s||s.expires<=this.now())throw new AccessError(401,'login_required');
+  if(!this.transaction(()=>this.budget('worksheet-ticket',digest,30,10*MINUTE)))throw new AccessError(429,'try_later');
+  const ticket=token(),expiresAt=Math.min(this.now()+2*MINUTE,s.expires);
+  this.db.prepare('INSERT INTO worksheet_tickets VALUES(?,?,?,?)').run(this.mac('worksheet-ticket',ticket),digest,disposition,expiresAt);
+  return {ticket,expiresAt};
+ }
+ async consumeWorksheetTicket(ticket){
+  if(!TOKEN.test(ticket||''))throw new AccessError(401,'login_required');
+  const digest=this.mac('worksheet-ticket',ticket);
+  const row=this.transaction(()=>{const r=this.db.prepare('SELECT * FROM worksheet_tickets WHERE token_hash=?').get(digest);this.db.prepare('DELETE FROM worksheet_tickets WHERE token_hash=?').run(digest);return r;});
+  if(!row||row.expires<=this.now())throw new AccessError(401,'login_required');
+  await this.authorizeSessionHash(row.session_hash);
+  return row.disposition;
  }
  logout(sessionToken){if(TOKEN.test(sessionToken||''))this.db.prepare('DELETE FROM sessions WHERE token_hash=?').run(this.mac('session',sessionToken));}
 }

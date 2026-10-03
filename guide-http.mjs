@@ -28,7 +28,7 @@ export function createGuideRouter({express,access,pdfPath,pdfSize,reader=null,or
   if(Object.keys(req.query||{}).length)return res.status(400).json({error:'invalid_request'});
   next();
  });
- router.use((req,res,next)=>{if(req.method==='POST'&&!req.is('application/json'))return res.status(415).json({error:'json_required'});next();});
+ router.use((req,res,next)=>{const worksheetForm=req.path==='/worksheets/file'&&req.is('application/x-www-form-urlencoded');if(req.method==='POST'&&!req.is('application/json')&&!worksheetForm)return res.status(415).json({error:'json_required'});next();});
  router.use(express.json({limit:'4kb',strict:true}));
  const wrap=fn=>(req,res,next)=>Promise.resolve().then(()=>fn(req,res)).catch(next);
  const bearer=req=>{const match=/^Bearer ([A-Za-z0-9_-]{43})$/.exec(req.get('authorization')||'');return match?.[1]||'';};
@@ -65,6 +65,19 @@ export function createGuideRouter({express,access,pdfPath,pdfSize,reader=null,or
   if(!reader)throw new AccessError(503,'temporarily_unavailable');
   const pdf=await reader.worksheets();
   res.set({'Content-Type':'application/pdf','Content-Disposition':'attachment; filename="Nutrition_Works_Invulbladen.pdf"','Content-Security-Policy':"sandbox; default-src 'none'"});
+  res.send(pdf);
+ }));
+ router.post('/worksheets/ticket',wrap(async(req,res)=>{
+  const body=cleanBody(req,['disposition']);
+  res.json(await access.worksheetTicket(bearer(req),body.disposition));
+ }));
+ router.post('/worksheets/file',express.urlencoded({extended:false,limit:'1kb'}),wrap(async(req,res)=>{
+  if(!req.is('application/x-www-form-urlencoded'))throw new AccessError(415,'invalid_request');
+  const body=cleanBody(req,['ticket']),disposition=await access.consumeWorksheetTicket(body.ticket);
+  if(!reader)throw new AccessError(503,'temporarily_unavailable');
+  const pdf=await reader.worksheets();
+  // Ordinary HTTPS response: no blob navigation, popup or reusable public link.
+  res.set({'Content-Type':'application/pdf','Content-Disposition':disposition+'; filename="Nutrition_Works_Invulbladen.pdf"','Content-Security-Policy':"sandbox allow-downloads; default-src 'none'; frame-ancestors 'none'"});
   res.send(pdf);
  }));
  router.get('/download',wrap(async(req,res)=>{
