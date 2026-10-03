@@ -140,7 +140,8 @@ export class GuideAccess {
   // Fresh lookup after consuming the code: revoked/changed grants cannot log in.
   let current;try{current=verifiedGrant(await this.provider.get(matched.grant_id),this.now());}catch{throw new AccessError(503,'temporarily_unavailable');}
   if(!current||current.id!==matched.grant_id||current.version!==matched.grant_version||!equal(this.mac('recipient',current.email),matched.recipient_hash))throw new AccessError(403,'access_denied');
-  const session=token(),expires=this.now()+12*HOUR;
+  // Fixed lifetime from successful verification, never extended by reading.
+  const session=token(),expires=this.now()+72*HOUR;
   this.db.prepare('INSERT INTO sessions VALUES(?,?,?,?,?)').run(this.mac('session',session),current.id,current.version,matched.recipient_hash,expires);
   this.audit('access_verified',current.id);
   return {sessionToken:session,expiresAt:expires};
